@@ -29,24 +29,16 @@ var PageInfoType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
-// ConnectionArgs returns standard Relay connection arguments.
+// ConnectionArgs returns standard Relay connection arguments for forward pagination.
 func ConnectionArgs() graphql.FieldConfigArgument {
 	return graphql.FieldConfigArgument{
 		"first": &graphql.ArgumentConfig{
 			Type:        graphql.Int,
-			Description: "Number of items to return from the start",
+			Description: "Number of items to return (default 20)",
 		},
 		"after": &graphql.ArgumentConfig{
 			Type:        graphql.String,
 			Description: "Cursor to start after (forward pagination)",
-		},
-		"last": &graphql.ArgumentConfig{
-			Type:        graphql.Int,
-			Description: "Number of items to return from the end",
-		},
-		"before": &graphql.ArgumentConfig{
-			Type:        graphql.String,
-			Description: "Cursor to start before (backward pagination)",
 		},
 	}
 }

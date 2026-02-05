@@ -285,11 +285,6 @@ func (c *Consumer) processEvents(ctx context.Context) {
 			)
 		}
 
-		// Update cursor
-		c.cursorMu.Lock()
-		c.cursor = event.TimeUS
-		c.cursorMu.Unlock()
-
 		// Process commit events
 		if event.IsCommit() {
 			if err := c.handleCommit(ctx, event); err != nil {
@@ -301,8 +296,14 @@ func (c *Consumer) processEvents(ctx context.Context) {
 				c.statsMu.Lock()
 				c.stats.Errors++
 				c.statsMu.Unlock()
+				continue // Don't advance cursor on failure
 			}
 		}
+
+		// Update cursor only after successful processing
+		c.cursorMu.Lock()
+		c.cursor = event.TimeUS
+		c.cursorMu.Unlock()
 	}
 }
 

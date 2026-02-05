@@ -15,6 +15,11 @@ const (
 	// DefaultJetstreamURL is the default Jetstream endpoint.
 	DefaultJetstreamURL = "wss://jetstream2.us-west.bsky.network/subscribe"
 
+	// EventChannelBufferSize is the buffer size for the event channel between
+	// the WebSocket reader and the consumer. Larger buffers absorb short bursts
+	// but delay backpressure detection.
+	EventChannelBufferSize = 1000
+
 	// Default timeouts
 	defaultWriteTimeout = 10 * time.Second
 	defaultPongWait     = 60 * time.Second
@@ -58,7 +63,7 @@ func NewClient(config ClientConfig) *Client {
 
 	return &Client{
 		config: config,
-		events: make(chan *Event, 1000), // Buffer for events
+		events: make(chan *Event, EventChannelBufferSize),
 		done:   make(chan struct{}),
 	}
 }
@@ -160,11 +165,11 @@ func (c *Client) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Send to event channel (non-blocking)
+		// Send to event channel (blocking with context)
 		select {
 		case c.events <- event:
-		default:
-			slog.Warn("Event channel full, dropping event")
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }

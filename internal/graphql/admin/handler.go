@@ -43,21 +43,8 @@ func NewHandler(repos *Repositories, middleware *oauth.AuthMiddleware, configRep
 }
 
 // ServeHTTP handles admin GraphQL HTTP requests.
+// CORS is handled by the router-level middleware; not duplicated here.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Handle CORS
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	allowedHeaders := "Content-Type, Authorization, DPoP"
-	if h.trustProxyHeaders {
-		allowedHeaders += ", X-User-DID"
-	}
-	w.Header().Set("Access-Control-Allow-Headers", allowedHeaders)
-
-	if r.Method == "OPTIONS" {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
 	// Parse the request
 	var params struct {
 		Query         string                 `json:"query"`

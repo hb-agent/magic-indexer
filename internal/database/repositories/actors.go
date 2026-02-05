@@ -68,8 +68,8 @@ func (r *ActorsRepository) BatchUpsert(ctx context.Context, actors []ActorData) 
 		return nil
 	}
 
-	// Process in batches of 100 (2 params per actor)
-	batchSize := 100
+	// Process in batches to stay within SQL parameter limits
+	batchSize := BatchInsertSize
 	for i := 0; i < len(actors); i += batchSize {
 		end := i + batchSize
 		if end > len(actors) {

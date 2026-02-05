@@ -7,12 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
-	"time"
+	"strings"
 
 	"github.com/graphql-go/graphql"
 
-	"github.com/GainForest/hypergoat/internal/atproto"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/graphql/query"
 	"github.com/GainForest/hypergoat/internal/graphql/resolver"
@@ -390,30 +388,11 @@ func (b *Builder) buildQueryType() *graphql.Object {
 	})
 }
 
-// recordWithTimestamp holds a record and its effective timestamp for sorting
-type recordWithTimestamp struct {
-	record    *repositories.Record
-	value     map[string]interface{}
-	node      interface{} // The GraphQL node to return in edges
-	timestamp time.Time
-}
-
-// getRecordTimestamp extracts the best timestamp for sorting:
-// prefers createdAt from JSON value, falls back to indexed_at
-func getRecordTimestamp(rec *repositories.Record, value map[string]interface{}) time.Time {
-	if createdAt, ok := value["createdAt"].(string); ok && createdAt != "" {
-		if t := atproto.ParseTimestamp(createdAt); !t.IsZero() {
-			return t
-		}
-	}
-	return rec.IndexedAt
-}
-
 // nodeBuilder transforms a Record and its parsed JSON into a GraphQL node.
 type nodeBuilder func(rec *repositories.Record, value map[string]interface{}) (interface{}, bool)
 
 // resolveRecordConnection is the shared implementation for paginated record queries.
-// It handles cursor-based pagination with re-sorting by createdAt.
+// It uses deterministic keyset pagination with a composite (indexed_at, uri) cursor.
 func (b *Builder) resolveRecordConnection(
 	p graphql.ResolveParams,
 	collection string,
@@ -431,75 +410,44 @@ func (b *Builder) resolveRecordConnection(
 	}
 	after, _ := p.Args["after"].(string)
 
-	// Decode cursor to timestamp if provided
-	var afterTimestamp string
+	// Decode composite cursor if provided
+	var afterTimestamp, afterURI string
 	if after != "" {
 		var err error
-		afterTimestamp, err = decodeCursor(after)
+		afterTimestamp, afterURI, err = decodeCursor(after)
 		if err != nil {
 			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
 	}
 
-	// Fetch extra records to allow for re-sorting by createdAt
-	fetchLimit := first * 2
-	if fetchLimit < 50 {
-		fetchLimit = 50
-	}
-
-	// Query database with cursor (ordered by indexed_at DESC)
-	records, err := repos.Records.GetByCollectionWithCursor(p.Context, collection, fetchLimit, afterTimestamp)
+	// Fetch first+1 to determine hasNextPage
+	records, err := repos.Records.GetByCollectionWithKeysetCursor(p.Context, collection, first+1, afterTimestamp, afterURI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query records: %w", err)
 	}
 
-	// Parse JSON and extract timestamps for sorting
-	recordsWithTs := make([]recordWithTimestamp, 0, len(records))
+	// Determine if there are more results
+	hasNextPage := len(records) > first
+	if hasNextPage {
+		records = records[:first]
+	}
+
+	// Build edges
+	edges := make([]interface{}, 0, len(records))
+	var startCursor, endCursor string
+
 	for _, rec := range records {
 		var value map[string]interface{}
 		if err := json.Unmarshal([]byte(rec.JSON), &value); err != nil {
 			continue // Skip records with invalid JSON
 		}
 
-		if node, ok := buildNode(rec, value); ok {
-			recordsWithTs = append(recordsWithTs, recordWithTimestamp{
-				record:    rec,
-				value:     value,
-				node:      node,
-				timestamp: getRecordTimestamp(rec, value),
-			})
+		node, ok := buildNode(rec, value)
+		if !ok {
+			continue
 		}
-	}
 
-	// Sort by effective timestamp (createdAt or indexed_at) DESC
-	sort.Slice(recordsWithTs, func(i, j int) bool {
-		return recordsWithTs[i].timestamp.After(recordsWithTs[j].timestamp)
-	})
-
-	// Filter by cursor timestamp if provided (for proper pagination after re-sort)
-	if afterTimestamp != "" {
-		cursorTime, _ := time.Parse("2006-01-02 15:04:05", afterTimestamp)
-		filtered := make([]recordWithTimestamp, 0, len(recordsWithTs))
-		for _, r := range recordsWithTs {
-			if r.timestamp.Before(cursorTime) {
-				filtered = append(filtered, r)
-			}
-		}
-		recordsWithTs = filtered
-	}
-
-	// Determine if there are more results
-	hasNextPage := len(recordsWithTs) > first
-	if hasNextPage {
-		recordsWithTs = recordsWithTs[:first]
-	}
-
-	// Build edges
-	edges := make([]interface{}, 0, len(recordsWithTs))
-	var startCursor, endCursor string
-
-	for _, r := range recordsWithTs {
-		cursor := encodeCursor(r.timestamp.Format("2006-01-02 15:04:05"))
+		cursor := encodeCursor(rec.IndexedAt.Format("2006-01-02T15:04:05Z"), rec.URI)
 		if startCursor == "" {
 			startCursor = cursor
 		}
@@ -507,7 +455,7 @@ func (b *Builder) resolveRecordConnection(
 
 		edges = append(edges, map[string]interface{}{
 			"cursor": cursor,
-			"node":   r.node,
+			"node":   node,
 		})
 	}
 
@@ -685,18 +633,22 @@ func emptyConnection() map[string]interface{} {
 	}
 }
 
-// encodeCursor encodes a URI as a base64 cursor.
-func encodeCursor(uri string) string {
-	return base64.URLEncoding.EncodeToString([]byte(uri))
+// encodeCursor encodes a composite (indexed_at, uri) cursor as base64.
+func encodeCursor(indexedAt, uri string) string {
+	return base64.URLEncoding.EncodeToString([]byte(indexedAt + "|" + uri))
 }
 
-// decodeCursor decodes a base64 cursor to a URI.
-func decodeCursor(cursor string) (string, error) {
+// decodeCursor decodes a base64 cursor into (indexed_at, uri) components.
+func decodeCursor(cursor string) (string, string, error) {
 	data, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return string(data), nil
+	parts := strings.SplitN(string(data), "|", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("malformed cursor: expected 'timestamp|uri'")
+	}
+	return parts[0], parts[1], nil
 }
 
 // GetRecordType returns the GraphQL type for a record.

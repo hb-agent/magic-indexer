@@ -243,6 +243,18 @@ func setupRouter(cfg *config.Config, svc *services) *chi.Mux {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 
+	// CORS — uses AllowedOrigins from config; defaults to "*" if not set
+	var allowedOrigins []string
+	if cfg.AllowedOrigins != "" {
+		for _, o := range strings.Split(cfg.AllowedOrigins, ",") {
+			allowedOrigins = append(allowedOrigins, strings.TrimSpace(o))
+		}
+	}
+	r.Use(server.CORSMiddleware(server.CORSConfig{
+		AllowedOrigins:    allowedOrigins,
+		TrustProxyHeaders: cfg.TrustProxyHeaders,
+	}))
+
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

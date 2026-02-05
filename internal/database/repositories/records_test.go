@@ -422,6 +422,91 @@ func TestRecordsRepository_GetByCollectionWithCursor(t *testing.T) {
 	})
 }
 
+func TestRecordsRepository_GetByCollectionWithKeysetCursor(t *testing.T) {
+	env := setupRecordsTestEnv(t)
+	repo := env.repo
+	ctx := context.Background()
+
+	sqlDB := env.db.Executor.DB()
+
+	// Insert records with distinct indexed_at timestamps
+	insertTestRecord(t, repo, "at://did:plc:test1/app.bsky.feed.post/k1", "bafyreik1", "did:plc:test1", "app.bsky.feed.post", `{"text":"k1"}`)
+	_, _ = sqlDB.ExecContext(ctx, `UPDATE record SET indexed_at = '2026-01-15T10:00:00Z' WHERE uri = 'at://did:plc:test1/app.bsky.feed.post/k1'`)
+
+	insertTestRecord(t, repo, "at://did:plc:test1/app.bsky.feed.post/k2", "bafyreik2", "did:plc:test1", "app.bsky.feed.post", `{"text":"k2"}`)
+	_, _ = sqlDB.ExecContext(ctx, `UPDATE record SET indexed_at = '2026-01-15T11:00:00Z' WHERE uri = 'at://did:plc:test1/app.bsky.feed.post/k2'`)
+
+	// k3a and k3b have the SAME indexed_at to test URI tiebreaking
+	insertTestRecord(t, repo, "at://did:plc:test1/app.bsky.feed.post/k3a", "bafyreik3a", "did:plc:test1", "app.bsky.feed.post", `{"text":"k3a"}`)
+	_, _ = sqlDB.ExecContext(ctx, `UPDATE record SET indexed_at = '2026-01-15T12:00:00Z' WHERE uri = 'at://did:plc:test1/app.bsky.feed.post/k3a'`)
+
+	insertTestRecord(t, repo, "at://did:plc:test1/app.bsky.feed.post/k3b", "bafyreik3b", "did:plc:test1", "app.bsky.feed.post", `{"text":"k3b"}`)
+	_, _ = sqlDB.ExecContext(ctx, `UPDATE record SET indexed_at = '2026-01-15T12:00:00Z' WHERE uri = 'at://did:plc:test1/app.bsky.feed.post/k3b'`)
+
+	insertTestRecord(t, repo, "at://did:plc:test1/app.bsky.feed.post/k4", "bafyreik4", "did:plc:test1", "app.bsky.feed.post", `{"text":"k4"}`)
+	_, _ = sqlDB.ExecContext(ctx, `UPDATE record SET indexed_at = '2026-01-15T13:00:00Z' WHERE uri = 'at://did:plc:test1/app.bsky.feed.post/k4'`)
+
+	t.Run("first page without cursor", func(t *testing.T) {
+		records, err := repo.GetByCollectionWithKeysetCursor(ctx, "app.bsky.feed.post", 3, "", "")
+		if err != nil {
+			t.Fatalf("error: %v", err)
+		}
+		if len(records) != 3 {
+			t.Fatalf("got %d records, want 3", len(records))
+		}
+		// Newest first: k4, k3b, k3a (k3b > k3a by URI DESC)
+		if records[0].URI != "at://did:plc:test1/app.bsky.feed.post/k4" {
+			t.Errorf("first record URI = %q, want k4", records[0].URI)
+		}
+		if records[1].URI != "at://did:plc:test1/app.bsky.feed.post/k3b" {
+			t.Errorf("second record URI = %q, want k3b", records[1].URI)
+		}
+		if records[2].URI != "at://did:plc:test1/app.bsky.feed.post/k3a" {
+			t.Errorf("third record URI = %q, want k3a", records[2].URI)
+		}
+	})
+
+	t.Run("keyset cursor skips to correct position", func(t *testing.T) {
+		// Cursor is after k3b (same timestamp as k3a, but k3b > k3a by URI)
+		records, err := repo.GetByCollectionWithKeysetCursor(ctx, "app.bsky.feed.post", 10,
+			"2026-01-15T12:00:00Z", "at://did:plc:test1/app.bsky.feed.post/k3b")
+		if err != nil {
+			t.Fatalf("error: %v", err)
+		}
+		if len(records) != 3 {
+			t.Fatalf("got %d records, want 3", len(records))
+		}
+		// After k3b: k3a (same timestamp, smaller URI), then k2, k1
+		if records[0].URI != "at://did:plc:test1/app.bsky.feed.post/k3a" {
+			t.Errorf("first record URI = %q, want k3a", records[0].URI)
+		}
+		if records[1].URI != "at://did:plc:test1/app.bsky.feed.post/k2" {
+			t.Errorf("second record URI = %q, want k2", records[1].URI)
+		}
+		if records[2].URI != "at://did:plc:test1/app.bsky.feed.post/k1" {
+			t.Errorf("third record URI = %q, want k1", records[2].URI)
+		}
+	})
+
+	t.Run("cursor between timestamps", func(t *testing.T) {
+		// Cursor after k3a — should return k2, k1
+		records, err := repo.GetByCollectionWithKeysetCursor(ctx, "app.bsky.feed.post", 10,
+			"2026-01-15T12:00:00Z", "at://did:plc:test1/app.bsky.feed.post/k3a")
+		if err != nil {
+			t.Fatalf("error: %v", err)
+		}
+		if len(records) != 2 {
+			t.Fatalf("got %d records, want 2", len(records))
+		}
+		if records[0].URI != "at://did:plc:test1/app.bsky.feed.post/k2" {
+			t.Errorf("first record URI = %q, want k2", records[0].URI)
+		}
+		if records[1].URI != "at://did:plc:test1/app.bsky.feed.post/k1" {
+			t.Errorf("second record URI = %q, want k1", records[1].URI)
+		}
+	})
+}
+
 func TestRecordsRepository_GetByDID(t *testing.T) {
 	repo := setupRecordsTest(t)
 	ctx := context.Background()

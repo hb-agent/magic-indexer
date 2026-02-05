@@ -3,6 +3,7 @@ package subscription
 
 import (
 	"encoding/json"
+	"log/slog"
 	"strconv"
 	"sync"
 )
@@ -17,6 +18,11 @@ const (
 	EventUpdate EventType = "update"
 	// EventDelete indicates a record was deleted.
 	EventDelete EventType = "delete"
+
+	// SubscriberBufferSize is the per-subscriber event channel buffer.
+	// PubSub drops events (non-blocking) for slow subscribers to avoid
+	// blocking the publisher. Subscribers reconnect to catch up.
+	SubscriberBufferSize = 100
 )
 
 // RecordEvent represents a record change event.
@@ -63,7 +69,7 @@ func (ps *PubSub) Subscribe(collection string) *Subscriber {
 	sub := &Subscriber{
 		ID:         id,
 		Collection: collection,
-		Events:     make(chan *RecordEvent, 100), // Buffered to prevent blocking
+		Events:     make(chan *RecordEvent, SubscriberBufferSize),
 	}
 
 	ps.subscribers[id] = sub
@@ -96,7 +102,10 @@ func (ps *PubSub) Publish(event *RecordEvent) {
 		select {
 		case sub.Events <- event:
 		default:
-			// Buffer full, drop event for this subscriber
+			slog.Debug("Subscription event dropped, buffer full",
+				"subscriber", sub.ID,
+				"collection", event.Collection,
+			)
 		}
 	}
 }
