@@ -35,15 +35,19 @@ type Repositories struct {
 	Reports          *repositories.ReportsRepository
 }
 
-// BackfillCallback is called when backfill is triggered.
+// BackfillCallback is called when single-actor backfill is triggered.
 type BackfillCallback func(ctx context.Context, did string) error
+
+// FullBackfillCallback is called when full network backfill is triggered.
+type FullBackfillCallback func(ctx context.Context) error
 
 // Resolver provides methods for resolving admin GraphQL queries and mutations.
 type Resolver struct {
-	repos            *Repositories
-	backfillActive   bool
-	domainDID        string // The DID of this labeler instance
-	backfillCallback BackfillCallback
+	repos                *Repositories
+	backfillActive       bool
+	domainDID            string // The DID of this labeler instance
+	backfillCallback     BackfillCallback
+	fullBackfillCallback FullBackfillCallback
 }
 
 // NewResolver creates a new admin resolver.
@@ -54,9 +58,14 @@ func NewResolver(repos *Repositories, domainDID string) *Resolver {
 	}
 }
 
-// SetBackfillCallback sets the callback for backfill operations.
+// SetBackfillCallback sets the callback for single-actor backfill operations.
 func (r *Resolver) SetBackfillCallback(cb BackfillCallback) {
 	r.backfillCallback = cb
+}
+
+// SetFullBackfillCallback sets the callback for full network backfill operations.
+func (r *Resolver) SetFullBackfillCallback(cb FullBackfillCallback) {
+	r.fullBackfillCallback = cb
 }
 
 // =============================================================================
@@ -246,8 +255,26 @@ func (r *Resolver) TriggerBackfill(ctx context.Context) (bool, error) {
 	if r.backfillActive {
 		return false, fmt.Errorf("backfill already in progress")
 	}
+
+	if r.fullBackfillCallback == nil {
+		return false, fmt.Errorf("full backfill not configured")
+	}
+
 	r.backfillActive = true
-	// The actual backfill is handled by the background worker that checks this flag
+
+	// Run backfill in background goroutine
+	go func() {
+		defer func() {
+			r.backfillActive = false
+		}()
+
+		// Use background context since HTTP request context will be cancelled
+		if err := r.fullBackfillCallback(context.Background()); err != nil {
+			// Error is logged by the callback
+			return
+		}
+	}()
+
 	return true, nil
 }
 
@@ -850,6 +877,61 @@ func (r *Resolver) ResetAll(ctx context.Context, confirm string) (bool, error) {
 	}
 
 	return true, nil
+}
+
+// PopulateActivity creates activity entries from existing records in the database.
+// This is useful after a backfill to populate the activity dashboard with historical data.
+func (r *Resolver) PopulateActivity(ctx context.Context) (int64, error) {
+	// First clear existing activity to avoid duplicates
+	if err := r.repos.Activity.DeleteAll(ctx); err != nil {
+		return 0, fmt.Errorf("failed to clear existing activity: %w", err)
+	}
+
+	var count int64
+	_, err := r.repos.Records.IterateAll(ctx, 1000, func(rec *repositories.Record) error {
+		// Extract createdAt from the record JSON
+		timestamp := extractCreatedAt(rec.JSON)
+
+		// Log as a successful create operation
+		_, err := r.repos.Activity.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.JSON, "success")
+		if err != nil {
+			// Log error but continue processing
+			return nil
+		}
+		count++
+		return nil
+	})
+
+	if err != nil {
+		return count, fmt.Errorf("error iterating records: %w", err)
+	}
+
+	return count, nil
+}
+
+// extractCreatedAt extracts the createdAt timestamp from a record's JSON.
+// Returns the parsed time or the current time if not found/parseable.
+func extractCreatedAt(recordJSON string) time.Time {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(recordJSON), &data); err != nil {
+		return time.Now()
+	}
+
+	createdAt, ok := data["createdAt"].(string)
+	if !ok {
+		return time.Now()
+	}
+
+	// Try parsing as RFC3339
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		// Try without timezone
+		t, err = time.Parse("2006-01-02T15:04:05", createdAt)
+		if err != nil {
+			return time.Now()
+		}
+	}
+	return t
 }
 
 // CreateLabel creates a new label on a record or account.

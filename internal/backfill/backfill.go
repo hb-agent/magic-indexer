@@ -2,6 +2,7 @@ package backfill
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -111,10 +112,11 @@ func (s *Stats) Duration() time.Duration {
 
 // Backfiller coordinates historical data backfill.
 type Backfiller struct {
-	config      Config
-	client      *Client
-	recordsRepo *repositories.RecordsRepository
-	actorsRepo  *repositories.ActorsRepository
+	config       Config
+	client       *Client
+	recordsRepo  *repositories.RecordsRepository
+	actorsRepo   *repositories.ActorsRepository
+	activityRepo *repositories.JetstreamActivityRepository
 
 	// httpSem is a global semaphore limiting concurrent HTTP requests.
 	// This prevents overwhelming the network and running out of file descriptors.
@@ -132,6 +134,7 @@ func NewBackfiller(
 	config Config,
 	recordsRepo *repositories.RecordsRepository,
 	actorsRepo *repositories.ActorsRepository,
+	activityRepo *repositories.JetstreamActivityRepository,
 ) *Backfiller {
 	// Create DID resolver with custom PLC URL
 	didResolver := oauth.NewDIDResolver(
@@ -152,6 +155,7 @@ func NewBackfiller(
 		client:           NewClient(config.RelayURL, config.PLCURL, config.MaxHTTPConcurrent),
 		recordsRepo:      recordsRepo,
 		actorsRepo:       actorsRepo,
+		activityRepo:     activityRepo,
 		httpSem:          make(chan struct{}, config.MaxHTTPConcurrent),
 		didCache:         didCache,
 		stopCacheCleanup: stopCleanup,
@@ -530,6 +534,17 @@ func (b *Backfiller) processRepo(ctx context.Context, pdsURL string, data *Atpro
 		} else {
 			insertedCount = len(filteredRecords)
 			atomic.AddInt64(&b.stats.RecordsInserted, int64(insertedCount))
+
+			// Log activity for each inserted record (with 'success' status since already inserted)
+			if b.activityRepo != nil {
+				for _, rec := range filteredRecords {
+					timestamp := extractCreatedAt(rec.JSON)
+					_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.JSON, "success")
+					if err != nil {
+						slog.Debug("[backfill] Failed to log activity", "uri", rec.URI, "error", err)
+					}
+				}
+			}
 		}
 	}
 	insertMs := time.Since(insertStart).Milliseconds()
@@ -650,6 +665,14 @@ func (b *Backfiller) processRepoLegacy(ctx context.Context, pdsURL string, data 
 			if result == repositories.Inserted {
 				totalInserted++
 				atomic.AddInt64(&b.stats.RecordsInserted, 1)
+				// Log activity for the inserted record
+				if b.activityRepo != nil {
+					timestamp := extractCreatedAt(string(rec.Value))
+					_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", collection, data.DID, string(rec.Value), "success")
+					if err != nil {
+						slog.Debug("[backfill] Failed to log activity", "uri", rec.URI, "error", err)
+					}
+				}
 			}
 		}
 	}
@@ -723,6 +746,17 @@ func (b *Backfiller) BackfillActor(ctx context.Context, did string) (int, error)
 		if err := b.recordsRepo.BatchInsert(ctx, filteredRecords); err != nil {
 			return 0, fmt.Errorf("batch insert failed: %w", err)
 		}
+
+		// Log activity for each inserted record
+		if b.activityRepo != nil {
+			for _, rec := range filteredRecords {
+				timestamp := extractCreatedAt(rec.JSON)
+				_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.JSON, "success")
+				if err != nil {
+					slog.Debug("[backfill] Failed to log activity", "uri", rec.URI, "error", err)
+				}
+			}
+		}
 	}
 
 	slog.Info("[backfill] Actor backfill complete (CAR)",
@@ -758,6 +792,14 @@ func (b *Backfiller) backfillActorLegacy(ctx context.Context, data *AtprotoData)
 
 			if result == repositories.Inserted {
 				totalRecords++
+				// Log activity for the inserted record
+				if b.activityRepo != nil {
+					timestamp := extractCreatedAt(string(rec.Value))
+					_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", collection, data.DID, string(rec.Value), "success")
+					if err != nil {
+						slog.Debug("[backfill] Failed to log activity", "uri", rec.URI, "error", err)
+					}
+				}
 			}
 		}
 	}
@@ -785,4 +827,29 @@ func ParseCollections(s string) []string {
 		}
 	}
 	return result
+}
+
+// extractCreatedAt extracts the createdAt timestamp from a record's JSON.
+// Returns the parsed time or the current time if not found/parseable.
+func extractCreatedAt(recordJSON string) time.Time {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(recordJSON), &data); err != nil {
+		return time.Now()
+	}
+
+	createdAt, ok := data["createdAt"].(string)
+	if !ok {
+		return time.Now()
+	}
+
+	// Try parsing as RFC3339
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		// Try without timezone
+		t, err = time.Parse("2006-01-02T15:04:05", createdAt)
+		if err != nil {
+			return time.Now()
+		}
+	}
+	return t
 }

@@ -441,3 +441,67 @@ func convertToAny(params []database.Value) []any {
 	}
 	return args
 }
+
+// IterateAll calls the provided function for each record in the database.
+// Records are processed in batches to manage memory usage.
+// Returns the total number of records processed.
+func (r *RecordsRepository) IterateAll(ctx context.Context, batchSize int, fn func(*Record) error) (int64, error) {
+	if batchSize <= 0 {
+		batchSize = 1000
+	}
+
+	var totalProcessed int64
+	var lastURI string
+
+	for {
+		// Fetch next batch ordered by URI (for stable pagination)
+		var sqlStr string
+		var params []database.Value
+
+		if lastURI == "" {
+			sqlStr = fmt.Sprintf("SELECT %s FROM record ORDER BY uri LIMIT %d",
+				r.recordColumns(), batchSize)
+			params = nil
+		} else {
+			sqlStr = fmt.Sprintf("SELECT %s FROM record WHERE uri > %s ORDER BY uri LIMIT %d",
+				r.recordColumns(), r.db.Placeholder(1), batchSize)
+			params = []database.Value{database.Text(lastURI)}
+		}
+
+		var args []any
+		if params != nil {
+			args = convertToAny(params)
+		}
+
+		rows, err := r.db.DB().QueryContext(ctx, sqlStr, args...)
+		if err != nil {
+			return totalProcessed, err
+		}
+
+		records, err := scanRecords(rows)
+		rows.Close()
+		if err != nil {
+			return totalProcessed, err
+		}
+
+		if len(records) == 0 {
+			break // No more records
+		}
+
+		// Process each record
+		for _, rec := range records {
+			if err := fn(rec); err != nil {
+				return totalProcessed, err
+			}
+			totalProcessed++
+			lastURI = rec.URI
+		}
+
+		// If we got fewer records than batch size, we're done
+		if len(records) < batchSize {
+			break
+		}
+	}
+
+	return totalProcessed, nil
+}

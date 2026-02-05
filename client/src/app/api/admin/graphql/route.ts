@@ -21,6 +21,9 @@ export async function POST(request: NextRequest) {
     // If user is authenticated, pass their DID
     if (session.did) {
       headers["X-User-DID"] = session.did;
+      console.log("[admin-graphql] Authenticated request", { did: session.did });
+    } else {
+      console.log("[admin-graphql] Unauthenticated request - no session DID");
     }
 
     // Proxy to Hypergoat
@@ -31,6 +34,11 @@ export async function POST(request: NextRequest) {
     });
 
     const data = await response.json();
+
+    // Log errors from Hypergoat
+    if (data.errors) {
+      console.log("[admin-graphql] GraphQL errors:", JSON.stringify(data.errors));
+    }
 
     return NextResponse.json(data, { status: response.status });
   } catch (error) {

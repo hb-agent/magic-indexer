@@ -6,58 +6,39 @@ export function GeometricBackground() {
       className="fixed inset-0 pointer-events-none select-none overflow-hidden"
       aria-hidden="true"
     >
-      <svg 
-        className="absolute top-0 right-0 w-[400px] h-full"
-        viewBox="0 0 300 800"
-        preserveAspectRatio="xMaxYMid slice"
-      >
-        <defs>
-          <linearGradient id="flowDown" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stopColor="rgb(52, 211, 153)" stopOpacity="0" />
-            <stop offset="50%" stopColor="rgb(52, 211, 153)" stopOpacity="0.4" />
-            <stop offset="100%" stopColor="rgb(52, 211, 153)" stopOpacity="0" />
-          </linearGradient>
-        </defs>
+      {/* Flow column 1 */}
+      <div className="absolute right-[220px] top-0">
+        <div className="w-1 h-20 bg-gradient-to-b from-transparent via-emerald-400/40 to-transparent rounded-full animate-[flowDown_9s_linear_infinite] [animation-fill-mode:backwards]" />
+        <div className="absolute w-6 h-6 border-[1.5px] border-emerald-400/50 animate-[flowDown_12s_linear_infinite_1s] [animation-fill-mode:backwards]" />
+        <svg className="absolute w-3 h-3 animate-[flowDown_8s_linear_infinite_5s] [animation-fill-mode:backwards]" viewBox="0 0 12 12">
+          <polygon points="6,0 12,12 0,12" fill="rgb(52, 211, 153)" opacity="0.4" />
+        </svg>
+      </div>
 
-        {/* Flow column 1 */}
-        <g>
-          <rect x="78" width="4" height="80" fill="url(#flowDown)" rx="2">
-            <animate attributeName="y" from="-80" to="800" dur="9s" repeatCount="indefinite" />
-          </rect>
-          <rect x="68" width="24" height="24" fill="none" stroke="rgb(52, 211, 153)" strokeWidth="1.5" opacity="0.5">
-            <animate attributeName="y" from="-24" to="800" dur="12s" repeatCount="indefinite" begin="1s" />
-          </rect>
-          <polygon points="80,-5 85,5 75,5" fill="none" stroke="rgb(52, 211, 153)" strokeWidth="1" opacity="0.4">
-            <animate attributeName="transform" values="translate(0,0);translate(0,816)" dur="8s" repeatCount="indefinite" begin="5s" />
-          </polygon>
-        </g>
+      {/* Flow column 2 */}
+      <div className="absolute right-[150px] top-0">
+        <div className="w-1 h-16 bg-gradient-to-b from-transparent via-emerald-400/40 to-transparent rounded-full animate-[flowDown_7s_linear_infinite_2s] [animation-fill-mode:backwards]" />
+        <svg className="absolute w-5 h-5 animate-[flowDown_10s_linear_infinite] [animation-fill-mode:backwards]" viewBox="0 0 16 16">
+          <polygon points="8,0 16,16 0,16" fill="none" stroke="rgb(52, 211, 153)" strokeWidth="1.5" opacity="0.5" />
+        </svg>
+        <div className="absolute w-3 h-3 bg-emerald-400/30 animate-[flowDown_15s_linear_infinite_4s] [animation-fill-mode:backwards]" />
+      </div>
 
-        {/* Flow column 2 */}
-        <g>
-          <rect x="148" width="4" height="60" fill="url(#flowDown)" rx="2">
-            <animate attributeName="y" from="-60" to="800" dur="7s" repeatCount="indefinite" begin="2s" />
-          </rect>
-          <polygon points="150,-12 162,12 138,12" fill="none" stroke="rgb(52, 211, 153)" strokeWidth="1.5" opacity="0.5">
-            <animate attributeName="transform" values="translate(0,0);translate(0,816)" dur="10s" repeatCount="indefinite" />
-          </polygon>
-          <rect x="145" width="10" height="10" fill="none" stroke="rgb(52, 211, 153)" strokeWidth="1" opacity="0.4">
-            <animate attributeName="y" from="-10" to="800" dur="15s" repeatCount="indefinite" begin="4s" />
-          </rect>
-        </g>
+      {/* Flow column 3 */}
+      <div className="absolute right-[80px] top-0">
+        <div className="w-1 h-[70px] bg-gradient-to-b from-transparent via-emerald-400/40 to-transparent rounded-full animate-[flowDown_11s_linear_infinite_4s] [animation-fill-mode:backwards]" />
+        <div className="absolute w-4 h-4 border-[1.5px] border-emerald-400/50 animate-[flowDown_14s_linear_infinite_3s] [animation-fill-mode:backwards]" />
+        <svg className="absolute w-4 h-4 animate-[flowDown_18s_linear_infinite_2s] [animation-fill-mode:backwards]" viewBox="0 0 12 12">
+          <polygon points="6,0 12,12 0,12" fill="none" stroke="rgb(52, 211, 153)" strokeWidth="1.5" opacity="0.4" />
+        </svg>
+      </div>
 
-        {/* Flow column 3 */}
-        <g>
-          <rect x="218" width="4" height="70" fill="url(#flowDown)" rx="2">
-            <animate attributeName="y" from="-70" to="800" dur="11s" repeatCount="indefinite" begin="4s" />
-          </rect>
-          <rect x="212" width="16" height="16" fill="none" stroke="rgb(52, 211, 153)" strokeWidth="1.5" opacity="0.5">
-            <animate attributeName="y" from="-16" to="800" dur="14s" repeatCount="indefinite" begin="3s" />
-          </rect>
-          <polygon points="220,-7 227,7 213,7" fill="none" stroke="rgb(52, 211, 153)" strokeWidth="1" opacity="0.35">
-            <animate attributeName="transform" values="translate(0,0);translate(0,816)" dur="18s" repeatCount="indefinite" begin="7s" />
-          </polygon>
-        </g>
-      </svg>
+      <style jsx>{`
+        @keyframes flowDown {
+          0% { transform: translateY(-100px); }
+          100% { transform: translateY(100vh); }
+        }
+      `}</style>
     </div>
   )
 }

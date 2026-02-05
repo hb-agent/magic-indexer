@@ -132,6 +132,36 @@ func run() error {
 		}
 	}
 
+	// Auto-populate activity from existing records if activity table is empty
+	activityRepo := repositories.NewJetstreamActivityRepository(db)
+	go func() {
+		recordCount, err := recordsRepo.GetCount(ctx)
+		if err != nil {
+			slog.Warn("Failed to get record count for activity population", "error", err)
+			return
+		}
+		if recordCount == 0 {
+			return // No records, nothing to populate
+		}
+
+		activityCount, err := activityRepo.GetCount(ctx)
+		if err != nil {
+			slog.Warn("Failed to get activity count", "error", err)
+			return
+		}
+		if activityCount > 0 {
+			return // Activity already populated
+		}
+
+		slog.Info("Populating activity from existing records...", "record_count", recordCount)
+		populated, err := populateActivityFromRecords(ctx, recordsRepo, activityRepo)
+		if err != nil {
+			slog.Error("Failed to populate activity", "error", err)
+		} else {
+			slog.Info("Activity populated from existing records", "count", populated)
+		}
+	}()
+
 	// Create router
 	r := chi.NewRouter()
 
@@ -310,12 +340,57 @@ func run() error {
 			backfillConfig.PLCURL = plcURL
 		}
 
-		actorBackfiller := backfill.NewBackfiller(backfillConfig, recordsRepo, actorsRepo)
+		backfillActivityRepo := repositories.NewJetstreamActivityRepository(db)
+		actorBackfiller := backfill.NewBackfiller(backfillConfig, recordsRepo, actorsRepo, backfillActivityRepo)
+
+		// Single actor backfill callback
 		adminHandler.Resolver().SetBackfillCallback(func(ctx context.Context, did string) error {
 			_, err := actorBackfiller.BackfillActor(ctx, did)
 			return err
 		})
-		slog.Info("Backfill callback configured for admin UI")
+
+		// Full network backfill callback (runs in background)
+		adminHandler.Resolver().SetFullBackfillCallback(func(ctx context.Context) error {
+			// Get collections from registered lexicons if not configured via env
+			collections := backfillConfig.Collections
+			if len(collections) == 0 {
+				lexicons, err := lexiconsRepo.GetAll(ctx)
+				if err != nil {
+					slog.Error("[backfill] Failed to get lexicons", "error", err)
+					return err
+				}
+				for _, lex := range lexicons {
+					collections = append(collections, lex.ID)
+				}
+			}
+
+			if len(collections) == 0 {
+				slog.Warn("[backfill] No collections configured - register lexicons first or set BACKFILL_COLLECTIONS")
+				return nil
+			}
+
+			// Create a new backfiller with the discovered collections
+			bfConfig := backfillConfig
+			bfConfig.Collections = collections
+			bf := backfill.NewBackfiller(bfConfig, recordsRepo, actorsRepo, backfillActivityRepo)
+			defer bf.Close()
+
+			slog.Info("[backfill] Starting full network backfill", "collections", collections)
+			stats, err := bf.Run(ctx)
+			if err != nil {
+				slog.Error("[backfill] Full backfill failed", "error", err)
+				return err
+			}
+			slog.Info("[backfill] Full backfill completed",
+				"repos_discovered", stats.ReposDiscovered,
+				"repos_processed", stats.ReposProcessed,
+				"records_inserted", stats.RecordsInserted,
+				"duration", stats.Duration(),
+			)
+			return nil
+		})
+
+		slog.Info("Backfill callbacks configured for admin UI")
 
 		// Admin endpoint with optional auth (allows introspection without auth)
 		r.Handle("/admin/graphql", adminHandler.OptionalAuth())
@@ -415,14 +490,31 @@ func run() error {
 	// Start Jetstream consumer if collections are configured
 	var jsConsumer *jetstream.Consumer
 	jsCollections := os.Getenv("JETSTREAM_COLLECTIONS")
+
+	// If no env var, try to get collections from registered lexicons
+	var collections []string
 	if jsCollections != "" {
-		collections := jetstream.ParseCollections(jsCollections)
+		collections = jetstream.ParseCollections(jsCollections)
+	} else {
+		// Read from database lexicons
+		lexicons, err := lexiconsRepo.GetAll(ctx)
+		if err != nil {
+			slog.Warn("Failed to get lexicons for Jetstream", "error", err)
+		} else {
+			for _, lex := range lexicons {
+				collections = append(collections, lex.ID)
+			}
+		}
+	}
+
+	if len(collections) > 0 {
 		jsURL := os.Getenv("JETSTREAM_URL")
 		if jsURL == "" {
 			jsURL = jetstream.DefaultJetstreamURL
 		}
 		disableCursor := os.Getenv("JETSTREAM_DISABLE_CURSOR") == "true"
 
+		activityRepo := repositories.NewJetstreamActivityRepository(db)
 		jsConsumer = jetstream.NewConsumer(
 			jetstream.ConsumerConfig{
 				JetstreamURL:  jsURL,
@@ -432,6 +524,7 @@ func run() error {
 			recordsRepo,
 			actorsRepo,
 			configRepo,
+			activityRepo,
 		)
 
 		// Start consumer in background
@@ -449,7 +542,7 @@ func run() error {
 			}
 		}()
 	} else {
-		slog.Info("Jetstream consumer disabled (set JETSTREAM_COLLECTIONS to enable)")
+		slog.Info("Jetstream consumer disabled (no collections - register lexicons or set JETSTREAM_COLLECTIONS)")
 	}
 
 	// Run backfill if enabled
@@ -473,7 +566,8 @@ func run() error {
 				bfConfig.PLCURL = plcURL
 			}
 
-			backfiller := backfill.NewBackfiller(bfConfig, recordsRepo, actorsRepo)
+			startupActivityRepo := repositories.NewJetstreamActivityRepository(db)
+			backfiller := backfill.NewBackfiller(bfConfig, recordsRepo, actorsRepo, startupActivityRepo)
 
 			// Run backfill in background
 			go func() {
@@ -547,4 +641,48 @@ func run() error {
 
 	slog.Info("Server stopped gracefully")
 	return nil
+}
+
+// populateActivityFromRecords creates activity entries from existing records.
+func populateActivityFromRecords(
+	ctx context.Context,
+	recordsRepo *repositories.RecordsRepository,
+	activityRepo *repositories.JetstreamActivityRepository,
+) (int64, error) {
+	var count int64
+	_, err := recordsRepo.IterateAll(ctx, 1000, func(rec *repositories.Record) error {
+		// Extract createdAt from the record JSON
+		timestamp := extractCreatedAtFromJSON(rec.JSON)
+
+		// Log as a successful create operation
+		_, err := activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.JSON, "success")
+		if err != nil {
+			return nil // Continue on error
+		}
+		count++
+		return nil
+	})
+	return count, err
+}
+
+// extractCreatedAtFromJSON extracts the createdAt timestamp from a record's JSON.
+func extractCreatedAtFromJSON(recordJSON string) time.Time {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(recordJSON), &data); err != nil {
+		return time.Now()
+	}
+
+	createdAt, ok := data["createdAt"].(string)
+	if !ok {
+		return time.Now()
+	}
+
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		t, err = time.Parse("2006-01-02T15:04:05", createdAt)
+		if err != nil {
+			return time.Now()
+		}
+	}
+	return t
 }

@@ -20,6 +20,10 @@ const garamond = EB_Garamond({
 export const metadata: Metadata = {
   title: "Hypergoat",
   description: "AT Protocol AppView Server",
+  icons: {
+    icon: "/gainforest-logo.png",
+    apple: "/gainforest-logo.png",
+  },
 };
 
 export default function RootLayout({
@@ -47,15 +51,25 @@ export default function RootLayout({
             {/* Footer */}
             <footer className="relative py-6 mt-auto">
               <div className="max-w-3xl mx-auto px-4 sm:px-6 flex items-center justify-center gap-2">
-                <Image
-                  src="/hypercerts_logo.png"
-                  alt="Hypercerts"
-                  width={12}
-                  height={12}
-                />
-                <span className="text-[11px] text-zinc-300 tracking-wide">
-                  Member of Hypercerts & ATProto ecosystem
+                <span className="text-[11px] text-zinc-400 tracking-wide">
+                  Made by
                 </span>
+                <a
+                  href="https://gainforest.earth"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 hover:opacity-80 transition-opacity"
+                >
+                  <Image
+                    src="/gainforest-logo.png"
+                    alt="GainForest"
+                    width={16}
+                    height={16}
+                  />
+                  <span className="text-[11px] text-emerald-600 font-medium tracking-wide">
+                    GainForest
+                  </span>
+                </a>
               </div>
             </footer>
           </div>

@@ -320,6 +320,16 @@ func (b *SchemaBuilder) buildMutationType() *graphql.Object {
 					return b.resolver.ResetAll(p.Context, confirm)
 				},
 			},
+			"populateActivity": &graphql.Field{
+				Type:        graphql.NewNonNull(graphql.Int),
+				Description: "Populate activity entries from existing records (admin only). Returns count of entries created.",
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					if err := requireAdmin(p.Context); err != nil {
+						return nil, err
+					}
+					return b.resolver.PopulateActivity(p.Context)
+				},
+			},
 			"createLabel": &graphql.Field{
 				Type:        graphql.NewNonNull(LabelType),
 				Description: "Create a label on a record or account (admin only)",

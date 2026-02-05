@@ -190,9 +190,81 @@ func (b *Builder) buildSubscriptionType() *graphql.Object {
 	})
 }
 
+// Generic record type for the records query
+var genericRecordType = graphql.NewObject(graphql.ObjectConfig{
+	Name:        "GenericRecord",
+	Description: "A generic AT Protocol record",
+	Fields: graphql.Fields{
+		"uri": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "AT-URI of the record",
+		},
+		"cid": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "CID of the record",
+		},
+		"did": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "DID of the actor",
+		},
+		"collection": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "Collection NSID",
+		},
+		"rkey": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "Record key",
+		},
+		"value": &graphql.Field{
+			Type:        types.JSONScalar,
+			Description: "The record data as JSON",
+		},
+	},
+})
+
+// Generic record edge for pagination
+var genericRecordEdgeType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "GenericRecordEdge",
+	Fields: graphql.Fields{
+		"cursor": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"node":   &graphql.Field{Type: genericRecordType},
+	},
+})
+
+// Generic record connection for pagination
+var genericRecordConnectionType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "GenericRecordConnection",
+	Fields: graphql.Fields{
+		"edges":    &graphql.Field{Type: graphql.NewList(genericRecordEdgeType)},
+		"pageInfo": &graphql.Field{Type: query.PageInfoType},
+	},
+})
+
 // buildQueryType builds the root Query type with fields for each collection.
 func (b *Builder) buildQueryType() *graphql.Object {
 	fields := graphql.Fields{}
+
+	// Add generic records query that works for any collection
+	fields["records"] = &graphql.Field{
+		Type:        genericRecordConnectionType,
+		Description: "Query records from any collection (useful for collections without lexicon schemas)",
+		Args: graphql.FieldConfigArgument{
+			"collection": &graphql.ArgumentConfig{
+				Type:        graphql.NewNonNull(graphql.String),
+				Description: "Collection NSID (e.g., org.impactindexer.review.like)",
+			},
+			"first": &graphql.ArgumentConfig{
+				Type:         graphql.Int,
+				DefaultValue: 20,
+				Description:  "Number of records to return",
+			},
+			"after": &graphql.ArgumentConfig{
+				Type:        graphql.String,
+				Description: "Cursor for pagination",
+			},
+		},
+		Resolve: b.createGenericRecordsResolver(),
+	}
 
 	for lexiconID, connectionType := range b.connectionTypes {
 		fieldName := lexicon.ToFieldName(lexiconID)
@@ -223,6 +295,80 @@ func (b *Builder) buildQueryType() *graphql.Object {
 		Name:   "Query",
 		Fields: fields,
 	})
+}
+
+// createGenericRecordsResolver creates a resolver for the generic records query.
+func (b *Builder) createGenericRecordsResolver() graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		collection, ok := p.Args["collection"].(string)
+		if !ok || collection == "" {
+			return nil, fmt.Errorf("collection is required")
+		}
+
+		// Get repositories from context
+		repos := resolver.GetRepositories(p.Context)
+		if repos == nil || repos.Records == nil {
+			return emptyConnection(), nil
+		}
+
+		// Extract pagination args
+		first, _ := p.Args["first"].(int)
+		if first == 0 {
+			first = 20
+		}
+
+		// Query database
+		records, err := repos.Records.GetByCollection(p.Context, collection, first+1)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query records: %w", err)
+		}
+
+		// Determine if there are more results
+		hasNextPage := len(records) > first
+		if hasNextPage {
+			records = records[:first]
+		}
+
+		// Build edges
+		edges := make([]interface{}, 0, len(records))
+		var startCursor, endCursor string
+
+		for _, rec := range records {
+			// Parse JSON to map for the value field
+			var value map[string]interface{}
+			if err := json.Unmarshal([]byte(rec.JSON), &value); err != nil {
+				value = map[string]interface{}{"raw": rec.JSON}
+			}
+
+			cursor := encodeCursor(rec.URI)
+			if startCursor == "" {
+				startCursor = cursor
+			}
+			endCursor = cursor
+
+			edges = append(edges, map[string]interface{}{
+				"cursor": cursor,
+				"node": map[string]interface{}{
+					"uri":        rec.URI,
+					"cid":        rec.CID,
+					"did":        rec.DID,
+					"collection": rec.Collection,
+					"rkey":       rec.RKey,
+					"value":      value,
+				},
+			})
+		}
+
+		return map[string]interface{}{
+			"edges": edges,
+			"pageInfo": map[string]interface{}{
+				"hasNextPage":     hasNextPage,
+				"hasPreviousPage": false,
+				"startCursor":     startCursor,
+				"endCursor":       endCursor,
+			},
+		}, nil
+	}
 }
 
 // createCollectionResolver creates a resolver for querying a collection.

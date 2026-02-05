@@ -1,0 +1,363 @@
+package config
+
+import (
+	"os"
+	"testing"
+)
+
+func TestGetEnv(t *testing.T) {
+	tests := []struct {
+		name         string
+		key          string
+		defaultValue string
+		envValue     string
+		setEnv       bool
+		want         string
+	}{
+		{
+			name:         "returns default when env not set",
+			key:          "TEST_CONFIG_UNSET",
+			defaultValue: "default_value",
+			setEnv:       false,
+			want:         "default_value",
+		},
+		{
+			name:         "returns env value when set",
+			key:          "TEST_CONFIG_SET",
+			defaultValue: "default_value",
+			envValue:     "env_value",
+			setEnv:       true,
+			want:         "env_value",
+		},
+		{
+			name:         "returns default when env is empty",
+			key:          "TEST_CONFIG_EMPTY",
+			defaultValue: "default_value",
+			envValue:     "",
+			setEnv:       true,
+			want:         "default_value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Unsetenv(tt.key)
+			if tt.setEnv {
+				os.Setenv(tt.key, tt.envValue)
+				defer os.Unsetenv(tt.key)
+			}
+
+			got := getEnv(tt.key, tt.defaultValue)
+			if got != tt.want {
+				t.Errorf("getEnv(%q, %q) = %q, want %q", tt.key, tt.defaultValue, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetEnvInt(t *testing.T) {
+	tests := []struct {
+		name         string
+		key          string
+		defaultValue int
+		envValue     string
+		setEnv       bool
+		want         int
+	}{
+		{
+			name:         "returns default when env not set",
+			key:          "TEST_CONFIG_INT_UNSET",
+			defaultValue: 42,
+			setEnv:       false,
+			want:         42,
+		},
+		{
+			name:         "returns parsed int when set",
+			key:          "TEST_CONFIG_INT_SET",
+			defaultValue: 42,
+			envValue:     "100",
+			setEnv:       true,
+			want:         100,
+		},
+		{
+			name:         "returns default when env is invalid int",
+			key:          "TEST_CONFIG_INT_INVALID",
+			defaultValue: 42,
+			envValue:     "not_a_number",
+			setEnv:       true,
+			want:         42,
+		},
+		{
+			name:         "returns default when env is empty",
+			key:          "TEST_CONFIG_INT_EMPTY",
+			defaultValue: 42,
+			envValue:     "",
+			setEnv:       true,
+			want:         42,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Unsetenv(tt.key)
+			if tt.setEnv {
+				os.Setenv(tt.key, tt.envValue)
+				defer os.Unsetenv(tt.key)
+			}
+
+			got := getEnvInt(tt.key, tt.defaultValue)
+			if got != tt.want {
+				t.Errorf("getEnvInt(%q, %d) = %d, want %d", tt.key, tt.defaultValue, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetEnvBool(t *testing.T) {
+	tests := []struct {
+		name         string
+		key          string
+		defaultValue bool
+		envValue     string
+		setEnv       bool
+		want         bool
+	}{
+		{
+			name:         "returns default when env not set",
+			key:          "TEST_CONFIG_BOOL_UNSET",
+			defaultValue: false,
+			setEnv:       false,
+			want:         false,
+		},
+		{
+			name:         "returns true for 'true'",
+			key:          "TEST_CONFIG_BOOL_TRUE",
+			defaultValue: false,
+			envValue:     "true",
+			setEnv:       true,
+			want:         true,
+		},
+		{
+			name:         "returns true for 'TRUE'",
+			key:          "TEST_CONFIG_BOOL_TRUE_UPPER",
+			defaultValue: false,
+			envValue:     "TRUE",
+			setEnv:       true,
+			want:         true,
+		},
+		{
+			name:         "returns true for '1'",
+			key:          "TEST_CONFIG_BOOL_ONE",
+			defaultValue: false,
+			envValue:     "1",
+			setEnv:       true,
+			want:         true,
+		},
+		{
+			name:         "returns true for 'yes'",
+			key:          "TEST_CONFIG_BOOL_YES",
+			defaultValue: false,
+			envValue:     "yes",
+			setEnv:       true,
+			want:         true,
+		},
+		{
+			name:         "returns false for 'false'",
+			key:          "TEST_CONFIG_BOOL_FALSE",
+			defaultValue: true,
+			envValue:     "false",
+			setEnv:       true,
+			want:         false,
+		},
+		{
+			name:         "returns false for '0'",
+			key:          "TEST_CONFIG_BOOL_ZERO",
+			defaultValue: true,
+			envValue:     "0",
+			setEnv:       true,
+			want:         false,
+		},
+		{
+			name:         "returns false for invalid value",
+			key:          "TEST_CONFIG_BOOL_INVALID",
+			defaultValue: true,
+			envValue:     "invalid",
+			setEnv:       true,
+			want:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Unsetenv(tt.key)
+			if tt.setEnv {
+				os.Setenv(tt.key, tt.envValue)
+				defer os.Unsetenv(tt.key)
+			}
+
+			got := getEnvBool(tt.key, tt.defaultValue)
+			if got != tt.want {
+				t.Errorf("getEnvBool(%q, %v) = %v, want %v", tt.key, tt.defaultValue, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "postgres URL with password",
+			input: "postgres://user:secretpass@localhost:5432/dbname",
+			want:  "postgres://user:***@localhost:5432/dbname",
+		},
+		{
+			name:  "postgresql URL with password",
+			input: "postgresql://admin:mypassword@db.example.com:5432/production",
+			want:  "postgresql://admin:***@db.example.com:5432/production",
+		},
+		{
+			name:  "URL without password",
+			input: "sqlite:data/hypergoat.db",
+			want:  "sqlite:data/hypergoat.db",
+		},
+		{
+			name:  "URL with @ but no password",
+			input: "user@host",
+			want:  "user@host",
+		},
+		{
+			name:  "empty URL",
+			input: "",
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactURL(tt.input)
+			if got != tt.want {
+				t.Errorf("redactURL(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  Config
+		wantErr bool
+	}{
+		{
+			name: "valid config",
+			config: Config{
+				SecretKeyBase: "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:          8080,
+			},
+			wantErr: false,
+		},
+		{
+			name: "secret key too short",
+			config: Config{
+				SecretKeyBase: "short_key",
+				Port:          8080,
+			},
+			wantErr: true,
+		},
+		{
+			name: "port too low",
+			config: Config{
+				SecretKeyBase: "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:          0,
+			},
+			wantErr: true,
+		},
+		{
+			name: "port too high",
+			config: Config{
+				SecretKeyBase: "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:          70000,
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Config.Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestConfigAddress(t *testing.T) {
+	tests := []struct {
+		name   string
+		config Config
+		want   string
+	}{
+		{
+			name:   "default host and port",
+			config: Config{Host: "127.0.0.1", Port: 8080},
+			want:   "127.0.0.1:8080",
+		},
+		{
+			name:   "custom host and port",
+			config: Config{Host: "0.0.0.0", Port: 3000},
+			want:   "0.0.0.0:3000",
+		},
+		{
+			name:   "localhost",
+			config: Config{Host: "localhost", Port: 443},
+			want:   "localhost:443",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.config.Address()
+			if got != tt.want {
+				t.Errorf("Config.Address() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGenerateRandomKey(t *testing.T) {
+	tests := []struct {
+		name   string
+		length int
+	}{
+		{name: "32 bytes", length: 32},
+		{name: "64 bytes", length: 64},
+		{name: "128 bytes", length: 128},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, err := generateRandomKey(tt.length)
+			if err != nil {
+				t.Errorf("generateRandomKey(%d) error = %v", tt.length, err)
+				return
+			}
+			if len(key) != tt.length {
+				t.Errorf("generateRandomKey(%d) returned key of length %d", tt.length, len(key))
+			}
+		})
+	}
+
+	// Test that generated keys are unique
+	t.Run("keys are unique", func(t *testing.T) {
+		key1, _ := generateRandomKey(64)
+		key2, _ := generateRandomKey(64)
+		if key1 == key2 {
+			t.Error("generateRandomKey() returned same key twice")
+		}
+	})
+}

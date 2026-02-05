@@ -29,11 +29,12 @@ type ConsumerConfig struct {
 
 // Consumer consumes events from Jetstream and stores them in the database.
 type Consumer struct {
-	config      ConsumerConfig
-	client      *Client
-	recordsRepo *repositories.RecordsRepository
-	actorsRepo  *repositories.ActorsRepository
-	configRepo  *repositories.ConfigRepository
+	config       ConsumerConfig
+	client       *Client
+	recordsRepo  *repositories.RecordsRepository
+	actorsRepo   *repositories.ActorsRepository
+	configRepo   *repositories.ConfigRepository
+	activityRepo *repositories.JetstreamActivityRepository
 
 	// Pub/sub for GraphQL subscriptions
 	pubsub *subscription.PubSub
@@ -64,19 +65,21 @@ func NewConsumer(
 	recordsRepo *repositories.RecordsRepository,
 	actorsRepo *repositories.ActorsRepository,
 	configRepo *repositories.ConfigRepository,
+	activityRepo *repositories.JetstreamActivityRepository,
 ) *Consumer {
 	if config.CursorFlushInterval == 0 {
 		config.CursorFlushInterval = 5 * time.Second
 	}
 
 	return &Consumer{
-		config:      config,
-		recordsRepo: recordsRepo,
-		actorsRepo:  actorsRepo,
-		configRepo:  configRepo,
-		pubsub:      subscription.Global(), // Use global pub/sub for GraphQL subscriptions
-		cursorDone:  make(chan struct{}),
-		statsStart:  time.Now(),
+		config:       config,
+		recordsRepo:  recordsRepo,
+		actorsRepo:   actorsRepo,
+		configRepo:   configRepo,
+		activityRepo: activityRepo,
+		pubsub:       subscription.Global(), // Use global pub/sub for GraphQL subscriptions
+		cursorDone:   make(chan struct{}),
+		statsStart:   time.Now(),
 	}
 }
 
@@ -135,7 +138,18 @@ func (c *Consumer) processEvents(ctx context.Context) {
 	for event := range c.client.Events() {
 		c.statsMu.Lock()
 		c.stats.EventsReceived++
+		eventCount := c.stats.EventsReceived
 		c.statsMu.Unlock()
+
+		// Log every event received (for debugging)
+		if event.IsCommit() {
+			slog.Info("[jetstream] Event received",
+				"collection", event.Commit.Collection,
+				"operation", event.Commit.Operation,
+				"did", event.DID,
+				"total_events", eventCount,
+			)
+		}
 
 		// Update cursor
 		c.cursorMu.Lock()
@@ -163,6 +177,35 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 	commit := event.Commit
 	uri := commit.URI(event.DID)
 
+	// Convert event timestamp (microseconds) to time.Time
+	eventTime := time.UnixMicro(event.TimeUS)
+
+	// Log activity if repository is available
+	var activityID int64
+	if c.activityRepo != nil {
+		var err error
+		activityID, err = c.activityRepo.LogActivity(
+			ctx,
+			eventTime,
+			string(commit.Operation),
+			commit.Collection,
+			event.DID,
+			string(commit.Record),
+		)
+		if err != nil {
+			slog.Warn("Failed to log activity", "error", err)
+		}
+	}
+
+	// Helper to update activity status
+	updateActivityStatus := func(status string, errMsg *string) {
+		if c.activityRepo != nil && activityID > 0 {
+			if err := c.activityRepo.UpdateStatus(ctx, activityID, status, errMsg); err != nil {
+				slog.Warn("Failed to update activity status", "error", err)
+			}
+		}
+	}
+
 	switch commit.Operation {
 	case OpCreate, OpUpdate:
 		// Ensure actor exists (just store the DID, no resolution)
@@ -174,6 +217,8 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 		// Store the record
 		result, err := c.recordsRepo.Insert(ctx, uri, commit.CID, event.DID, commit.Collection, string(commit.Record))
 		if err != nil {
+			errMsg := err.Error()
+			updateActivityStatus("error", &errMsg)
 			return fmt.Errorf("failed to insert record: %w", err)
 		}
 
@@ -194,14 +239,18 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 		}
 		c.pubsub.PublishRecord(eventType, uri, commit.CID, event.DID, commit.Collection, commit.Record)
 
-		slog.Debug("Stored record",
+		updateActivityStatus("success", nil)
+
+		slog.Info("[jetstream] Stored record",
 			"uri", uri,
-			"cid", commit.CID,
+			"collection", commit.Collection,
 			"operation", commit.Operation,
 		)
 
 	case OpDelete:
 		if err := c.recordsRepo.Delete(ctx, uri); err != nil {
+			errMsg := err.Error()
+			updateActivityStatus("error", &errMsg)
 			return fmt.Errorf("failed to delete record: %w", err)
 		}
 
@@ -211,6 +260,8 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 
 		// Publish delete to GraphQL subscriptions
 		c.pubsub.PublishRecord(subscription.EventDelete, uri, commit.CID, event.DID, commit.Collection, nil)
+
+		updateActivityStatus("success", nil)
 
 		slog.Debug("Deleted record", "uri", uri)
 	}

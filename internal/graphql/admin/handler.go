@@ -67,6 +67,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Log mutation requests
+	if strings.Contains(params.Query, "mutation") {
+		slog.Info("[admin] Mutation request", "operation", params.OperationName, "variables", params.Variables)
+	}
+
 	// Get authentication info from context (set by middleware) or X-User-DID header
 	ctx := r.Context()
 	userDID := oauth.UserIDFromContext(ctx)
@@ -99,6 +104,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			isAdmin = true
 			break
 		}
+	}
+
+	// Debug logging for auth
+	if userDID != "" {
+		slog.Info("[admin] Authenticated request", "userDID", userDID, "isAdmin", isAdmin)
 	}
 
 	// Inject auth info into context

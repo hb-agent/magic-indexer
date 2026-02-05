@@ -17,32 +17,6 @@ function isValidNsid(nsid: string): boolean {
   return parts.every((p) => /^[a-z][a-z0-9-]*$/i.test(p));
 }
 
-// JSON Syntax Highlighter Component
-function JsonHighlight({ json }: { json: string }) {
-  const highlighted = useMemo(() => {
-    try {
-      const parsed = JSON.parse(json);
-      const formatted = JSON.stringify(parsed, null, 2);
-
-      return formatted
-        .replace(/"([^"]+)":/g, '<span class="text-purple-600">"$1"</span>:')
-        .replace(/: "([^"]+)"/g, ': <span class="text-emerald-600">"$1"</span>')
-        .replace(/: (\d+)/g, ': <span class="text-amber-600">$1</span>')
-        .replace(/: (true|false)/g, ': <span class="text-blue-600">$1</span>')
-        .replace(/: (null)/g, ': <span class="text-zinc-400">$1</span>');
-    } catch {
-      return json;
-    }
-  }, [json]);
-
-  return (
-    <pre
-      className="text-xs overflow-x-auto bg-zinc-50 p-4 rounded-lg text-zinc-700 font-mono border border-zinc-200/60"
-      dangerouslySetInnerHTML={{ __html: highlighted }}
-    />
-  );
-}
-
 // Tree node structure
 interface TreeNode {
   name: string;
@@ -95,6 +69,16 @@ function countLeaves(node: TreeNode): number {
   return count;
 }
 
+// Get description from lexicon JSON
+function getDescription(lexicon: Lexicon): string | null {
+  try {
+    const parsed = JSON.parse(lexicon.json);
+    return parsed?.defs?.main?.description || parsed?.description || null;
+  } catch {
+    return null;
+  }
+}
+
 // Tree Branch Component
 function TreeBranch({
   node,
@@ -103,6 +87,8 @@ function TreeBranch({
   isRoot = false,
   onDelete,
   deletingNsid,
+  expandedId,
+  onToggleExpand,
 }: {
   node: TreeNode;
   isLast?: boolean;
@@ -110,181 +96,138 @@ function TreeBranch({
   isRoot?: boolean;
   onDelete: (nsid: string) => void;
   deletingNsid: string | null;
+  expandedId: string | null;
+  onToggleExpand: (id: string) => void;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const [collapsed, setCollapsed] = useState(false);
   const children = Array.from(node.children.entries()).sort(([a], [b]) => a.localeCompare(b));
   const hasChildren = children.length > 0;
-  const branch = isLast ? "\u2514\u2500\u2500 " : "\u251C\u2500\u2500 ";
-  const childPrefix = prefix + (isLast ? "    " : "\u2502   ");
+  const branch = isLast ? "└── " : "├── ";
+  const childPrefix = prefix + (isLast ? "    " : "│   ");
 
-  const description = useMemo(() => {
-    if (!node.lexicon) return null;
-    try {
-      const parsed = JSON.parse(node.lexicon.json);
-      return parsed?.defs?.main?.description || parsed?.description || null;
-    } catch {
-      return null;
-    }
-  }, [node.lexicon]);
-
+  // Root authority node (e.g., "org.impactindexer")
   if (isRoot) {
     return (
-      <div className="mb-4 last:mb-0">
-        <div className="flex items-center gap-2 group py-1">
-          <button
-            onClick={() => setExpanded(!expanded)}
-            className="flex items-center gap-2 cursor-pointer"
-          >
-            <span className={`text-zinc-400 text-xs transition-transform duration-200 ${expanded ? '' : '-rotate-90'}`}>
-              {'\u25BE'}
-            </span>
-            <span className="font-mono text-sm font-medium text-zinc-800">{node.name}</span>
-            <span className="text-zinc-400 text-xs">({countLeaves(node)})</span>
-          </button>
-        </div>
-        {hasChildren && (
-          <div
-            className="grid transition-[grid-template-rows] duration-200 ease-out"
-            style={{ gridTemplateRows: expanded ? "1fr" : "0fr" }}
-          >
-            <div className="overflow-hidden">
-              <div className="mt-1">
-                {children.map(([key, child], i) => (
-                  <TreeBranch
-                    key={key}
-                    node={child}
-                    isLast={i === children.length - 1}
-                    prefix="    "
-                    onDelete={onDelete}
-                    deletingNsid={deletingNsid}
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  if (node.lexicon) {
-    const isDeleting = deletingNsid === node.lexicon.id;
-    return (
-      <LexiconLeafNode
-        node={node}
-        prefix={prefix}
-        branch={branch}
-        description={description}
-        onDelete={onDelete}
-        isDeleting={isDeleting}
-      />
-    );
-  }
-
-  return (
-    <div>
-      <div className="flex items-start py-1 hover:bg-zinc-50 -mx-1 px-1 rounded transition-colors group">
-        <span className="font-mono text-xs text-zinc-300 whitespace-pre select-none leading-5 shrink-0">
-          {prefix}{branch}
-        </span>
-        <button onClick={() => setExpanded(!expanded)} className="flex items-center cursor-pointer">
-          <span className="font-mono text-sm text-zinc-500 leading-5">{node.name}</span>
-          <span
-            className={`text-zinc-300 text-[10px] ml-1.5 leading-5 transition-transform duration-200 ${expanded ? '' : '-rotate-90'}`}
-          >
-            {'\u25BE'}
-          </span>
-        </button>
-      </div>
-      {hasChildren && (
-        <div
-          className="grid transition-[grid-template-rows] duration-200 ease-out"
-          style={{ gridTemplateRows: expanded ? "1fr" : "0fr" }}
+      <div className="mb-3 last:mb-0">
+        <button
+          onClick={() => setCollapsed(!collapsed)}
+          className="flex items-center gap-2 group py-0.5"
         >
-          <div className="overflow-hidden">
+          <span
+            className="text-zinc-300 text-xs transition-transform duration-200"
+            style={{ transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)" }}
+          >
+            ▾
+          </span>
+          <span className="font-mono text-sm font-medium text-zinc-700">{node.name}</span>
+          <span className="text-zinc-300 text-xs">{countLeaves(node)}</span>
+        </button>
+        {!collapsed && hasChildren && (
+          <div className="mt-1">
             {children.map(([key, child], i) => (
               <TreeBranch
                 key={key}
                 node={child}
                 isLast={i === children.length - 1}
-                prefix={childPrefix}
+                prefix="    "
                 onDelete={onDelete}
                 deletingNsid={deletingNsid}
+                expandedId={expandedId}
+                onToggleExpand={onToggleExpand}
               />
             ))}
           </div>
+        )}
+      </div>
+    );
+  }
+
+  // Leaf node with lexicon
+  if (node.lexicon) {
+    const isExpanded = expandedId === node.lexicon.id;
+    const isDeleting = deletingNsid === node.lexicon.id;
+    const description = getDescription(node.lexicon);
+
+    return (
+      <div>
+        <div className="group flex items-center py-0.5 hover:bg-zinc-50/50 -mx-1 px-1 rounded transition-colors">
+          <span className="font-mono text-xs text-zinc-200 whitespace-pre select-none shrink-0 hidden sm:inline">
+            {prefix}{branch}
+          </span>
+          <button
+            onClick={() => onToggleExpand(node.lexicon!.id)}
+            className="font-mono text-sm text-emerald-600 hover:text-emerald-700 transition-colors text-left"
+          >
+            {node.name}
+          </button>
+          {description && (
+            <span className="text-xs text-zinc-300 ml-2 truncate hidden sm:inline">
+              {description}
+            </span>
+          )}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!isDeleting) onDelete(node.lexicon!.id);
+            }}
+            disabled={isDeleting}
+            className="opacity-0 group-hover:opacity-100 ml-auto p-1 text-zinc-300 hover:text-red-400 transition-all disabled:opacity-50"
+            title={`Delete ${node.lexicon.id}`}
+          >
+            {isDeleting ? (
+              <div className="w-3 h-3 rounded-full border-2 border-zinc-300 border-t-zinc-500 animate-spin" />
+            ) : (
+              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+              </svg>
+            )}
+          </button>
         </div>
-      )}
-    </div>
-  );
-}
+        {isExpanded && (
+          <div className="ml-4 sm:ml-8 mt-2 mb-3">
+            <pre className="text-xs bg-zinc-50 text-zinc-600 p-3 rounded-lg overflow-x-auto border border-zinc-100">
+              {JSON.stringify(JSON.parse(node.lexicon.json), null, 2)}
+            </pre>
+          </div>
+        )}
+      </div>
+    );
+  }
 
-// Expandable Leaf Node Component
-function LexiconLeafNode({
-  node,
-  prefix,
-  branch,
-  description,
-  onDelete,
-  isDeleting,
-}: {
-  node: TreeNode;
-  prefix: string;
-  branch: string;
-  description: string | null;
-  onDelete: (nsid: string) => void;
-  isDeleting: boolean;
-}) {
-  const [expanded, setExpanded] = useState(false);
-
+  // Intermediate directory node
   return (
     <div>
-      <div className="group flex items-start py-1 hover:bg-zinc-50 -mx-1 px-1 rounded transition-colors min-w-0">
-        <span className="font-mono text-xs text-zinc-300 whitespace-pre select-none leading-5 shrink-0">
+      <div className="flex items-center py-0.5 hover:bg-zinc-50/50 -mx-1 px-1 rounded transition-colors">
+        <span className="font-mono text-xs text-zinc-200 whitespace-pre select-none shrink-0 hidden sm:inline">
           {prefix}{branch}
         </span>
         <button
-          onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-1 cursor-pointer min-w-0"
+          onClick={() => setCollapsed(!collapsed)}
+          className="flex items-center"
         >
-          <svg className={`h-3 w-3 text-zinc-400 shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-          </svg>
-          <svg className="h-3.5 w-3.5 text-emerald-500 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-          </svg>
-          <span className="font-mono text-sm text-emerald-600 hover:text-emerald-700 leading-5">
-            {node.name}
+          <span className="font-mono text-sm text-zinc-500">{node.name}</span>
+          <span
+            className="text-zinc-300 text-[10px] ml-1 transition-transform duration-200"
+            style={{ transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)" }}
+          >
+            ▾
           </span>
-        </button>
-        {description && (
-          <span className="text-xs text-zinc-400 ml-2 truncate leading-5 hidden sm:inline">
-            {description}
-          </span>
-        )}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            if (node.lexicon && !isDeleting) {
-              onDelete(node.lexicon.id);
-            }
-          }}
-          disabled={isDeleting}
-          className="opacity-0 group-hover:opacity-100 p-1 ml-auto text-zinc-400 hover:text-red-500 transition-all shrink-0 disabled:opacity-50"
-          title={`Delete ${node.lexicon?.id}`}
-        >
-          {isDeleting ? (
-            <div className="w-3.5 h-3.5 rounded-full border-2 border-zinc-300 border-t-zinc-500 animate-spin" />
-          ) : (
-            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
-            </svg>
-          )}
         </button>
       </div>
-      {expanded && node.lexicon && (
-        <div className="ml-8 mt-1 mb-2">
-          <JsonHighlight json={node.lexicon.json} />
+      {!collapsed && hasChildren && (
+        <div>
+          {children.map(([key, child], i) => (
+            <TreeBranch
+              key={key}
+              node={child}
+              isLast={i === children.length - 1}
+              prefix={childPrefix}
+              onDelete={onDelete}
+              deletingNsid={deletingNsid}
+              expandedId={expandedId}
+              onToggleExpand={onToggleExpand}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -298,6 +241,7 @@ export default function LexiconsPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [deletingNsid, setDeletingNsid] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const { data, isLoading, error: fetchError } = useQuery({
     queryKey: ["lexicons"],
@@ -323,12 +267,11 @@ export default function LexiconsPage() {
   const deleteMutation = useMutation({
     mutationFn: (nsid: string) =>
       graphqlClient.request(DELETE_LEXICON, { nsid }),
-    onMutate: (nsid) => {
-      setDeletingNsid(nsid);
-    },
+    onMutate: (nsid) => setDeletingNsid(nsid),
     onSuccess: (_, nsid) => {
       setSuccess(`Deleted ${nsid}`);
       setError(null);
+      if (expandedId === nsid) setExpandedId(null);
       queryClient.invalidateQueries({ queryKey: ["lexicons"] });
       setTimeout(() => setSuccess(null), 3000);
     },
@@ -336,9 +279,7 @@ export default function LexiconsPage() {
       setError(err.message);
       setSuccess(null);
     },
-    onSettled: () => {
-      setDeletingNsid(null);
-    },
+    onSettled: () => setDeletingNsid(null),
   });
 
   const handleRegister = (e: React.FormEvent) => {
@@ -347,7 +288,7 @@ export default function LexiconsPage() {
     if (!trimmed) return;
 
     if (!isValidNsid(trimmed)) {
-      setError("Invalid NSID format. Expected something like org.hypercerts.claim.activity");
+      setError("Invalid NSID format. Expected something like org.example.record.type");
       return;
     }
 
@@ -372,21 +313,21 @@ export default function LexiconsPage() {
 
   if (fetchError) {
     return (
-      <div className="pt-8 sm:pt-12">
+      <div className="py-8">
         <Alert variant="error">Failed to load lexicons: {(fetchError as Error).message}</Alert>
       </div>
     );
   }
 
   return (
-    <div className="pt-8 sm:pt-12 space-y-10">
-      {/* Hero Section */}
-      <div className="max-w-md">
-        <h2 className="font-[family-name:var(--font-garamond)] text-3xl sm:text-4xl text-zinc-900 leading-tight">
+    <div className="py-8 space-y-6">
+      {/* Header */}
+      <div>
+        <h2 className="font-[family-name:var(--font-garamond)] text-2xl text-zinc-900">
           Lexicons
         </h2>
-        <p className="text-zinc-500 mt-3 leading-relaxed">
-          Register and manage AT Protocol lexicon schemas for your AppView
+        <p className="text-sm text-zinc-400 mt-1">
+          Register AT Protocol lexicon schemas for your AppView
         </p>
       </div>
 
@@ -396,100 +337,75 @@ export default function LexiconsPage() {
           {error}
         </Alert>
       )}
-      {success && (
-        <Alert variant="success">{success}</Alert>
-      )}
+      {success && <Alert variant="success">{success}</Alert>}
 
-      {/* Register Lexicon */}
-      <div className="space-y-4">
-        <h3 className="font-[family-name:var(--font-garamond)] text-xl text-zinc-900">
-          Register Lexicon
-        </h3>
-        <div className="rounded-xl border border-zinc-200/60 bg-white p-6">
-          <form onSubmit={handleRegister} className="flex gap-3">
-            <div className="flex-1">
-              <Input
-                placeholder="Enter NSID (e.g., org.hypercerts.claim.activity)"
-                value={nsidInput}
-                onChange={(e) => {
-                  setNsidInput(e.target.value);
-                  setError(null);
-                }}
-                className="font-mono"
-              />
-            </div>
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={registerMutation.isPending || !nsidInput.trim()}
-              loading={registerMutation.isPending}
-            >
-              {registerMutation.isPending ? "Resolving..." : "Register"}
-            </Button>
-          </form>
-          <p className="text-xs text-zinc-400 mt-2">
-            The lexicon will be resolved via DNS and fetched from the authoritative PDS.
-          </p>
-        </div>
-      </div>
+      {/* Register */}
+      <form onSubmit={handleRegister} className="flex gap-2">
+        <input
+          type="text"
+          value={nsidInput}
+          onChange={(e) => {
+            setNsidInput(e.target.value);
+            setError(null);
+          }}
+          placeholder="Enter NSID to register..."
+          className="flex-1 px-3 py-1.5 bg-white/50 border border-zinc-200/60 rounded-lg
+                     text-sm text-zinc-800 placeholder-zinc-400 font-mono
+                     focus:outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-100
+                     transition-all"
+        />
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={registerMutation.isPending || !nsidInput.trim()}
+          loading={registerMutation.isPending}
+        >
+          Register
+        </Button>
+      </form>
 
       {/* Search */}
       <div className="relative">
-        <svg className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+        <svg className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-300" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
         </svg>
         <input
           type="text"
-          placeholder="Search lexicons..."
+          placeholder="Search..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full pl-10 px-3 py-2 text-sm bg-white/50 border border-zinc-200/60 rounded-lg
+          className="w-full pl-9 pr-3 py-1.5 text-sm bg-white/50 border border-zinc-200/60 rounded-lg
                      text-zinc-800 placeholder:text-zinc-300
-                     focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400
+                     focus:outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-100
                      transition-all"
         />
       </div>
 
-      {/* Lexicon Tree */}
-      <div className="space-y-4">
-        <div className="flex items-center gap-2">
-          <h3 className="font-[family-name:var(--font-garamond)] text-xl text-zinc-900">
-            Registered Lexicons
-          </h3>
-          {data?.lexicons && (
-            <span className="text-sm text-zinc-400">
-              ({filteredLexicons.length} of {data.lexicons.length})
-            </span>
-          )}
+      {/* Tree */}
+      {isLoading ? (
+        <div className="flex items-center gap-2 py-8 justify-center">
+          <div className="w-3 h-3 border-2 border-zinc-300 border-t-emerald-400 rounded-full animate-spin" />
+          <span className="text-xs text-zinc-400">Loading...</span>
         </div>
-
-        <div className="rounded-xl border border-zinc-200/60 bg-white p-6">
-          {isLoading ? (
-            <div className="flex items-center justify-center py-8 gap-2">
-              <div className="w-4 h-4 rounded-full border-2 border-zinc-200 border-t-zinc-400 animate-spin" />
-              <span className="text-zinc-400 text-sm">Loading lexicons...</span>
-            </div>
-          ) : roots.length === 0 ? (
-            <div className="text-center py-8 text-zinc-400 text-sm">
-              {searchQuery
-                ? "No lexicons match your search"
-                : "No lexicons registered. Enter an NSID above to get started."}
-            </div>
-          ) : (
-            <div className="font-mono">
-              {roots.map(([key, node]) => (
-                <TreeBranch
-                  key={key}
-                  node={node}
-                  isRoot
-                  onDelete={(nsid) => deleteMutation.mutate(nsid)}
-                  deletingNsid={deletingNsid}
-                />
-              ))}
-            </div>
-          )}
+      ) : roots.length === 0 ? (
+        <p className="text-sm text-zinc-400 py-4 text-center">
+          {searchQuery ? `No lexicons match "${searchQuery}"` : "No lexicons registered yet."}
+        </p>
+      ) : (
+        <div className="font-mono">
+          {roots.map(([key, node]) => (
+            <TreeBranch
+              key={key}
+              node={node}
+              isRoot
+              onDelete={(nsid) => deleteMutation.mutate(nsid)}
+              deletingNsid={deletingNsid}
+              expandedId={expandedId}
+              onToggleExpand={(id) => setExpandedId(expandedId === id ? null : id)}
+            />
+          ))}
         </div>
-      </div>
+      )}
     </div>
   );
 }

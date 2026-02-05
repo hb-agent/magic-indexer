@@ -40,11 +40,20 @@ func NewJetstreamActivityRepository(db database.Executor) *JetstreamActivityRepo
 	return &JetstreamActivityRepository{db: db}
 }
 
-// LogActivity logs a new activity entry and returns the ID.
+// LogActivity logs a new activity entry with 'pending' status and returns the ID.
 func (r *JetstreamActivityRepository) LogActivity(
 	ctx context.Context,
 	timestamp time.Time,
 	operation, collection, did, eventJSON string,
+) (int64, error) {
+	return r.LogActivityWithStatus(ctx, timestamp, operation, collection, did, eventJSON, "pending")
+}
+
+// LogActivityWithStatus logs a new activity entry with a custom status and returns the ID.
+func (r *JetstreamActivityRepository) LogActivityWithStatus(
+	ctx context.Context,
+	timestamp time.Time,
+	operation, collection, did, eventJSON, status string,
 ) (int64, error) {
 	var sqlStr string
 	var timestampStr string
@@ -54,17 +63,17 @@ func (r *JetstreamActivityRepository) LogActivity(
 		timestampStr = timestamp.Format(time.RFC3339)
 		sqlStr = fmt.Sprintf(`INSERT INTO jetstream_activity 
 			(timestamp, operation, collection, did, status, event_json)
-			VALUES (%s, %s, %s, %s, 'pending', %s)
+			VALUES (%s, %s, %s, %s, %s, %s)
 			RETURNING id`,
 			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-			r.db.Placeholder(4), r.db.Placeholder(5))
+			r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
 	default:
 		timestampStr = timestamp.Format("2006-01-02 15:04:05")
 		sqlStr = fmt.Sprintf(`INSERT INTO jetstream_activity 
 			(timestamp, operation, collection, did, status, event_json)
-			VALUES (%s, %s, %s, %s, 'pending', %s)`,
+			VALUES (%s, %s, %s, %s, %s, %s)`,
 			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-			r.db.Placeholder(4), r.db.Placeholder(5))
+			r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
 	}
 
 	params := []database.Value{
@@ -72,6 +81,7 @@ func (r *JetstreamActivityRepository) LogActivity(
 		database.Text(operation),
 		database.Text(collection),
 		database.Text(did),
+		database.Text(status),
 		database.Text(eventJSON),
 	}
 
@@ -231,6 +241,13 @@ func (r *JetstreamActivityRepository) buildBucketQuery(hours, minutes int) strin
 func (r *JetstreamActivityRepository) DeleteAll(ctx context.Context) error {
 	_, err := r.db.Exec(ctx, "DELETE FROM jetstream_activity", nil)
 	return err
+}
+
+// GetCount returns the total number of activity entries.
+func (r *JetstreamActivityRepository) GetCount(ctx context.Context) (int64, error) {
+	var count int64
+	err := r.db.QueryRow(ctx, "SELECT COUNT(*) FROM jetstream_activity", nil, &count)
+	return count, err
 }
 
 // Helper function to scan activity entries from rows
