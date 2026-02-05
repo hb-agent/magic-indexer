@@ -197,7 +197,7 @@ func (r *LabelsRepository) GetByURIs(ctx context.Context, uris []string) ([]Labe
 		WHERE l.uri IN (%s) AND l.neg = 0
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg 
-			WHERE neg.uri = l.uri AND neg.val = l.val AND neg.neg = 1 AND neg.cts > l.cts
+			WHERE neg.uri = l.uri AND neg.val = l.val AND neg.neg = 1 AND neg.id > l.id
 		)
 		ORDER BY l.cts DESC`, placeholders)
 
@@ -286,7 +286,7 @@ func (r *LabelsRepository) HasTakedown(ctx context.Context, uri string) (bool, e
 		WHERE uri = %s AND val = '!takedown' AND neg = 0
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg 
-			WHERE neg.uri = label.uri AND neg.val = '!takedown' AND neg.neg = 1 AND neg.cts > label.cts
+			WHERE neg.uri = label.uri AND neg.val = '!takedown' AND neg.neg = 1 AND neg.id > label.id
 		)`, r.db.Placeholder(1))
 
 	var count int64
@@ -308,7 +308,7 @@ func (r *LabelsRepository) GetTakedownURIs(ctx context.Context, uris []string) (
 		WHERE l.uri IN (%s) AND l.val = '!takedown' AND l.neg = 0
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg 
-			WHERE neg.uri = l.uri AND neg.val = '!takedown' AND neg.neg = 1 AND neg.cts > l.cts
+			WHERE neg.uri = l.uri AND neg.val = '!takedown' AND neg.neg = 1 AND neg.id > l.id
 		)`, placeholders)
 
 	params := make([]any, len(uris))
