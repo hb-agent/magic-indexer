@@ -80,7 +80,7 @@ func (c *Client) ListReposByCollection(ctx context.Context, collection string) (
 	return allRepos, nil
 }
 
-func (c *Client) listReposByCollectionPage(ctx context.Context, collection, cursor string) ([]string, string, error) {
+func (c *Client) listReposByCollectionPage(ctx context.Context, collection, cursor string) (repos []string, nextCursor string, err error) {
 	u, err := url.Parse(c.relayURL + "/xrpc/com.atproto.sync.listReposByCollection")
 	if err != nil {
 		return nil, "", err
@@ -94,7 +94,7 @@ func (c *Client) listReposByCollectionPage(ctx context.Context, collection, curs
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		return nil, "", err
 	}
@@ -115,7 +115,7 @@ func (c *Client) listReposByCollectionPage(ctx context.Context, collection, curs
 		return nil, "", fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	repos := make([]string, len(result.Repos))
+	repos = make([]string, len(result.Repos))
 	for i, r := range result.Repos {
 		repos[i] = r.DID
 	}
@@ -134,7 +134,7 @@ type AtprotoData struct {
 func (c *Client) ResolveDID(ctx context.Context, did string) (*AtprotoData, error) {
 	u := c.plcURL + "/" + did
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +248,7 @@ func (c *Client) listRecordsPage(ctx context.Context, pdsURL, repo, collection, 
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		return nil, "", err
 	}

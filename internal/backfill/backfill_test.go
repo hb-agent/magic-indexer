@@ -250,7 +250,7 @@ func TestStats_Duration(t *testing.T) {
 	stats := Stats{}
 
 	// Duration before end time set should return time since start
-	stats.StartTime = stats.StartTime // Zero value
+	// stats.StartTime is already zero value
 
 	// Set an end time
 	stats.EndTime = stats.StartTime.Add(5 * 1e9) // 5 seconds

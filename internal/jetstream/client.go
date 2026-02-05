@@ -20,10 +20,6 @@ const (
 	defaultWriteTimeout = 10 * time.Second
 	defaultPongWait     = 60 * time.Second
 	defaultPingPeriod   = 50 * time.Second
-
-	// Reconnection settings
-	initialReconnectDelay = 1 * time.Second
-	maxReconnectDelay     = 60 * time.Second
 )
 
 // ClientConfig configures the Jetstream client.

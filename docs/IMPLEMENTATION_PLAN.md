@@ -39,14 +39,14 @@ This document tracks the implementation of Hypergoat, a Go port of [Quickslice](
 
 ---
 
-## Phase 1: Foundation (Week 1-2)
+## Phase 1: Foundation (Week 1-2) ✅ COMPLETE
 
 ### 1.1 Project Setup
 
-- [ ] Initialize Go module
-- [ ] Create project directory structure
-- [ ] Configure `.golangci.yml` for linting
-- [ ] Set up Makefile with common tasks
+- [x] Initialize Go module
+- [x] Create project directory structure
+- [x] Configure `.golangci.yml` for linting
+- [x] Set up Makefile with common tasks
 - [ ] Create Dockerfile and docker-compose.yml
 - [ ] Set up GitHub Actions for CI
 
@@ -268,7 +268,14 @@ Create migration files:
 
 ---
 
-## Phase 2: Lexicon Parsing & GraphQL Core (Week 2-3)
+## Phase 2: Lexicon Parsing & GraphQL Core (Week 2-3) ✅ COMPLETE
+
+> **Implementation Notes:**
+> - Lexicon parser: `internal/lexicon/parser.go`
+> - Registry: `internal/lexicon/registry.go`
+> - NSID utilities: `internal/lexicon/nsid.go`
+> - GraphQL type mapper: `internal/graphql/types/mapper.go`
+> - Object builder: `internal/graphql/types/object.go`
 
 ### 2.1 Lexicon Type Definitions
 
@@ -449,7 +456,13 @@ func BuildSchema(
 
 ---
 
-## Phase 3: GraphQL API (Week 3-4)
+## Phase 3: GraphQL API (Week 3-4) ✅ COMPLETE
+
+> **Implementation Notes:**
+> - Schema builder: `internal/graphql/schema/builder.go`
+> - Query resolvers: `internal/graphql/schema/builder.go` (createCollectionResolver, createSingleRecordResolver)
+> - Connection types: `internal/graphql/query/connection.go`
+> - Handler: `internal/graphql/handler.go`
 
 ### 3.1 Record Fetcher Interface
 
@@ -591,7 +604,14 @@ func NewGraphQLHandler(schema *graphql.Schema, authMiddleware AuthMiddleware) ht
 
 ---
 
-## Phase 4: Real-time Features (Week 4-5)
+## Phase 4: Real-time Features (Week 4-5) ✅ COMPLETE
+
+> **Implementation Notes:**
+> - **Jetstream Consumer:** `internal/jetstream/consumer.go`, `internal/jetstream/client.go`
+> - **GraphQL Subscriptions:** `internal/graphql/subscription/pubsub.go`, `internal/graphql/subscription/handler.go`
+> - **Historical Backfill:** `internal/backfill/backfill.go`, `internal/backfill/client.go`
+> - WebSocket endpoint at `/graphql/ws` implementing graphql-transport-ws protocol
+> - Integration tests for hypercerts.claim.activity in `internal/backfill/backfill_integration_test.go`
 
 ### 4.1 PubSub System
 

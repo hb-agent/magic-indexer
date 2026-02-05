@@ -247,7 +247,7 @@ func (c *wsClient) completeSubscription(id string) {
 }
 
 // sendError sends an error message.
-func (c *wsClient) sendError(id string, message string) {
+func (c *wsClient) sendError(id, message string) {
 	errPayload, _ := json.Marshal([]map[string]string{
 		{"message": message},
 	})
