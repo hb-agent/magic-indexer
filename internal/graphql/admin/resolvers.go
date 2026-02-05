@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GainForest/hypergoat/internal/atproto"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/lexicon"
 	"github.com/GainForest/hypergoat/internal/oauth"
@@ -282,7 +283,7 @@ func (r *Resolver) UploadLexicons(ctx context.Context, zipBase64 string) (int, e
 		}
 
 		data, err := io.ReadAll(io.LimitReader(rc, maxLexiconFileSize+1))
-		rc.Close()
+		_ = rc.Close()
 		if err != nil {
 			continue
 		}
@@ -292,20 +293,20 @@ func (r *Resolver) UploadLexicons(ctx context.Context, zipBase64 string) (int, e
 		}
 
 		// Parse JSON to extract lexicon ID
-		var lexicon struct {
+		var lexEntry struct {
 			ID string `json:"id"`
 		}
-		if err := json.Unmarshal(data, &lexicon); err != nil {
+		if err := json.Unmarshal(data, &lexEntry); err != nil {
 			continue
 		}
 
-		if lexicon.ID == "" {
+		if lexEntry.ID == "" {
 			continue
 		}
 
 		// Upsert lexicon
-		if err := r.repos.Lexicons.Upsert(ctx, lexicon.ID, string(data)); err != nil {
-			return count, fmt.Errorf("failed to save lexicon %s: %w", lexicon.ID, err)
+		if err := r.repos.Lexicons.Upsert(ctx, lexEntry.ID, string(data)); err != nil {
+			return count, fmt.Errorf("failed to save lexicon %s: %w", lexEntry.ID, err)
 		}
 		count++
 	}
@@ -962,15 +963,12 @@ func (r *Resolver) PopulateActivity(ctx context.Context) (int64, error) {
 	var count int64
 	_, err := r.repos.Records.IterateAll(ctx, 1000, func(rec *repositories.Record) error {
 		// Extract createdAt from the record JSON
-		timestamp := extractCreatedAt(rec.JSON)
+		timestamp := atproto.ExtractCreatedAt(rec.JSON, time.Now())
 
 		// Log as a successful create operation
-		_, err := r.repos.Activity.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success")
-		if err != nil {
-			// Log error but continue processing
-			return nil
+		if _, logErr := r.repos.Activity.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success"); logErr == nil {
+			count++
 		}
-		count++
 		return nil
 	})
 
@@ -979,29 +977,6 @@ func (r *Resolver) PopulateActivity(ctx context.Context) (int64, error) {
 	}
 
 	return count, nil
-}
-
-// extractCreatedAt extracts the createdAt timestamp from a record's JSON.
-// Returns the parsed time or the current time if not found/parseable.
-func extractCreatedAt(recordJSON string) time.Time {
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(recordJSON), &data); err != nil {
-		return time.Now()
-	}
-
-	// Try common timestamp field names
-	for _, field := range []string{"createdAt", "$createdAt", "created_at", "timestamp", "indexedAt"} {
-		if val, ok := data[field].(string); ok {
-			if t, err := time.Parse(time.RFC3339, val); err == nil {
-				return t
-			}
-			if t, err := time.Parse("2006-01-02T15:04:05", val); err == nil {
-				return t
-			}
-		}
-	}
-
-	return time.Now()
 }
 
 // CreateLabel creates a new label on a record or account.

@@ -203,7 +203,7 @@ func TestGetEnvBool(t *testing.T) {
 	}
 }
 
-func TestRedactURL(t *testing.T) {
+func TestRedactPassword(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -238,9 +238,9 @@ func TestRedactURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := redactURL(tt.input)
+			got := RedactPassword(tt.input)
 			if got != tt.want {
-				t.Errorf("redactURL(%q) = %q, want %q", tt.input, got, tt.want)
+				t.Errorf("RedactPassword(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}

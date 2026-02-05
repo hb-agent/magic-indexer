@@ -107,15 +107,18 @@ func ConstraintError(msg string, cause error) *DbError {
 
 // Executor provides a unified interface for database operations.
 type Executor interface {
-	// Query executes a query and scans results into dest.
-	// dest should be a pointer to a slice of structs.
-	Query(ctx context.Context, sql string, params []Value, dest any) error
-
 	// QueryRow executes a query expected to return at most one row.
 	QueryRow(ctx context.Context, sql string, params []Value, dest ...any) error
 
 	// Exec executes a statement without returning results.
 	Exec(ctx context.Context, sql string, params []Value) (sql.Result, error)
+
+	// BeginTx starts a new database transaction.
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+
+	// ConvertParams converts []Value to []any for use with direct *sql.DB calls.
+	// The conversion is dialect-specific (e.g., SQLite uses integers for booleans).
+	ConvertParams(params []Value) []any
 
 	// Dialect returns the database dialect.
 	Dialect() Dialect

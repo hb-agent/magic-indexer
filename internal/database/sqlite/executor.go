@@ -42,37 +42,25 @@ func NewExecutor(databaseURL string) (*Executor, error) {
 
 	// Enable foreign keys and WAL mode for better performance
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, database.ConnectionError("failed to enable foreign keys", err)
 	}
 
 	// Enable WAL mode for better concurrent read performance (skip for :memory:)
 	if path != ":memory:" {
 		if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, database.ConnectionError("failed to enable WAL mode", err)
 		}
 	}
 
 	// Test the connection
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, database.ConnectionError("failed to ping SQLite database", err)
 	}
 
 	return &Executor{db: db}, nil
-}
-
-// Query executes a query and scans results into dest.
-func (e *Executor) Query(ctx context.Context, sqlStr string, params []database.Value, dest any) error {
-	args := convertParams(params)
-	rows, err := e.db.QueryContext(ctx, sqlStr, args...)
-	if err != nil {
-		return database.QueryError("failed to execute query", err)
-	}
-	defer rows.Close()
-
-	return scanRows(rows, dest)
 }
 
 // QueryRow executes a query expected to return at most one row.
@@ -86,6 +74,16 @@ func (e *Executor) QueryRow(ctx context.Context, sqlStr string, params []databas
 		return database.QueryError("failed to scan row", err)
 	}
 	return nil
+}
+
+// BeginTx starts a new database transaction.
+func (e *Executor) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	return e.db.BeginTx(ctx, opts)
+}
+
+// ConvertParams converts []database.Value to []any for direct *sql.DB usage.
+func (e *Executor) ConvertParams(params []database.Value) []any {
+	return convertParams(params)
 }
 
 // Exec executes a statement without returning results.
@@ -194,31 +192,4 @@ func convertParams(params []database.Value) []any {
 		}
 	}
 	return args
-}
-
-// scanRows scans rows into a slice of maps.
-// TODO: Implement struct scanning using reflection
-func scanRows(rows *sql.Rows, dest any) error {
-	_ = dest // Will be used when struct scanning is implemented
-
-	// For now, we'll implement a simpler version that works with specific types
-	// This will be enhanced later to support generic struct scanning
-	columns, err := rows.Columns()
-	if err != nil {
-		return database.DecodeError("failed to get columns", err)
-	}
-
-	// Create a slice of interface{} to hold the values
-	values := make([]any, len(columns))
-	valuePtrs := make([]any, len(columns))
-	for i := range values {
-		valuePtrs[i] = &values[i]
-	}
-
-	// For now, return an error indicating we need specific implementations
-	_ = columns
-	_ = values
-	_ = valuePtrs
-
-	return nil
 }

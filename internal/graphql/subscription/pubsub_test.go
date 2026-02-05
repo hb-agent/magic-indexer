@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -162,7 +163,7 @@ func TestPubSub_ConcurrentPublish(t *testing.T) {
 			defer wg.Done()
 			ps.Publish(&RecordEvent{
 				Type: EventCreate,
-				URI:  "at://test/" + string(rune(n)),
+				URI:  "at://test/" + strconv.Itoa(n),
 			})
 		}(i)
 	}
@@ -246,14 +247,15 @@ func TestPublishRecord_Delete(t *testing.T) {
 	ps.Unsubscribe(sub)
 }
 
-func TestGlobal(t *testing.T) {
-	ps := Global()
+func TestNewPubSub(t *testing.T) {
+	ps := NewPubSub()
 	if ps == nil {
-		t.Fatal("Global() returned nil")
+		t.Fatal("NewPubSub() returned nil")
 	}
 
-	// Should return same instance
-	if Global() != ps {
-		t.Error("Global() should return same instance")
+	// Each call should return a distinct instance
+	ps2 := NewPubSub()
+	if ps == ps2 {
+		t.Error("NewPubSub() should return distinct instances")
 	}
 }

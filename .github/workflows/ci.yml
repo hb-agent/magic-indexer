@@ -59,8 +59,6 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
-    # TODO: Remove continue-on-error when golangci-lint supports Go 1.25
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -72,10 +70,9 @@ jobs:
           cache: true
       
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v4
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
-          args: --timeout=5m
+          version: v2.8.0
 
   build-docker:
     runs-on: ubuntu-latest

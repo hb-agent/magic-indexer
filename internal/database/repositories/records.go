@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GainForest/hypergoat/internal/atproto"
 	"github.com/GainForest/hypergoat/internal/database"
 )
 
@@ -131,7 +132,7 @@ func (r *RecordsRepository) BatchInsert(ctx context.Context, records []*Record) 
 	}
 
 	// Start transaction for all batches
-	tx, err := r.db.DB().BeginTx(ctx, nil)
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -242,7 +243,7 @@ func (r *RecordsRepository) GetByURIs(ctx context.Context, uris []string) ([]*Re
 		params[i] = database.Text(uri)
 	}
 
-	rows, err := r.db.DB().QueryContext(ctx, sqlStr, convertToAny(params)...)
+	rows, err := r.db.DB().QueryContext(ctx, sqlStr, r.db.ConvertParams(params)...)
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +357,7 @@ func (r *RecordsRepository) GetCollectionStatsFiltered(ctx context.Context, coll
 		params[i] = database.Text(c)
 	}
 
-	rows, err := r.db.DB().QueryContext(ctx, sqlStr, convertToAny(params)...)
+	rows, err := r.db.DB().QueryContext(ctx, sqlStr, r.db.ConvertParams(params)...)
 	if err != nil {
 		return nil, err
 	}
@@ -477,7 +478,7 @@ func (r *RecordsRepository) GetCIDsByURIs(ctx context.Context, uris []string) (m
 			params[j] = database.Text(uri)
 		}
 
-		rows, err := r.db.DB().QueryContext(ctx, sqlStr, convertToAny(params)...)
+		rows, err := r.db.DB().QueryContext(ctx, sqlStr, r.db.ConvertParams(params)...)
 		if err != nil {
 			return nil, err
 		}
@@ -526,7 +527,7 @@ func (r *RecordsRepository) GetExistingCIDs(ctx context.Context, cids []string) 
 			params[j] = database.Text(cid)
 		}
 
-		rows, err := r.db.DB().QueryContext(ctx, sqlStr, convertToAny(params)...)
+		rows, err := r.db.DB().QueryContext(ctx, sqlStr, r.db.ConvertParams(params)...)
 		if err != nil {
 			return nil, err
 		}
@@ -567,48 +568,10 @@ func scanRecords(rows *sql.Rows) ([]*Record, error) {
 			return nil, err
 		}
 		// Try various timestamp formats
-		rec.IndexedAt = parseTimestamp(indexedAtStr)
+		rec.IndexedAt = atproto.ParseTimestamp(indexedAtStr)
 		records = append(records, &rec)
 	}
 	return records, rows.Err()
-}
-
-func convertToAny(params []database.Value) []any {
-	args := make([]any, len(params))
-	for i, p := range params {
-		switch v := p.(type) {
-		case database.TextValue:
-			args[i] = string(v)
-		case database.IntValue:
-			args[i] = int64(v)
-		default:
-			args[i] = p
-		}
-	}
-	return args
-}
-
-// parseTimestamp tries various formats to parse a timestamp string
-func parseTimestamp(s string) time.Time {
-	formats := []string{
-		time.RFC3339,
-		time.RFC3339Nano,
-		"2006-01-02T15:04:05.999999Z07:00", // ISO with microseconds
-		"2006-01-02 15:04:05.999999-07",    // PostgreSQL with microseconds and timezone
-		"2006-01-02 15:04:05.999999+00",    // PostgreSQL with microseconds UTC
-		"2006-01-02 15:04:05.999999",       // PostgreSQL with microseconds no TZ
-		"2006-01-02 15:04:05-07",           // PostgreSQL with timezone
-		"2006-01-02 15:04:05+00",           // PostgreSQL UTC
-		"2006-01-02 15:04:05",              // SQLite format
-	}
-
-	for _, format := range formats {
-		if t, err := time.Parse(format, s); err == nil {
-			return t
-		}
-	}
-
-	return time.Time{} // Zero time if nothing matches
 }
 
 // IterateAll calls the provided function for each record in the database.
@@ -639,7 +602,7 @@ func (r *RecordsRepository) IterateAll(ctx context.Context, batchSize int, fn fu
 
 		var args []any
 		if params != nil {
-			args = convertToAny(params)
+			args = r.db.ConvertParams(params)
 		}
 
 		rows, err := r.db.DB().QueryContext(ctx, sqlStr, args...)

@@ -5,7 +5,7 @@ import (
 	"github.com/graphql-go/graphql"
 )
 
-// PageInfo represents Relay-style pagination info.
+// PageInfoType defines the Relay-style pagination info GraphQL type.
 var PageInfoType = graphql.NewObject(graphql.ObjectConfig{
 	Name:        "PageInfo",
 	Description: "Information about pagination in a connection",

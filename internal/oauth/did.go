@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Default PLC directory URL.
+// DefaultPLCDirectoryURL is the default PLC directory URL.
 const DefaultPLCDirectoryURL = "https://plc.directory"
 
 // DIDDocument represents a DID document.
@@ -40,9 +40,9 @@ type DIDResolver struct {
 type DIDResolverOption func(*DIDResolver)
 
 // WithPLCDirectoryURL sets the PLC directory URL.
-func WithPLCDirectoryURL(url string) DIDResolverOption {
+func WithPLCDirectoryURL(plcURL string) DIDResolverOption {
 	return func(r *DIDResolver) {
-		r.plcDirectoryURL = url
+		r.plcDirectoryURL = plcURL
 	}
 }
 
@@ -82,9 +82,9 @@ func (r *DIDResolver) ResolveDID(did string) (*DIDDocument, error) {
 
 // resolvePLCDID resolves a did:plc DID using the PLC directory.
 func (r *DIDResolver) resolvePLCDID(did string) (*DIDDocument, error) {
-	url := r.plcDirectoryURL + "/" + did
+	resolveURL := r.plcDirectoryURL + "/" + did
 
-	resp, err := r.httpClient.Get(url)
+	resp, err := r.httpClient.Get(resolveURL)
 	if err != nil {
 		return nil, fmt.Errorf("PLC request failed: %w", err)
 	}

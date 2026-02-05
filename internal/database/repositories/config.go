@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/GainForest/hypergoat/internal/database"
@@ -21,12 +20,19 @@ const (
 
 // ConfigRepository handles key-value configuration persistence.
 type ConfigRepository struct {
-	db database.Executor
+	db                   database.Executor
+	plcDirectoryOverride string // Set from app config to avoid os.Getenv in repo layer
 }
 
 // NewConfigRepository creates a new config repository.
 func NewConfigRepository(db database.Executor) *ConfigRepository {
 	return &ConfigRepository{db: db}
+}
+
+// SetPLCDirectoryOverride sets an override for the PLC directory URL,
+// allowing the caller to centralize env var reading in the config package.
+func (r *ConfigRepository) SetPLCDirectoryOverride(url string) {
+	r.plcDirectoryOverride = url
 }
 
 // Get retrieves a config value by key.
@@ -202,10 +208,10 @@ func (r *ConfigRepository) GetRelayURL(ctx context.Context) string {
 }
 
 // GetPLCDirectoryURL retrieves the PLC directory URL with precedence:
-// env var -> database -> default
+// config override -> database -> default
 func (r *ConfigRepository) GetPLCDirectoryURL(ctx context.Context) string {
-	if url := os.Getenv("PLC_DIRECTORY_URL"); url != "" {
-		return url
+	if r.plcDirectoryOverride != "" {
+		return r.plcDirectoryOverride
 	}
 	if url, err := r.Get(ctx, "plc_directory_url"); err == nil {
 		return url

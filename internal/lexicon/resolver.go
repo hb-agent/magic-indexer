@@ -101,7 +101,7 @@ func (r *Resolver) resolveNSIDToDID(ctx context.Context, nsid string) (string, e
 	q.Set("type", "TXT")
 	reqURL.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), http.NoBody)
 	if err != nil {
 		return "", err
 	}
@@ -146,7 +146,7 @@ func (r *Resolver) resolveNSIDToDID(ctx context.Context, nsid string) (string, e
 func (r *Resolver) resolvePDS(ctx context.Context, did string) (string, error) {
 	reqURL := fmt.Sprintf("%s/%s", r.plcURL, did)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
 	if err != nil {
 		return "", err
 	}
@@ -195,7 +195,7 @@ func (r *Resolver) fetchLexiconSchema(ctx context.Context, pdsURL, did, nsid str
 	q.Set("rkey", nsid)
 	reqURL.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), http.NoBody)
 	if err != nil {
 		return nil, err
 	}

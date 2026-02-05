@@ -3,6 +3,7 @@ package subscription
 
 import (
 	"encoding/json"
+	"strconv"
 	"sync"
 )
 
@@ -57,7 +58,7 @@ func (ps *PubSub) Subscribe(collection string) *Subscriber {
 	defer ps.mu.Unlock()
 
 	ps.nextID++
-	id := string(rune(ps.nextID))
+	id := strconv.FormatInt(ps.nextID, 10)
 
 	sub := &Subscriber{
 		ID:         id,
@@ -128,12 +129,4 @@ func (ps *PubSub) SubscriberCount() int {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	return len(ps.subscribers)
-}
-
-// Global instance for easy access
-var globalPubSub = NewPubSub()
-
-// Global returns the global PubSub instance.
-func Global() *PubSub {
-	return globalPubSub
 }

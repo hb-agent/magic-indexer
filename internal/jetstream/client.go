@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -230,20 +229,4 @@ func (c *Client) UpdateCursor(cursor int64) {
 	c.mu.Lock()
 	c.config.Cursor = cursor
 	c.mu.Unlock()
-}
-
-// ParseCollections parses a comma-separated list of collections.
-func ParseCollections(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	collections := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			collections = append(collections, p)
-		}
-	}
-	return collections
 }

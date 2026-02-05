@@ -127,21 +127,21 @@ func Rollback(ctx context.Context, exec database.Executor) error {
 }
 
 func createMigrationsTable(ctx context.Context, exec database.Executor) error {
-	var sql string
+	var sqlStr string
 	switch exec.Dialect() {
 	case database.PostgreSQL:
-		sql = `CREATE TABLE IF NOT EXISTS schema_migrations (
+		sqlStr = `CREATE TABLE IF NOT EXISTS schema_migrations (
 			version TEXT PRIMARY KEY,
 			applied_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 		)`
 	default:
-		sql = `CREATE TABLE IF NOT EXISTS schema_migrations (
+		sqlStr = `CREATE TABLE IF NOT EXISTS schema_migrations (
 			version TEXT PRIMARY KEY,
 			applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`
 	}
 
-	_, err := exec.DB().ExecContext(ctx, sql)
+	_, err := exec.DB().ExecContext(ctx, sqlStr)
 	return err
 }
 

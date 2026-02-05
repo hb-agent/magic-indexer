@@ -23,6 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/GainForest/hypergoat/internal/atproto"
 	"github.com/GainForest/hypergoat/internal/backfill"
 	"github.com/GainForest/hypergoat/internal/config"
 	"github.com/GainForest/hypergoat/internal/database/migrations"
@@ -113,6 +114,9 @@ func run() error {
 	actorsRepo := repositories.NewActorsRepository(db)
 	lexiconsRepo := repositories.NewLexiconsRepository(db)
 	configRepo := repositories.NewConfigRepository(db)
+	if cfg.PLCDirectoryURL != "" {
+		configRepo.SetPLCDirectoryOverride(cfg.PLCDirectoryURL)
+	}
 
 	// Initialize config defaults
 	ctx := context.Background()
@@ -121,7 +125,7 @@ func run() error {
 	}
 
 	// Initialize admin DIDs from environment if not already set in database
-	if adminDIDs := os.Getenv("ADMIN_DIDS"); adminDIDs != "" {
+	if adminDIDs := cfg.AdminDIDs; adminDIDs != "" {
 		existingAdmins := configRepo.GetAdminDIDs(ctx)
 		if len(existingAdmins) == 0 {
 			if err := configRepo.Set(ctx, "admin_dids", adminDIDs); err != nil {
@@ -317,10 +321,10 @@ func run() error {
 		cfg.ExternalBaseURL,
 	)
 
-	// Get domain DID from config or use a placeholder
-	domainDID := os.Getenv("DOMAIN_DID")
+	// Get domain DID from config or derive from host
+	domainDID := cfg.DomainDID
 	if domainDID == "" {
-		domainDID = "did:web:" + cfg.Host // Derive from host
+		domainDID = "did:web:" + cfg.Host
 	}
 
 	adminHandler, err := admin.NewHandler(adminRepos, authMiddleware, configRepo, domainDID, cfg.TrustProxyHeaders)
@@ -328,16 +332,9 @@ func run() error {
 		slog.Error("Failed to create admin GraphQL handler", "error", err)
 	} else {
 		// Wire up backfill callback for single-actor backfill from admin UI
-		backfillConfig := backfill.DefaultConfig()
-		backfillConfig.Collections = backfill.ParseCollections(os.Getenv("BACKFILL_COLLECTIONS"))
+		backfillConfig := backfill.NewConfigFromApp(cfg)
 		if backfillConfig.Collections == nil {
-			backfillConfig.Collections = backfill.ParseCollections(os.Getenv("JETSTREAM_COLLECTIONS"))
-		}
-		if relayURL := os.Getenv("BACKFILL_RELAY_URL"); relayURL != "" {
-			backfillConfig.RelayURL = relayURL
-		}
-		if plcURL := os.Getenv("BACKFILL_PLC_URL"); plcURL != "" {
-			backfillConfig.PLCURL = plcURL
+			backfillConfig.Collections = atproto.ParseCollections(cfg.JetstreamCollections)
 		}
 
 		backfillActivityRepo := repositories.NewJetstreamActivityRepository(db)
@@ -453,7 +450,7 @@ func run() error {
 
 	// Load lexicons and set up GraphQL endpoint
 	registry := lexicon.NewRegistry()
-	lexiconDir := os.Getenv("LEXICON_DIR")
+	lexiconDir := cfg.LexiconDir
 	if lexiconDir == "" {
 		// Default to testdata/lexicons for development
 		lexiconDir = "testdata/lexicons"
@@ -491,6 +488,9 @@ func run() error {
 		Actors:   actorsRepo,
 		Lexicons: lexiconsRepo,
 	}
+	// Create PubSub for GraphQL subscriptions (shared between subscriptions and Jetstream consumer)
+	pubsub := subscription.NewPubSub()
+
 	graphqlHandler, err := hgraphql.NewHandler(registry, repos)
 	if err != nil {
 		slog.Error("Failed to create GraphQL handler", "error", err)
@@ -507,19 +507,18 @@ func run() error {
 				allowedOrigins[i] = strings.TrimSpace(allowedOrigins[i])
 			}
 		}
-		subscriptionHandler := subscription.NewHandler(graphqlHandler.Schema(), allowedOrigins)
+		subscriptionHandler := subscription.NewHandler(graphqlHandler.Schema(), pubsub, allowedOrigins)
 		r.Handle("/graphql/ws", subscriptionHandler)
 		slog.Info("GraphQL subscriptions enabled", "path", "/graphql/ws")
 	}
 
 	// Start Jetstream consumer if collections are configured
 	var jsConsumer *jetstream.Consumer
-	jsCollections := os.Getenv("JETSTREAM_COLLECTIONS")
 
-	// If no env var, try to get collections from registered lexicons
+	// If no config, try to get collections from registered lexicons
 	var collections []string
-	if jsCollections != "" {
-		collections = jetstream.ParseCollections(jsCollections)
+	if cfg.JetstreamCollections != "" {
+		collections = atproto.ParseCollections(cfg.JetstreamCollections)
 	} else {
 		// Read from database lexicons
 		lexicons, err := lexiconsRepo.GetAll(ctx)
@@ -533,11 +532,11 @@ func run() error {
 	}
 
 	if len(collections) > 0 {
-		jsURL := os.Getenv("JETSTREAM_URL")
+		jsURL := cfg.JetstreamURL
 		if jsURL == "" {
 			jsURL = jetstream.DefaultJetstreamURL
 		}
-		disableCursor := os.Getenv("JETSTREAM_DISABLE_CURSOR") == "true"
+		disableCursor := cfg.JetstreamDisableCursor
 
 		activityRepo := repositories.NewJetstreamActivityRepository(db)
 		jsConsumer = jetstream.NewConsumer(
@@ -550,6 +549,7 @@ func run() error {
 			actorsRepo,
 			configRepo,
 			activityRepo,
+			pubsub,
 		)
 
 		// Start consumer in background
@@ -575,11 +575,11 @@ func run() error {
 		adminHandler.Resolver().SetLexiconChangeCallback(func(collections []string) error {
 			if jsConsumer == nil {
 				// Create consumer if it doesn't exist yet
-				jsURL := os.Getenv("JETSTREAM_URL")
+				jsURL := cfg.JetstreamURL
 				if jsURL == "" {
 					jsURL = jetstream.DefaultJetstreamURL
 				}
-				disableCursor := os.Getenv("JETSTREAM_DISABLE_CURSOR") == "true"
+				disableCursor := cfg.JetstreamDisableCursor
 				activityRepo := repositories.NewJetstreamActivityRepository(db)
 
 				jsConsumer = jetstream.NewConsumer(
@@ -592,6 +592,7 @@ func run() error {
 					actorsRepo,
 					configRepo,
 					activityRepo,
+					pubsub,
 				)
 
 				// Start consumer in background
@@ -611,26 +612,13 @@ func run() error {
 	}
 
 	// Run backfill if enabled
-	if os.Getenv("BACKFILL_ON_START") == "true" {
-		backfillCollections := os.Getenv("BACKFILL_COLLECTIONS")
-		if backfillCollections == "" {
-			backfillCollections = jsCollections // Default to jetstream collections
+	if cfg.BackfillOnStart {
+		bfConfig := backfill.NewConfigFromApp(cfg)
+		if bfConfig.Collections == nil {
+			bfConfig.Collections = atproto.ParseCollections(cfg.JetstreamCollections)
 		}
 
-		if backfillCollections != "" {
-			collections := backfill.ParseCollections(backfillCollections)
-			relayURL := os.Getenv("BACKFILL_RELAY_URL")
-			plcURL := os.Getenv("BACKFILL_PLC_URL")
-
-			bfConfig := backfill.DefaultConfig()
-			bfConfig.Collections = collections
-			if relayURL != "" {
-				bfConfig.RelayURL = relayURL
-			}
-			if plcURL != "" {
-				bfConfig.PLCURL = plcURL
-			}
-
+		if len(bfConfig.Collections) > 0 {
 			startupActivityRepo := repositories.NewJetstreamActivityRepository(db)
 			backfiller := backfill.NewBackfiller(bfConfig, recordsRepo, actorsRepo, startupActivityRepo)
 
@@ -721,38 +709,13 @@ func populateActivityFromRecords(
 	var count int64
 	_, err := recordsRepo.IterateAll(ctx, 1000, func(rec *repositories.Record) error {
 		// Extract createdAt from the record JSON, fall back to IndexedAt
-		timestamp := extractCreatedAtFromJSON(rec.JSON, rec.IndexedAt)
+		timestamp := atproto.ExtractCreatedAt(rec.JSON, rec.IndexedAt)
 
 		// Log as a successful create operation
-		_, err := activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success")
-		if err != nil {
-			return nil // Continue on error
+		if _, logErr := activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success"); logErr == nil {
+			count++
 		}
-		count++
 		return nil
 	})
 	return count, err
-}
-
-// extractCreatedAtFromJSON extracts the createdAt timestamp from a record's JSON.
-// Falls back to the provided fallback time if not found.
-func extractCreatedAtFromJSON(recordJSON string, fallback time.Time) time.Time {
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(recordJSON), &data); err != nil {
-		return fallback
-	}
-
-	// Try common timestamp field names
-	for _, field := range []string{"createdAt", "$createdAt", "created_at", "timestamp", "indexedAt"} {
-		if val, ok := data[field].(string); ok {
-			if t, err := time.Parse(time.RFC3339, val); err == nil {
-				return t
-			}
-			if t, err := time.Parse("2006-01-02T15:04:05", val); err == nil {
-				return t
-			}
-		}
-	}
-
-	return fallback
 }
