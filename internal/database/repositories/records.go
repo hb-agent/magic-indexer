@@ -301,7 +301,7 @@ func (r *RecordsRepository) GetByCollectionWithCursor(ctx context.Context, colle
 // GetByCollectionWithKeysetCursor retrieves records using deterministic keyset pagination.
 // The cursor is a composite (indexed_at, uri) pair. Records are ordered by (indexed_at DESC, uri DESC).
 // When afterTimestamp and afterURI are provided, returns records that sort after the cursor position.
-func (r *RecordsRepository) GetByCollectionWithKeysetCursor(ctx context.Context, collection string, limit int, afterTimestamp string, afterURI string) ([]*Record, error) {
+func (r *RecordsRepository) GetByCollectionWithKeysetCursor(ctx context.Context, collection string, limit int, afterTimestamp, afterURI string) ([]*Record, error) {
 	var sqlStr string
 	var args []any
 
