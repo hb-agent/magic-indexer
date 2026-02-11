@@ -6,12 +6,16 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver
 
 	"github.com/GainForest/hypergoat/internal/database"
 )
+
+// validJSONFieldName matches safe JSON field names to prevent SQL injection.
+var validJSONFieldName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // Executor implements database.Executor for PostgreSQL.
 type Executor struct {
@@ -33,23 +37,11 @@ func NewExecutor(databaseURL string) (*Executor, error) {
 
 	// Test the connection
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, database.ConnectionError("failed to ping PostgreSQL database", err)
 	}
 
 	return &Executor{db: db}, nil
-}
-
-// Query executes a query and scans results into dest.
-func (e *Executor) Query(ctx context.Context, sqlStr string, params []database.Value, dest any) error {
-	args := convertParams(params)
-	rows, err := e.db.QueryContext(ctx, sqlStr, args...)
-	if err != nil {
-		return database.QueryError("failed to execute query", err)
-	}
-	defer rows.Close()
-
-	return scanRows(rows, dest)
 }
 
 // QueryRow executes a query expected to return at most one row.
@@ -63,6 +55,16 @@ func (e *Executor) QueryRow(ctx context.Context, sqlStr string, params []databas
 		return database.QueryError("failed to scan row", err)
 	}
 	return nil
+}
+
+// BeginTx starts a new database transaction.
+func (e *Executor) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	return e.db.BeginTx(ctx, opts)
+}
+
+// ConvertParams converts []database.Value to []any for direct *sql.DB usage.
+func (e *Executor) ConvertParams(params []database.Value) []any {
+	return convertParams(params)
 }
 
 // Exec executes a statement without returning results.
@@ -103,14 +105,24 @@ func (e *Executor) Placeholders(count, startIndex int) string {
 }
 
 // JSONExtract generates PostgreSQL JSON extraction SQL.
+// The field parameter is validated to prevent SQL injection.
 func (e *Executor) JSONExtract(column, field string) string {
+	if !validJSONFieldName.MatchString(field) {
+		panic(fmt.Sprintf("postgres: invalid JSON field name: %q (must match ^[a-zA-Z_][a-zA-Z0-9_]*$)", field))
+	}
 	return fmt.Sprintf("%s->>'%s'", column, field)
 }
 
 // JSONExtractPath generates PostgreSQL JSON path extraction SQL.
+// All path segments are validated to prevent SQL injection.
 func (e *Executor) JSONExtractPath(column string, path []string) string {
 	if len(path) == 0 {
 		return column
+	}
+	for _, p := range path {
+		if !validJSONFieldName.MatchString(p) {
+			panic(fmt.Sprintf("postgres: invalid JSON path segment: %q (must match ^[a-zA-Z_][a-zA-Z0-9_]*$)", p))
+		}
 	}
 	if len(path) == 1 {
 		return fmt.Sprintf("%s->>'%s'", column, path[0])
@@ -175,19 +187,4 @@ func convertParams(params []database.Value) []any {
 		}
 	}
 	return args
-}
-
-// scanRows scans rows into a slice.
-// TODO: Implement struct scanning using reflection
-func scanRows(rows *sql.Rows, dest any) error {
-	// For now, we'll implement a simpler version that works with specific types
-	// This will be enhanced later to support generic struct scanning
-	columns, err := rows.Columns()
-	if err != nil {
-		return database.DecodeError("failed to get columns", err)
-	}
-
-	_ = columns
-	_ = dest
-	return nil
 }

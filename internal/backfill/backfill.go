@@ -2,16 +2,15 @@ package backfill
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/GainForest/hypergoat/internal/atproto"
+	"github.com/GainForest/hypergoat/internal/config"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/oauth"
 )
@@ -42,16 +41,9 @@ type Config struct {
 	MaxConcurrentRepos int
 }
 
-// DefaultConfig returns a default backfill configuration.
-// Configuration can be overridden via environment variables:
-//   - BACKFILL_RELAY_URL: Relay URL (default: https://relay1.us-west.bsky.network)
-//   - BACKFILL_PLC_URL: PLC directory URL (default: https://plc.directory)
-//   - BACKFILL_MAX_HTTP: Global max concurrent HTTP requests (default: 50)
-//   - BACKFILL_MAX_PDS_WORKERS: Max concurrent PDS workers (default: 10)
-//   - BACKFILL_MAX_PER_PDS: Max concurrent requests per PDS (default: 6)
-//   - BACKFILL_MAX_REPOS: Max concurrent DID resolutions (default: 50)
+// DefaultConfig returns a default backfill configuration with hardcoded defaults.
 func DefaultConfig() Config {
-	config := Config{
+	return Config{
 		RelayURL:            DefaultRelayURL,
 		PLCURL:              DefaultPLCURL,
 		MaxHTTPConcurrent:   50,
@@ -59,36 +51,35 @@ func DefaultConfig() Config {
 		MaxConcurrentPerPDS: 6,
 		MaxConcurrentRepos:  50,
 	}
+}
 
-	// Override with environment variables
-	if v := os.Getenv("BACKFILL_RELAY_URL"); v != "" {
-		config.RelayURL = v
+// NewConfigFromApp creates a backfill Config from the centralized app config.
+// Values that are zero/empty in the app config fall back to defaults.
+func NewConfigFromApp(cfg *config.Config) Config {
+	c := DefaultConfig()
+
+	if cfg.BackfillRelayURL != "" {
+		c.RelayURL = cfg.BackfillRelayURL
 	}
-	if v := os.Getenv("BACKFILL_PLC_URL"); v != "" {
-		config.PLCURL = v
+	if cfg.BackfillPLCURL != "" {
+		c.PLCURL = cfg.BackfillPLCURL
 	}
-	if v := os.Getenv("BACKFILL_MAX_HTTP"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			config.MaxHTTPConcurrent = n
-		}
+	if cfg.BackfillMaxHTTPConcurrent > 0 {
+		c.MaxHTTPConcurrent = cfg.BackfillMaxHTTPConcurrent
 	}
-	if v := os.Getenv("BACKFILL_MAX_PDS_WORKERS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			config.MaxPDSWorkers = n
-		}
+	if cfg.BackfillMaxPDSWorkers > 0 {
+		c.MaxPDSWorkers = cfg.BackfillMaxPDSWorkers
 	}
-	if v := os.Getenv("BACKFILL_MAX_PER_PDS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			config.MaxConcurrentPerPDS = n
-		}
+	if cfg.BackfillMaxPerPDS > 0 {
+		c.MaxConcurrentPerPDS = cfg.BackfillMaxPerPDS
 	}
-	if v := os.Getenv("BACKFILL_MAX_REPOS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			config.MaxConcurrentRepos = n
-		}
+	if cfg.BackfillMaxRepos > 0 {
+		c.MaxConcurrentRepos = cfg.BackfillMaxRepos
 	}
 
-	return config
+	c.Collections = atproto.ParseCollections(cfg.BackfillCollections)
+
+	return c
 }
 
 // Stats tracks backfill statistics.
@@ -131,14 +122,14 @@ type Backfiller struct {
 
 // NewBackfiller creates a new backfiller.
 func NewBackfiller(
-	config Config,
+	cfg Config,
 	recordsRepo *repositories.RecordsRepository,
 	actorsRepo *repositories.ActorsRepository,
 	activityRepo *repositories.JetstreamActivityRepository,
 ) *Backfiller {
 	// Create DID resolver with custom PLC URL
 	didResolver := oauth.NewDIDResolver(
-		oauth.WithPLCDirectoryURL(config.PLCURL),
+		oauth.WithPLCDirectoryURL(cfg.PLCURL),
 	)
 
 	// Create DID cache with 1 hour TTL
@@ -151,12 +142,12 @@ func NewBackfiller(
 	stopCleanup := didCache.StartCleanupRoutine(5 * time.Minute)
 
 	return &Backfiller{
-		config:           config,
-		client:           NewClient(config.RelayURL, config.PLCURL, config.MaxHTTPConcurrent),
+		config:           cfg,
+		client:           NewClient(cfg.RelayURL, cfg.PLCURL, cfg.MaxHTTPConcurrent),
 		recordsRepo:      recordsRepo,
 		actorsRepo:       actorsRepo,
 		activityRepo:     activityRepo,
-		httpSem:          make(chan struct{}, config.MaxHTTPConcurrent),
+		httpSem:          make(chan struct{}, cfg.MaxHTTPConcurrent),
 		didCache:         didCache,
 		stopCacheCleanup: stopCleanup,
 	}
@@ -538,7 +529,7 @@ func (b *Backfiller) processRepo(ctx context.Context, pdsURL string, data *Atpro
 			// Log activity for each inserted record (with 'success' status since already inserted)
 			if b.activityRepo != nil {
 				for _, rec := range filteredRecords {
-					timestamp := extractCreatedAt(rec.JSON)
+					timestamp := atproto.ExtractCreatedAt(rec.JSON, time.Now())
 					_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success")
 					if err != nil {
 						slog.Debug("[backfill] Failed to log activity", "uri", rec.URI, "error", err)
@@ -616,12 +607,10 @@ func (b *Backfiller) filterByExistingCIDs(ctx context.Context, records []*reposi
 				skipped++
 				continue
 			}
-		} else {
+		} else if existingCIDs[rec.CID] {
 			// URI doesn't exist - check if CID exists elsewhere (duplicate content)
-			if existingCIDs[rec.CID] {
-				skipped++
-				continue
-			}
+			skipped++
+			continue
 		}
 
 		filtered = append(filtered, rec)
@@ -667,7 +656,7 @@ func (b *Backfiller) processRepoLegacy(ctx context.Context, pdsURL string, data 
 				atomic.AddInt64(&b.stats.RecordsInserted, 1)
 				// Log activity for the inserted record
 				if b.activityRepo != nil {
-					timestamp := extractCreatedAt(string(rec.Value))
+					timestamp := atproto.ExtractCreatedAt(string(rec.Value), time.Now())
 					rkey := extractRKeyFromURI(rec.URI)
 					_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", collection, data.DID, rkey, string(rec.Value), "success")
 					if err != nil {
@@ -751,7 +740,7 @@ func (b *Backfiller) BackfillActor(ctx context.Context, did string) (int, error)
 		// Log activity for each inserted record
 		if b.activityRepo != nil {
 			for _, rec := range filteredRecords {
-				timestamp := extractCreatedAt(rec.JSON)
+				timestamp := atproto.ExtractCreatedAt(rec.JSON, time.Now())
 				_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success")
 				if err != nil {
 					slog.Debug("[backfill] Failed to log activity", "uri", rec.URI, "error", err)
@@ -795,7 +784,7 @@ func (b *Backfiller) backfillActorLegacy(ctx context.Context, data *AtprotoData)
 				totalRecords++
 				// Log activity for the inserted record
 				if b.activityRepo != nil {
-					timestamp := extractCreatedAt(string(rec.Value))
+					timestamp := atproto.ExtractCreatedAt(string(rec.Value), time.Now())
 					rkey := extractRKeyFromURI(rec.URI)
 					_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", collection, data.DID, rkey, string(rec.Value), "success")
 					if err != nil {
@@ -814,23 +803,6 @@ func (b *Backfiller) backfillActorLegacy(ctx context.Context, data *AtprotoData)
 	return totalRecords, nil
 }
 
-// ParseCollections parses a comma-separated list of collections.
-func ParseCollections(s string) []string {
-	if s == "" {
-		return nil
-	}
-
-	parts := strings.Split(s, ",")
-	result := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			result = append(result, p)
-		}
-	}
-	return result
-}
-
 // extractRKeyFromURI extracts the rkey from an AT-URI (at://did/collection/rkey).
 func extractRKeyFromURI(uri string) string {
 	// URI format: at://did/collection/rkey
@@ -839,27 +811,4 @@ func extractRKeyFromURI(uri string) string {
 		return parts[len(parts)-1]
 	}
 	return ""
-}
-
-// extractCreatedAt extracts the createdAt timestamp from a record's JSON.
-// Returns the parsed time or the current time if not found/parseable.
-func extractCreatedAt(recordJSON string) time.Time {
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(recordJSON), &data); err != nil {
-		return time.Now()
-	}
-
-	// Try common timestamp field names
-	for _, field := range []string{"createdAt", "$createdAt", "created_at", "timestamp", "indexedAt"} {
-		if val, ok := data[field].(string); ok {
-			if t, err := time.Parse(time.RFC3339, val); err == nil {
-				return t
-			}
-			if t, err := time.Parse("2006-01-02T15:04:05", val); err == nil {
-				return t
-			}
-		}
-	}
-
-	return time.Now()
 }

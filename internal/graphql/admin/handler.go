@@ -14,14 +14,17 @@ import (
 
 // Handler handles admin GraphQL requests with authentication.
 type Handler struct {
-	schema     *graphql.Schema
-	resolver   *Resolver
-	middleware *oauth.AuthMiddleware
-	configRepo *repositories.ConfigRepository
+	schema            *graphql.Schema
+	resolver          *Resolver
+	middleware        *oauth.AuthMiddleware
+	configRepo        *repositories.ConfigRepository
+	trustProxyHeaders bool
 }
 
 // NewHandler creates a new admin GraphQL handler.
-func NewHandler(repos *Repositories, middleware *oauth.AuthMiddleware, configRepo *repositories.ConfigRepository, domainDID string) (*Handler, error) {
+// trustProxyHeaders controls whether the X-User-DID header is trusted for authentication.
+// This should only be true when running behind a trusted reverse proxy.
+func NewHandler(repos *Repositories, middleware *oauth.AuthMiddleware, configRepo *repositories.ConfigRepository, domainDID string, trustProxyHeaders bool) (*Handler, error) {
 	resolver := NewResolver(repos, domainDID)
 
 	builder := NewSchemaBuilder(resolver)
@@ -31,25 +34,17 @@ func NewHandler(repos *Repositories, middleware *oauth.AuthMiddleware, configRep
 	}
 
 	return &Handler{
-		schema:     schema,
-		resolver:   resolver,
-		middleware: middleware,
-		configRepo: configRepo,
+		schema:            schema,
+		resolver:          resolver,
+		middleware:        middleware,
+		configRepo:        configRepo,
+		trustProxyHeaders: trustProxyHeaders,
 	}, nil
 }
 
 // ServeHTTP handles admin GraphQL HTTP requests.
+// CORS is handled by the router-level middleware; not duplicated here.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Handle CORS
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, DPoP, X-User-DID")
-
-	if r.Method == "OPTIONS" {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
 	// Parse the request
 	var params struct {
 		Query         string                 `json:"query"`
@@ -76,9 +71,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userDID := oauth.UserIDFromContext(ctx)
 
-	// Fall back to X-User-DID header if no OAuth token (for Next.js frontend proxy)
-	if userDID == "" {
+	// Only trust X-User-DID header when explicitly configured (TRUST_PROXY_HEADERS=true).
+	// This is intended for deployments behind a trusted reverse proxy (e.g., Next.js frontend).
+	// WARNING: Without a trusted proxy, this header can be spoofed by any client.
+	if userDID == "" && h.trustProxyHeaders {
 		userDID = r.Header.Get("X-User-DID")
+		if userDID != "" {
+			slog.Warn("[admin] Auth via X-User-DID proxy header",
+				"did", userDID,
+				"remote_addr", r.RemoteAddr)
+		}
 	}
 	handle := "" // Would need to resolve from DID
 

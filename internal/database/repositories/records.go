@@ -9,7 +9,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GainForest/hypergoat/internal/atproto"
 	"github.com/GainForest/hypergoat/internal/database"
+)
+
+// Batch size constants for SQL operations.
+const (
+	// BatchInsertSize is the number of records per INSERT batch (5 params each = 500 SQL params).
+	BatchInsertSize = 100
+
+	// SQLParamBatchSize is the batch size for IN-clause queries, kept under SQLite's 999 param limit.
+	SQLParamBatchSize = 900
+
+	// DefaultIterateBatchSize is the default batch size for IterateAll when none specified.
+	DefaultIterateBatchSize = 1000
 )
 
 // Record represents an AT Protocol record stored in the database.
@@ -131,14 +144,14 @@ func (r *RecordsRepository) BatchInsert(ctx context.Context, records []*Record) 
 	}
 
 	// Start transaction for all batches
-	tx, err := r.db.DB().BeginTx(ctx, nil)
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback() // Rollback is a no-op if Commit succeeds
 
-	// Process in batches of 100 (5 params per record)
-	batchSize := 100
+	// Process in batches to stay within SQL parameter limits
+	batchSize := BatchInsertSize
 	for i := 0; i < len(records); i += batchSize {
 		end := i + batchSize
 		if end > len(records) {
@@ -242,7 +255,7 @@ func (r *RecordsRepository) GetByURIs(ctx context.Context, uris []string) ([]*Re
 		params[i] = database.Text(uri)
 	}
 
-	rows, err := r.db.DB().QueryContext(ctx, sqlStr, convertToAny(params)...)
+	rows, err := r.db.DB().QueryContext(ctx, sqlStr, r.db.ConvertParams(params)...)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +266,7 @@ func (r *RecordsRepository) GetByURIs(ctx context.Context, uris []string) ([]*Re
 
 // GetByCollection retrieves records for a specific collection.
 func (r *RecordsRepository) GetByCollection(ctx context.Context, collection string, limit int) ([]*Record, error) {
-	return r.GetByCollectionWithCursor(ctx, collection, limit, "")
+	return r.GetByCollectionWithKeysetCursor(ctx, collection, limit, "", "")
 }
 
 // GetByCollectionWithCursor retrieves records for a specific collection with cursor-based pagination.
@@ -274,6 +287,35 @@ func (r *RecordsRepository) GetByCollectionWithCursor(ctx context.Context, colle
 		sqlStr = fmt.Sprintf("SELECT %s FROM record WHERE collection = %s AND indexed_at < %s ORDER BY indexed_at DESC, uri DESC LIMIT %d",
 			r.recordColumns(), r.db.Placeholder(1), r.db.Placeholder(2), limit)
 		args = []any{collection, afterTimestamp}
+	}
+
+	rows, err := r.db.DB().QueryContext(ctx, sqlStr, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanRecords(rows)
+}
+
+// GetByCollectionWithKeysetCursor retrieves records using deterministic keyset pagination.
+// The cursor is a composite (indexed_at, uri) pair. Records are ordered by (indexed_at DESC, uri DESC).
+// When afterTimestamp and afterURI are provided, returns records that sort after the cursor position.
+func (r *RecordsRepository) GetByCollectionWithKeysetCursor(ctx context.Context, collection string, limit int, afterTimestamp, afterURI string) ([]*Record, error) {
+	var sqlStr string
+	var args []any
+
+	if afterTimestamp == "" && afterURI == "" {
+		// No cursor - get first page
+		sqlStr = fmt.Sprintf("SELECT %s FROM record WHERE collection = %s ORDER BY indexed_at DESC, uri DESC LIMIT %d",
+			r.recordColumns(), r.db.Placeholder(1), limit)
+		args = []any{collection}
+	} else {
+		// Keyset pagination: get records that sort after (afterTimestamp, afterURI)
+		// ORDER BY indexed_at DESC, uri DESC means "after" = less than
+		sqlStr = fmt.Sprintf("SELECT %s FROM record WHERE collection = %s AND (indexed_at < %s OR (indexed_at = %s AND uri < %s)) ORDER BY indexed_at DESC, uri DESC LIMIT %d",
+			r.recordColumns(), r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), limit)
+		args = []any{collection, afterTimestamp, afterTimestamp, afterURI}
 	}
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, args...)
@@ -356,7 +398,7 @@ func (r *RecordsRepository) GetCollectionStatsFiltered(ctx context.Context, coll
 		params[i] = database.Text(c)
 	}
 
-	rows, err := r.db.DB().QueryContext(ctx, sqlStr, convertToAny(params)...)
+	rows, err := r.db.DB().QueryContext(ctx, sqlStr, r.db.ConvertParams(params)...)
 	if err != nil {
 		return nil, err
 	}
@@ -461,7 +503,7 @@ func (r *RecordsRepository) GetCIDsByURIs(ctx context.Context, uris []string) (m
 	result := make(map[string]string)
 
 	// Process in batches of 900 to avoid SQL parameter limits
-	batchSize := 900
+	batchSize := SQLParamBatchSize
 	for i := 0; i < len(uris); i += batchSize {
 		end := i + batchSize
 		if end > len(uris) {
@@ -477,7 +519,7 @@ func (r *RecordsRepository) GetCIDsByURIs(ctx context.Context, uris []string) (m
 			params[j] = database.Text(uri)
 		}
 
-		rows, err := r.db.DB().QueryContext(ctx, sqlStr, convertToAny(params)...)
+		rows, err := r.db.DB().QueryContext(ctx, sqlStr, r.db.ConvertParams(params)...)
 		if err != nil {
 			return nil, err
 		}
@@ -510,7 +552,7 @@ func (r *RecordsRepository) GetExistingCIDs(ctx context.Context, cids []string) 
 	result := make(map[string]bool)
 
 	// Process in batches of 900 to avoid SQL parameter limits
-	batchSize := 900
+	batchSize := SQLParamBatchSize
 	for i := 0; i < len(cids); i += batchSize {
 		end := i + batchSize
 		if end > len(cids) {
@@ -526,7 +568,7 @@ func (r *RecordsRepository) GetExistingCIDs(ctx context.Context, cids []string) 
 			params[j] = database.Text(cid)
 		}
 
-		rows, err := r.db.DB().QueryContext(ctx, sqlStr, convertToAny(params)...)
+		rows, err := r.db.DB().QueryContext(ctx, sqlStr, r.db.ConvertParams(params)...)
 		if err != nil {
 			return nil, err
 		}
@@ -567,48 +609,10 @@ func scanRecords(rows *sql.Rows) ([]*Record, error) {
 			return nil, err
 		}
 		// Try various timestamp formats
-		rec.IndexedAt = parseTimestamp(indexedAtStr)
+		rec.IndexedAt = atproto.ParseTimestamp(indexedAtStr)
 		records = append(records, &rec)
 	}
 	return records, rows.Err()
-}
-
-func convertToAny(params []database.Value) []any {
-	args := make([]any, len(params))
-	for i, p := range params {
-		switch v := p.(type) {
-		case database.TextValue:
-			args[i] = string(v)
-		case database.IntValue:
-			args[i] = int64(v)
-		default:
-			args[i] = p
-		}
-	}
-	return args
-}
-
-// parseTimestamp tries various formats to parse a timestamp string
-func parseTimestamp(s string) time.Time {
-	formats := []string{
-		time.RFC3339,
-		time.RFC3339Nano,
-		"2006-01-02T15:04:05.999999Z07:00", // ISO with microseconds
-		"2006-01-02 15:04:05.999999-07",    // PostgreSQL with microseconds and timezone
-		"2006-01-02 15:04:05.999999+00",    // PostgreSQL with microseconds UTC
-		"2006-01-02 15:04:05.999999",       // PostgreSQL with microseconds no TZ
-		"2006-01-02 15:04:05-07",           // PostgreSQL with timezone
-		"2006-01-02 15:04:05+00",           // PostgreSQL UTC
-		"2006-01-02 15:04:05",              // SQLite format
-	}
-
-	for _, format := range formats {
-		if t, err := time.Parse(format, s); err == nil {
-			return t
-		}
-	}
-
-	return time.Time{} // Zero time if nothing matches
 }
 
 // IterateAll calls the provided function for each record in the database.
@@ -616,7 +620,7 @@ func parseTimestamp(s string) time.Time {
 // Returns the total number of records processed.
 func (r *RecordsRepository) IterateAll(ctx context.Context, batchSize int, fn func(*Record) error) (int64, error) {
 	if batchSize <= 0 {
-		batchSize = 1000
+		batchSize = DefaultIterateBatchSize
 	}
 
 	var totalProcessed int64
@@ -639,7 +643,7 @@ func (r *RecordsRepository) IterateAll(ctx context.Context, batchSize int, fn fu
 
 		var args []any
 		if params != nil {
-			args = convertToAny(params)
+			args = r.db.ConvertParams(params)
 		}
 
 		rows, err := r.db.DB().QueryContext(ctx, sqlStr, args...)

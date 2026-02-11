@@ -12,10 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/GainForest/hypergoat/internal/atproto"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/lexicon"
 	"github.com/GainForest/hypergoat/internal/oauth"
@@ -47,7 +50,7 @@ type LexiconChangeCallback func(collections []string) error
 // Resolver provides methods for resolving admin GraphQL queries and mutations.
 type Resolver struct {
 	repos                 *Repositories
-	backfillActive        bool
+	backfillActive        atomic.Bool
 	domainDID             string // The DID of this labeler instance
 	backfillCallback      BackfillCallback
 	fullBackfillCallback  FullBackfillCallback
@@ -95,7 +98,7 @@ func (r *Resolver) notifyLexiconChange(ctx context.Context) {
 
 	if err := r.lexiconChangeCallback(collections); err != nil {
 		// Log but don't fail the operation
-		fmt.Printf("Failed to notify lexicon change: %v\n", err)
+		slog.Warn("Failed to notify lexicon change", "error", err)
 	}
 }
 
@@ -175,12 +178,12 @@ func (r *Resolver) Settings(ctx context.Context) (map[string]interface{}, error)
 
 // IsBackfilling returns whether a backfill is currently active.
 func (r *Resolver) IsBackfilling() bool {
-	return r.backfillActive
+	return r.backfillActive.Load()
 }
 
 // SetBackfillActive sets the backfill status.
 func (r *Resolver) SetBackfillActive(active bool) {
-	r.backfillActive = active
+	r.backfillActive.Store(active)
 }
 
 // Lexicons returns all lexicon definitions.
@@ -225,8 +228,22 @@ func (r *Resolver) OAuthClients(ctx context.Context) ([]map[string]interface{}, 
 	return result, nil
 }
 
+// Upload size limits for lexicon ZIP files.
+const (
+	maxLexiconUploadBytes = 10 * 1024 * 1024 // 10MB max ZIP size
+	maxLexiconFileCount   = 500              // Max files in ZIP
+	maxLexiconFileSize    = 1 * 1024 * 1024  // 1MB max per file
+)
+
 // UploadLexicons extracts lexicons from a base64-encoded ZIP file.
 func (r *Resolver) UploadLexicons(ctx context.Context, zipBase64 string) (int, error) {
+	// Validate base64 input size before decoding (base64 encodes 3 bytes as 4 chars)
+	maxBase64Len := maxLexiconUploadBytes * 4 / 3
+	if len(zipBase64) > maxBase64Len {
+		return 0, fmt.Errorf("upload too large: estimated %d bytes exceeds %d byte limit",
+			len(zipBase64)*3/4, maxLexiconUploadBytes)
+	}
+
 	// Decode base64
 	zipData, err := base64.StdEncoding.DecodeString(zipBase64)
 	if err != nil {
@@ -239,6 +256,12 @@ func (r *Resolver) UploadLexicons(ctx context.Context, zipBase64 string) (int, e
 		return 0, fmt.Errorf("invalid ZIP file: %w", err)
 	}
 
+	// Check file count to prevent zip bombs
+	if len(zipReader.File) > maxLexiconFileCount {
+		return 0, fmt.Errorf("too many files in ZIP: %d exceeds limit of %d",
+			len(zipReader.File), maxLexiconFileCount)
+	}
+
 	// Process each file
 	count := 0
 	for _, file := range zipReader.File {
@@ -247,33 +270,43 @@ func (r *Resolver) UploadLexicons(ctx context.Context, zipBase64 string) (int, e
 			continue
 		}
 
-		// Open and read file
+		// Check individual uncompressed file size
+		if file.UncompressedSize64 > maxLexiconFileSize {
+			return count, fmt.Errorf("file %s too large: %d bytes exceeds %d byte limit",
+				file.Name, file.UncompressedSize64, maxLexiconFileSize)
+		}
+
+		// Open and read file with size limit
 		rc, err := file.Open()
 		if err != nil {
 			continue
 		}
 
-		data, err := io.ReadAll(rc)
-		rc.Close()
+		data, err := io.ReadAll(io.LimitReader(rc, maxLexiconFileSize+1))
+		_ = rc.Close()
 		if err != nil {
 			continue
 		}
+		if len(data) > maxLexiconFileSize {
+			return count, fmt.Errorf("file %s exceeds %d byte limit after decompression",
+				file.Name, maxLexiconFileSize)
+		}
 
 		// Parse JSON to extract lexicon ID
-		var lexicon struct {
+		var lexEntry struct {
 			ID string `json:"id"`
 		}
-		if err := json.Unmarshal(data, &lexicon); err != nil {
+		if err := json.Unmarshal(data, &lexEntry); err != nil {
 			continue
 		}
 
-		if lexicon.ID == "" {
+		if lexEntry.ID == "" {
 			continue
 		}
 
 		// Upsert lexicon
-		if err := r.repos.Lexicons.Upsert(ctx, lexicon.ID, string(data)); err != nil {
-			return count, fmt.Errorf("failed to save lexicon %s: %w", lexicon.ID, err)
+		if err := r.repos.Lexicons.Upsert(ctx, lexEntry.ID, string(data)); err != nil {
+			return count, fmt.Errorf("failed to save lexicon %s: %w", lexEntry.ID, err)
 		}
 		count++
 	}
@@ -287,26 +320,24 @@ func (r *Resolver) UploadLexicons(ctx context.Context, zipBase64 string) (int, e
 }
 
 // TriggerBackfill starts a full backfill process.
+// Uses atomic CompareAndSwap to prevent concurrent backfill launches (race-safe).
 func (r *Resolver) TriggerBackfill(ctx context.Context) (bool, error) {
-	if r.backfillActive {
-		return false, fmt.Errorf("backfill already in progress")
-	}
-
 	if r.fullBackfillCallback == nil {
 		return false, fmt.Errorf("full backfill not configured")
 	}
 
-	r.backfillActive = true
+	// Atomically check-and-set to prevent concurrent backfill launches
+	if !r.backfillActive.CompareAndSwap(false, true) {
+		return false, fmt.Errorf("backfill already in progress")
+	}
 
 	// Run backfill in background goroutine
 	go func() {
-		defer func() {
-			r.backfillActive = false
-		}()
+		defer r.backfillActive.Store(false)
 
 		// Use background context since HTTP request context will be cancelled
 		if err := r.fullBackfillCallback(context.Background()); err != nil {
-			// Error is logged by the callback
+			slog.Error("[backfill] Full backfill failed in background", "error", err)
 			return
 		}
 	}()
@@ -932,15 +963,12 @@ func (r *Resolver) PopulateActivity(ctx context.Context) (int64, error) {
 	var count int64
 	_, err := r.repos.Records.IterateAll(ctx, 1000, func(rec *repositories.Record) error {
 		// Extract createdAt from the record JSON
-		timestamp := extractCreatedAt(rec.JSON)
+		timestamp := atproto.ExtractCreatedAt(rec.JSON, time.Now())
 
 		// Log as a successful create operation
-		_, err := r.repos.Activity.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success")
-		if err != nil {
-			// Log error but continue processing
-			return nil
+		if _, logErr := r.repos.Activity.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success"); logErr == nil {
+			count++
 		}
-		count++
 		return nil
 	})
 
@@ -949,29 +977,6 @@ func (r *Resolver) PopulateActivity(ctx context.Context) (int64, error) {
 	}
 
 	return count, nil
-}
-
-// extractCreatedAt extracts the createdAt timestamp from a record's JSON.
-// Returns the parsed time or the current time if not found/parseable.
-func extractCreatedAt(recordJSON string) time.Time {
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(recordJSON), &data); err != nil {
-		return time.Now()
-	}
-
-	// Try common timestamp field names
-	for _, field := range []string{"createdAt", "$createdAt", "created_at", "timestamp", "indexedAt"} {
-		if val, ok := data[field].(string); ok {
-			if t, err := time.Parse(time.RFC3339, val); err == nil {
-				return t
-			}
-			if t, err := time.Parse("2006-01-02T15:04:05", val); err == nil {
-				return t
-			}
-		}
-	}
-
-	return time.Now()
 }
 
 // CreateLabel creates a new label on a record or account.

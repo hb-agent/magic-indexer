@@ -35,7 +35,9 @@ func createMinimalSchema() (*graphqlgo.Schema, error) {
 	return &schema, nil
 }
 
-func TestHandler_ServeHTTP_CORS(t *testing.T) {
+func TestHandler_ServeHTTP_NoCORSInHandler(t *testing.T) {
+	// CORS is handled by the router-level CORSMiddleware, not the handler.
+	// Verify the handler does NOT set CORS headers directly.
 	schema, err := createMinimalSchema()
 	if err != nil {
 		t.Fatalf("failed to create schema: %v", err)
@@ -43,26 +45,17 @@ func TestHandler_ServeHTTP_CORS(t *testing.T) {
 
 	handler := &Handler{schema: schema, repos: nil}
 
-	t.Run("OPTIONS request returns CORS headers", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodOptions, "/graphql", nil)
+	t.Run("handler does not set CORS headers", func(t *testing.T) {
+		body := map[string]interface{}{"query": "{ ping }"}
+		bodyBytes, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 
 		handler.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
-		}
-
-		headers := []string{
-			"Access-Control-Allow-Origin",
-			"Access-Control-Allow-Methods",
-			"Access-Control-Allow-Headers",
-		}
-
-		for _, header := range headers {
-			if w.Header().Get(header) == "" {
-				t.Errorf("expected header %s to be set", header)
-			}
+		if w.Header().Get("Access-Control-Allow-Origin") != "" {
+			t.Error("handler should not set Access-Control-Allow-Origin (CORS is middleware's job)")
 		}
 	})
 }

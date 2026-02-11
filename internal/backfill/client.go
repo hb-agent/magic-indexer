@@ -90,9 +90,9 @@ func retryPolicy(ctx context.Context, resp *http.Response, err error) (bool, err
 		return false, ctx.Err()
 	}
 
-	// Retry on connection errors
+	// Retry on connection errors (err is intentionally not propagated - retry handles it)
 	if err != nil {
-		return true, nil
+		return true, nil //nolint:nilerr // intentional: signal retry without propagating transient error
 	}
 
 	// Only retry on specific status codes
@@ -322,12 +322,12 @@ type ListRecordsResponse struct {
 }
 
 // ListRecords fetches all records for a repo and collection from a PDS.
-func (c *Client) ListRecords(ctx context.Context, pdsURL, repo, collection string) ([]ListRecordsRecord, error) {
+func (c *Client) ListRecords(ctx context.Context, pdsURL, repoDID, collection string) ([]ListRecordsRecord, error) {
 	var allRecords []ListRecordsRecord
 	var cursor string
 
 	for {
-		records, nextCursor, err := c.listRecordsPage(ctx, pdsURL, repo, collection, cursor)
+		records, nextCursor, err := c.listRecordsPage(ctx, pdsURL, repoDID, collection, cursor)
 		if err != nil {
 			return nil, err
 		}
@@ -343,14 +343,14 @@ func (c *Client) ListRecords(ctx context.Context, pdsURL, repo, collection strin
 	return allRecords, nil
 }
 
-func (c *Client) listRecordsPage(ctx context.Context, pdsURL, repo, collection, cursor string) ([]ListRecordsRecord, string, error) {
+func (c *Client) listRecordsPage(ctx context.Context, pdsURL, repoDID, collection, cursor string) ([]ListRecordsRecord, string, error) {
 	u, err := url.Parse(pdsURL + "/xrpc/com.atproto.repo.listRecords")
 	if err != nil {
 		return nil, "", err
 	}
 
 	q := u.Query()
-	q.Set("repo", repo)
+	q.Set("repo", repoDID)
 	q.Set("collection", collection)
 	q.Set("limit", "100")
 	if cursor != "" {
@@ -451,7 +451,7 @@ func (c *Client) GetRepo(ctx context.Context, pdsURL, did string, collections []
 		// Get record bytes
 		recCid, recordBytes, err := r.GetRecordBytes(ctx, path)
 		if err != nil {
-			return nil // Skip records we can't read
+			return nil //nolint:nilerr // skip unreadable records, continue iteration
 		}
 		if recordBytes == nil {
 			return nil

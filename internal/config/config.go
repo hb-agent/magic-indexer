@@ -23,21 +23,41 @@ type Config struct {
 	DatabaseURL string
 
 	// Security
-	SecretKeyBase string
+	SecretKeyBase     string
+	TrustProxyHeaders bool   // Trust X-User-DID header from reverse proxy (default: false, DANGEROUS if true without proxy)
+	AllowedOrigins    string // Comma-separated allowed WebSocket/CORS origins (empty = same-origin only, "*" = allow all)
 
 	// OAuth
 	ExternalBaseURL   string
 	OAuthSigningKey   string
 	OAuthLoopbackMode bool
 
+	// Admin
+	AdminDIDs string // Comma-separated list of admin DIDs
+	DomainDID string // Domain DID for identity
+
+	// Lexicons
+	LexiconDir string // Directory to load lexicon JSON files from
+
 	// Jetstream
-	JetstreamDisableCursor bool
+	JetstreamURL           string // Jetstream WebSocket URL
+	JetstreamCollections   string // Comma-separated collections to subscribe to
+	JetstreamDisableCursor bool   // Disable cursor-based resume
 
 	// Backfill
+	BackfillOnStart           bool   // Run backfill on server start
+	BackfillCollections       string // Comma-separated collections to backfill (defaults to JetstreamCollections)
+	BackfillRelayURL          string // AT Protocol relay URL
+	BackfillPLCURL            string // PLC directory URL
 	BackfillPDSConcurrency    int
 	BackfillMaxPDSWorkers     int
 	BackfillMaxHTTPConcurrent int
+	BackfillMaxPerPDS         int
+	BackfillMaxRepos          int
 	BackfillRepoTimeoutMS     int
+
+	// PLC Directory
+	PLCDirectoryURL string // PLC directory URL for DID resolution
 }
 
 // Load reads configuration from environment variables.
@@ -47,18 +67,49 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		Host:                      getEnv("HOST", "127.0.0.1"),
-		Port:                      getEnvInt("PORT", 8080),
-		DatabaseURL:               getEnv("DATABASE_URL", "sqlite:data/hypergoat.db"),
-		SecretKeyBase:             getEnv("SECRET_KEY_BASE", ""),
-		ExternalBaseURL:           getEnv("EXTERNAL_BASE_URL", ""),
-		OAuthSigningKey:           getEnv("OAUTH_SIGNING_KEY", ""),
-		OAuthLoopbackMode:         getEnvBool("OAUTH_LOOPBACK_MODE", false),
-		JetstreamDisableCursor:    getEnvBool("JETSTREAM_DISABLE_CURSOR", false),
+		// Server
+		Host: getEnv("HOST", "127.0.0.1"),
+		Port: getEnvInt("PORT", 8080),
+
+		// Database
+		DatabaseURL: getEnv("DATABASE_URL", "sqlite:data/hypergoat.db"),
+
+		// Security
+		SecretKeyBase:     getEnv("SECRET_KEY_BASE", ""),
+		TrustProxyHeaders: getEnvBool("TRUST_PROXY_HEADERS", false),
+		AllowedOrigins:    getEnv("ALLOWED_ORIGINS", ""),
+
+		// OAuth
+		ExternalBaseURL:   getEnv("EXTERNAL_BASE_URL", ""),
+		OAuthSigningKey:   getEnv("OAUTH_SIGNING_KEY", ""),
+		OAuthLoopbackMode: getEnvBool("OAUTH_LOOPBACK_MODE", false),
+
+		// Admin
+		AdminDIDs: getEnv("ADMIN_DIDS", ""),
+		DomainDID: getEnv("DOMAIN_DID", ""),
+
+		// Lexicons
+		LexiconDir: getEnv("LEXICON_DIR", ""),
+
+		// Jetstream
+		JetstreamURL:           getEnv("JETSTREAM_URL", ""),
+		JetstreamCollections:   getEnv("JETSTREAM_COLLECTIONS", ""),
+		JetstreamDisableCursor: getEnvBool("JETSTREAM_DISABLE_CURSOR", false),
+
+		// Backfill
+		BackfillOnStart:           getEnvBool("BACKFILL_ON_START", false),
+		BackfillCollections:       getEnv("BACKFILL_COLLECTIONS", ""),
+		BackfillRelayURL:          getEnv("BACKFILL_RELAY_URL", ""),
+		BackfillPLCURL:            getEnv("BACKFILL_PLC_URL", ""),
 		BackfillPDSConcurrency:    getEnvInt("BACKFILL_PDS_CONCURRENCY", 4),
 		BackfillMaxPDSWorkers:     getEnvInt("BACKFILL_MAX_PDS_WORKERS", 10),
-		BackfillMaxHTTPConcurrent: getEnvInt("BACKFILL_MAX_HTTP_CONCURRENT", 50),
+		BackfillMaxHTTPConcurrent: getEnvInt("BACKFILL_MAX_HTTP", 50),
+		BackfillMaxPerPDS:         getEnvInt("BACKFILL_MAX_PER_PDS", 6),
+		BackfillMaxRepos:          getEnvInt("BACKFILL_MAX_REPOS", 50),
 		BackfillRepoTimeoutMS:     getEnvInt("BACKFILL_REPO_TIMEOUT", 60000),
+
+		// PLC Directory
+		PLCDirectoryURL: getEnv("PLC_DIRECTORY_URL", ""),
 	}
 
 	// Generate SecretKeyBase if not provided
@@ -98,12 +149,24 @@ func (c *Config) LogConfig() {
 	slog.Info("Configuration loaded",
 		"host", c.Host,
 		"port", c.Port,
-		"database_url", redactURL(c.DatabaseURL),
+		"database_url", RedactPassword(c.DatabaseURL),
 		"external_base_url", c.ExternalBaseURL,
 		"oauth_loopback_mode", c.OAuthLoopbackMode,
 		"oauth_signing_key_set", c.OAuthSigningKey != "",
+		"admin_dids_set", c.AdminDIDs != "",
+		"lexicon_dir", c.LexiconDir,
+		"jetstream_url", c.JetstreamURL,
+		"jetstream_collections", c.JetstreamCollections,
 		"jetstream_disable_cursor", c.JetstreamDisableCursor,
+		"backfill_on_start", c.BackfillOnStart,
+		"trust_proxy_headers", c.TrustProxyHeaders,
+		"allowed_origins", c.AllowedOrigins,
 	)
+
+	if c.TrustProxyHeaders {
+		slog.Warn("TRUST_PROXY_HEADERS is enabled: X-User-DID header will be trusted for authentication. " +
+			"Only enable this when running behind a trusted reverse proxy that sets this header.")
+	}
 }
 
 // Address returns the server address in host:port format.
@@ -145,20 +208,26 @@ func generateRandomKey(length int) (string, error) {
 	return base64.URLEncoding.EncodeToString(bytes)[:length], nil
 }
 
-func redactURL(url string) string {
-	// Redact password in database URLs.
-	// Example: postgres://user:pass@host becomes postgres://user:***@host
-	if strings.Contains(url, "@") {
-		parts := strings.SplitN(url, "@", 2)
-		if len(parts) == 2 {
-			prefix := parts[0]
-			if idx := strings.LastIndex(prefix, ":"); idx > 0 {
-				// Find the protocol separator
-				if protoIdx := strings.Index(prefix, "://"); protoIdx > 0 && idx > protoIdx {
-					return prefix[:idx+1] + "***@" + parts[1]
-				}
-			}
+// RedactPassword hides the password in a database URL for logging.
+// Example: postgres://user:pass@host becomes postgres://user:***@host
+func RedactPassword(url string) string {
+	if !strings.Contains(url, "@") {
+		return url
+	}
+
+	parts := strings.SplitN(url, "@", 2)
+	if len(parts) != 2 {
+		return url
+	}
+
+	prefix := parts[0]
+	suffix := parts[1]
+
+	if idx := strings.LastIndex(prefix, ":"); idx > 0 {
+		if protoIdx := strings.Index(prefix, "://"); protoIdx > 0 && idx > protoIdx {
+			return prefix[:idx+1] + "***@" + suffix
 		}
 	}
+
 	return url
 }

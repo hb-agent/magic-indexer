@@ -72,6 +72,7 @@ func NewConsumer(
 	actorsRepo *repositories.ActorsRepository,
 	configRepo *repositories.ConfigRepository,
 	activityRepo *repositories.JetstreamActivityRepository,
+	pubsub *subscription.PubSub,
 ) *Consumer {
 	if config.CursorFlushInterval == 0 {
 		config.CursorFlushInterval = 5 * time.Second
@@ -83,7 +84,7 @@ func NewConsumer(
 		actorsRepo:   actorsRepo,
 		configRepo:   configRepo,
 		activityRepo: activityRepo,
-		pubsub:       subscription.Global(), // Use global pub/sub for GraphQL subscriptions
+		pubsub:       pubsub,
 		cursorDone:   make(chan struct{}),
 		statsStart:   time.Now(),
 	}
@@ -131,7 +132,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 		}
 
 		// Exponential backoff with cap
-		backoff = backoff * 2
+		backoff *= 2
 		if backoff > maxBackoff {
 			backoff = maxBackoff
 		}
@@ -284,11 +285,6 @@ func (c *Consumer) processEvents(ctx context.Context) {
 			)
 		}
 
-		// Update cursor
-		c.cursorMu.Lock()
-		c.cursor = event.TimeUS
-		c.cursorMu.Unlock()
-
 		// Process commit events
 		if event.IsCommit() {
 			if err := c.handleCommit(ctx, event); err != nil {
@@ -300,8 +296,14 @@ func (c *Consumer) processEvents(ctx context.Context) {
 				c.statsMu.Lock()
 				c.stats.Errors++
 				c.statsMu.Unlock()
+				continue // Don't advance cursor on failure
 			}
 		}
+
+		// Update cursor only after successful processing
+		c.cursorMu.Lock()
+		c.cursor = event.TimeUS
+		c.cursorMu.Unlock()
 	}
 }
 

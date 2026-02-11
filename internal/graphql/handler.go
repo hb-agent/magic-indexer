@@ -30,17 +30,8 @@ func NewHandler(registry *lexicon.Registry, repos *resolver.Repositories) (*Hand
 }
 
 // ServeHTTP handles GraphQL HTTP requests.
+// CORS is handled by the router-level middleware; not duplicated here.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Handle CORS for GraphQL playground/clients
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-	if r.Method == "OPTIONS" {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
 	// Parse the request
 	var params struct {
 		Query         string                 `json:"query"`

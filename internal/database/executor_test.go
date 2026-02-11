@@ -89,7 +89,7 @@ func TestDbError(t *testing.T) {
 			t.Errorf("DbError.Error() = %q, want %q", err.Error(), expected)
 		}
 
-		if err.Unwrap() != cause {
+		if !errors.Is(err, cause) {
 			t.Errorf("DbError.Unwrap() = %v, want %v", err.Unwrap(), cause)
 		}
 	})
@@ -143,7 +143,7 @@ func TestErrorConstructors(t *testing.T) {
 			if tt.err.Type != tt.wantType {
 				t.Errorf("%s Type = %q, want %q", tt.name, tt.err.Type, tt.wantType)
 			}
-			if tt.err.Cause != cause {
+			if !errors.Is(tt.err, cause) {
 				t.Errorf("%s Cause = %v, want %v", tt.name, tt.err.Cause, cause)
 			}
 		})
