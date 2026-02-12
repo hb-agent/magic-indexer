@@ -266,8 +266,8 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 		}
 	}
 	r.Use(server.CORSMiddleware(server.CORSConfig{
-		AllowedOrigins:    allowedOrigins,
-		TrustProxyHeaders: cfg.TrustProxyHeaders,
+		AllowedOrigins: allowedOrigins,
+		AdminAPIKeySet: cfg.AdminAPIKey != "",
 	}))
 
 	// Health check
@@ -474,7 +474,7 @@ func setupAdmin(r *chi.Mux, cfg *config.Config, svc *services) *admin.Handler {
 		domainDID = "did:web:" + cfg.Host
 	}
 
-	adminHandler, err := admin.NewHandler(adminRepos, authMiddleware, svc.config, domainDID, cfg.TrustProxyHeaders)
+	adminHandler, err := admin.NewHandler(adminRepos, authMiddleware, svc.config, domainDID, cfg.AdminAPIKey)
 	if err != nil {
 		slog.Error("Failed to create admin GraphQL handler", "error", err)
 		return nil
@@ -512,10 +512,11 @@ func setupAdmin(r *chi.Mux, cfg *config.Config, svc *services) *admin.Handler {
 	r.Get("/graphiql/admin", server.HandleGraphiQL(server.GraphiQLConfig{
 		EndpointPath: "/admin/graphql",
 		Title:        "Hypergoat Admin",
+		AdminAuth:    true,
 		DefaultQuery: `# Hypergoat Admin API
 #
 # Administrative operations for managing the AppView.
-# Note: Some operations require authentication.
+# Enter your API Key and DID above to authenticate.
 #
 # Example:
 {
