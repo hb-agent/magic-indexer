@@ -34,14 +34,20 @@ type TestDB struct {
 // The database is automatically closed when the test completes.
 //
 // By default an in-memory SQLite database is used so `go test` works
-// offline with zero configuration. CI (and anyone who wants Postgres
-// coverage locally) can set TEST_DATABASE_URL to a postgres:// URL and
-// this helper will connect there instead — that's the only way to
-// exercise dialect-specific behaviour like the BOOLEAN neg column.
+// offline with zero configuration and in CI. Developers (or later CI
+// jobs) that want to exercise dialect-specific behaviour like the
+// BOOLEAN neg column can opt in by setting TEST_DATABASE_URL to a
+// postgres:// URL. We deliberately do NOT honour the application's
+// DATABASE_URL env var here — many upstream tests pre-date Postgres
+// testing and compare JSONB output verbatim, which fails when keys
+// are re-ordered. TEST_DATABASE_URL is the explicit opt-in so nobody
+// accidentally trips those failures.
 //
-// Safety: when TEST_DATABASE_URL is a Postgres URL, the tests run
-// DELETE FROM on every table before returning so repeated runs start
-// clean. Never point this at a non-throwaway database.
+// Safety: when TEST_DATABASE_URL is a Postgres URL, this helper runs
+// DELETE FROM on every table (except label_definition, whose seeded
+// rows from migration 003 are needed by FK checks) before returning,
+// so repeated runs start clean. Never point this at a non-throwaway
+// database.
 func SetupTestDB(t *testing.T) *TestDB {
 	t.Helper()
 
@@ -55,9 +61,8 @@ func SetupTestDB(t *testing.T) *TestDB {
 
 	if exec.Dialect() == database.PostgreSQL {
 		// Each test needs an empty slate on Postgres since the database
-		// is shared. TRUNCATE is faster than DELETE and resets SERIAL
-		// sequences too.
-		truncateAll(t, exec)
+		// is shared across invocations.
+		resetBetweenTests(t, exec)
 	}
 
 	db := &TestDB{
@@ -84,15 +89,12 @@ func SetupTestDB(t *testing.T) *TestDB {
 // newTestExecutor picks SQLite or Postgres based on TEST_DATABASE_URL.
 // An unset or sqlite:// URL yields an in-memory SQLite database; a
 // postgres:// URL yields a pgx executor connected to that database.
+// Note: DATABASE_URL is intentionally NOT consulted here — see the
+// SetupTestDB comment for rationale.
 func newTestExecutor(t *testing.T) database.Executor {
 	t.Helper()
 
 	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		// Fall back to DATABASE_URL for convenience in CI jobs that
-		// already export it for the application.
-		url = os.Getenv("DATABASE_URL")
-	}
 	if url == "" || strings.HasPrefix(url, "sqlite:") {
 		exec, err := sqlite.NewExecutor("sqlite::memory:")
 		if err != nil {
@@ -113,15 +115,17 @@ func newTestExecutor(t *testing.T) database.Executor {
 	return nil // unreachable
 }
 
-// truncateAll clears every known table in the right order so tests
-// start clean on Postgres. Order matters because of FKs: children
-// first, parents last.
-func truncateAll(t *testing.T, exec database.Executor) {
+// resetBetweenTests clears every mutable table in the right order so
+// shared-Postgres runs start clean. label_definition is deliberately
+// left alone because its migration-seeded Bluesky default rows are
+// referenced by label.val as a foreign key — truncating it would
+// cause every subsequent label insert to fail FK validation.
+// Order matters because of FKs: children first, parents last.
+func resetBetweenTests(t *testing.T, exec database.Executor) {
 	t.Helper()
 	tables := []string{
 		"label",
 		"label_preferences",
-		"label_definition",
 		"report",
 		"record",
 		"actor",
