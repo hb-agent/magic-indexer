@@ -694,3 +694,43 @@ func TestOAuthDPoPJTIRepository_CRUD(t *testing.T) {
 		t.Error("JTI still exists after Delete")
 	}
 }
+
+// TestOAuthDPoPJTIRepository_InsertIfNew exercises the race-safe
+// replay detection path added in the Round 5 review. Two concurrent
+// InsertIfNew calls on the same jti must collapse into exactly one
+// "inserted=true" and one "inserted=false", with no error.
+func TestOAuthDPoPJTIRepository_InsertIfNew(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	repo := repositories.NewOAuthDPoPJTIRepository(db.Executor)
+	ctx := context.Background()
+
+	now := time.Now().Unix()
+
+	// First call: fresh JTI, should insert.
+	ok, err := repo.InsertIfNew(ctx, &oauth.DPoPJTI{JTI: "race-jti-1", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("first InsertIfNew error: %v", err)
+	}
+	if !ok {
+		t.Fatal("first InsertIfNew returned inserted=false; want true")
+	}
+
+	// Second call with the same JTI: must detect replay and
+	// return inserted=false without error.
+	ok, err = repo.InsertIfNew(ctx, &oauth.DPoPJTI{JTI: "race-jti-1", CreatedAt: now + 1})
+	if err != nil {
+		t.Fatalf("second InsertIfNew error: %v", err)
+	}
+	if ok {
+		t.Error("second InsertIfNew returned inserted=true; want false (replay)")
+	}
+
+	// A different JTI must still insert successfully.
+	ok, err = repo.InsertIfNew(ctx, &oauth.DPoPJTI{JTI: "race-jti-2", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("InsertIfNew for distinct jti error: %v", err)
+	}
+	if !ok {
+		t.Error("InsertIfNew for distinct jti returned inserted=false; want true")
+	}
+}
