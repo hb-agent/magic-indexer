@@ -137,8 +137,12 @@ func (c *Consumer) Start(ctx context.Context) error {
 			backoff = maxBackoff
 		}
 
-		// Reset cursorDone channel for new connection
+		// Reset cursorDone channel for new connection. Must be
+		// done under clientMu so a concurrent Stop() can't race
+		// the pointer swap with the old flusher's select.
+		c.clientMu.Lock()
 		c.cursorDone = make(chan struct{})
+		c.clientMu.Unlock()
 
 		slog.Info("Attempting to reconnect to Jetstream...")
 	}
@@ -221,8 +225,12 @@ func (c *Consumer) UpdateCollections(parent context.Context, collections []strin
 	c.clientMu.Unlock()
 
 	if !wasRunning {
-		// Just update config, will be used on next Start
+		// Just update config, will be used on next Start. Take
+		// clientMu so startInternal isn't reading c.config
+		// concurrently.
+		c.clientMu.Lock()
 		c.config.Collections = collections
+		c.clientMu.Unlock()
 		slog.Info("Updated Jetstream collections (not running)", "collections", collections)
 		return nil
 	}
@@ -234,15 +242,13 @@ func (c *Consumer) UpdateCollections(parent context.Context, collections []strin
 		oldClient.Stop()
 	}
 
-	// Update config
-	c.config.Collections = collections
-
-	// Reset cursor done channel for new connection
-	c.cursorDone = make(chan struct{})
-
-	// Create new context as a child of the supplied parent so
-	// shutdown-from-above cancels us.
+	// Update config, swap cursorDone, and rotate the cancellable
+	// context under a single lock. c.config and c.cursorDone are
+	// both read from other goroutines (startInternal, Stop,
+	// cursorFlusher), so all mutations must be under clientMu.
 	c.clientMu.Lock()
+	c.config.Collections = collections
+	c.cursorDone = make(chan struct{})
 	if c.ctxCancel != nil {
 		c.ctxCancel()
 	}
