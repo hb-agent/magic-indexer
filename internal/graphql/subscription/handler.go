@@ -26,6 +26,22 @@ const (
 	msgError               = "error"
 	msgComplete            = "complete"
 	msgConnectionTerminate = "connection_terminate"
+
+	// Read/keepalive timeouts. A client that sends no frame (not even
+	// a ping) within wsReadTimeout is disconnected; we reset the
+	// deadline on every frame including the client's ping. This
+	// prevents a connected-but-silent client from holding a goroutine
+	// + connection forever.
+	wsReadTimeout = 60 * time.Second
+
+	// Cap on concurrent subscriptions per WebSocket connection.
+	// Prevents a single client from spawning unbounded goroutines
+	// by flooding `subscribe` messages.
+	wsMaxSubsPerClient = 64
+
+	// Body cap per incoming WebSocket frame (1 MiB). Mirrors the
+	// GraphQL HTTP body cap.
+	wsMaxMessageBytes = 1 << 20
 )
 
 // wsMessage represents a WebSocket message.
@@ -105,6 +121,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bound memory per frame and refresh the idle deadline on every
+	// pong we receive.
+	conn.SetReadLimit(wsMaxMessageBytes)
+	_ = conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+	})
+
 	client := &wsClient{
 		conn:          conn,
 		schema:        h.schema,
@@ -130,6 +154,11 @@ func (c *wsClient) run() {
 	defer c.close()
 
 	for {
+		// Refresh the idle deadline every iteration. Any frame from
+		// the client (subscribe, ping, complete, …) counts as
+		// liveness; a silent client will trip this deadline after
+		// wsReadTimeout and be disconnected.
+		_ = c.conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
 		_, data, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -185,6 +214,22 @@ func (c *wsClient) handleSubscribe(msg *wsMessage) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c.mu.Lock()
+	// Enforce per-client subscription cap before registering. A
+	// misbehaving client flooding `subscribe` frames can otherwise
+	// spawn unbounded goroutines.
+	if len(c.subscriptions) >= wsMaxSubsPerClient {
+		c.mu.Unlock()
+		cancel()
+		c.sendError(msg.ID, "Too many subscriptions on this connection")
+		return
+	}
+	// Reject duplicate subscription IDs.
+	if _, exists := c.subscriptions[msg.ID]; exists {
+		c.mu.Unlock()
+		cancel()
+		c.sendError(msg.ID, "Subscription ID already in use")
+		return
+	}
 	c.subscriptions[msg.ID] = cancel
 	c.mu.Unlock()
 

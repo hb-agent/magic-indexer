@@ -122,8 +122,34 @@ func NewBridge(cfg BridgeConfig) *Bridge {
 	}
 }
 
+// requireHTTPSEndpoint validates that an endpoint URL discovered in a
+// DID document parses cleanly and uses https. A hostile DID document
+// could otherwise point us at http:// (downgrade) or file:/ftp:/ etc.
+func requireHTTPSEndpoint(endpoint string) error {
+	if endpoint == "" {
+		return &BridgeError{Type: ErrTypeHTTP, Message: "endpoint is empty"}
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return &BridgeError{Type: ErrTypeHTTP, Message: "endpoint is not a valid URL", Cause: err}
+	}
+	if u.Scheme != "https" {
+		return &BridgeError{
+			Type:    ErrTypeHTTP,
+			Message: fmt.Sprintf("endpoint scheme must be https, got %q", u.Scheme),
+		}
+	}
+	if u.Host == "" {
+		return &BridgeError{Type: ErrTypeHTTP, Message: "endpoint has no host"}
+	}
+	return nil
+}
+
 // FetchProtectedResourceMetadata fetches the OAuth protected resource metadata from a PDS.
 func (b *Bridge) FetchProtectedResourceMetadata(ctx context.Context, pdsEndpoint string) (*ProtectedResourceMetadata, error) {
+	if err := requireHTTPSEndpoint(pdsEndpoint); err != nil {
+		return nil, err
+	}
 	metadataURL := strings.TrimSuffix(pdsEndpoint, "/") + "/.well-known/oauth-protected-resource"
 
 	req, err := http.NewRequestWithContext(ctx, "GET", metadataURL, http.NoBody)
@@ -156,6 +182,9 @@ func (b *Bridge) FetchProtectedResourceMetadata(ctx context.Context, pdsEndpoint
 
 // FetchAuthorizationServerMetadata fetches the OAuth authorization server metadata.
 func (b *Bridge) FetchAuthorizationServerMetadata(ctx context.Context, authServerEndpoint string) (*AuthorizationServerMetadata, error) {
+	if err := requireHTTPSEndpoint(authServerEndpoint); err != nil {
+		return nil, err
+	}
 	metadataURL := strings.TrimSuffix(authServerEndpoint, "/") + "/.well-known/oauth-authorization-server"
 
 	req, err := http.NewRequestWithContext(ctx, "GET", metadataURL, http.NoBody)

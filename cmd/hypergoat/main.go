@@ -304,9 +304,22 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 		AdminAPIKeySet: cfg.AdminAPIKey != "",
 	}))
 
-	// Health check
+	// Health check. Must actually talk to the database so load
+	// balancers stop routing to a degraded instance. We use a 2s
+	// timeout so an unhealthy DB doesn't back up health checks.
 	r.Get("/health", func(w http.ResponseWriter, req *http.Request) {
+		ctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+		defer cancel()
 		w.Header().Set("Content-Type", "application/json")
+		if err := svc.db.DB().PingContext(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"status": "degraded",
+				"error":  "database unreachable",
+				"time":   time.Now().UTC().Format(time.RFC3339),
+			})
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"status": "healthy",
@@ -831,7 +844,12 @@ func startJetstream(
 				}()
 				return nil
 			}
-			return bg.jsConsumer.UpdateCollections(updatedCollections)
+			// Pass context.Background as the parent here: we have no
+			// long-lived ctx in scope in the callback, and Stop on
+			// the consumer still tears it down via its own tracked
+			// c.ctxCancel, which bg.Stop() invokes. Keeping this
+			// explicit so the choice is visible.
+			return bg.jsConsumer.UpdateCollections(context.Background(), updatedCollections)
 		})
 		slog.Info("Lexicon change callback configured for dynamic Jetstream updates")
 	}
@@ -922,6 +940,17 @@ func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
 	for _, c := range consumers {
 		go func(c *labeler.Consumer) {
 			did := c.LabelerDID()
+			// Panic recovery on the long-running consumer goroutine.
+			// A panic here (e.g., nil deref in label processing)
+			// should not take down the whole process — log it and
+			// let the parent lifecycle restart us via Stop/Start on
+			// the next reconcile.
+			defer func() {
+				if rec := recover(); rec != nil {
+					slog.Error("Labeler consumer goroutine panicked",
+						"did", did, "panic", rec)
+				}
+			}()
 			slog.Info("Starting labeler subscription", "did", did)
 			if err := c.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("Labeler subscription error", "did", did, "error", err)

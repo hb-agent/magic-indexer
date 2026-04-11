@@ -17,7 +17,7 @@ func TestBridge_FetchProtectedResourceMetadata(t *testing.T) {
 		ScopesSupported:      []string{"atproto", "transition:generic"},
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/.well-known/oauth-protected-resource" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -50,7 +50,7 @@ func TestBridge_FetchProtectedResourceMetadata(t *testing.T) {
 }
 
 func TestBridge_FetchProtectedResourceMetadata_Error(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte("not found"))
 	}))
@@ -85,7 +85,7 @@ func TestBridge_FetchAuthorizationServerMetadata(t *testing.T) {
 		ScopesSupported:                    []string{"atproto", "transition:generic"},
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/.well-known/oauth-authorization-server" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -131,7 +131,7 @@ func TestBridge_ExchangeCode(t *testing.T) {
 		Sub:          "did:plc:test123",
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
@@ -198,7 +198,7 @@ func TestBridge_ExchangeCode_DPoPNonceRetry(t *testing.T) {
 		Sub:          "did:plc:test123",
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 
 		if callCount == 1 {
@@ -257,7 +257,7 @@ func TestBridge_RefreshTokens(t *testing.T) {
 		Sub:          "did:plc:test123",
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		if r.Form.Get("grant_type") != "refresh_token" {
 			t.Errorf("expected grant_type refresh_token, got %s", r.Form.Get("grant_type"))
@@ -302,7 +302,7 @@ func TestBridge_PushAuthorizationRequest(t *testing.T) {
 		ExpiresIn:  90,
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			t.Errorf("expected POST, got %s", r.Method)
 		}

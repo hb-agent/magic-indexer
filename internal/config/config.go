@@ -154,6 +154,22 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// labelerDIDsCount returns the number of non-empty entries in a
+// comma-separated DID list. Used when logging so we surface "how
+// many" without dumping the list of DIDs into the log stream.
+func labelerDIDsCount(raw string) int {
+	if raw == "" {
+		return 0
+	}
+	n := 0
+	for _, part := range strings.Split(raw, ",") {
+		if strings.TrimSpace(part) != "" {
+			n++
+		}
+	}
+	return n
+}
+
 // LogConfig logs the configuration (with sensitive values redacted).
 func (c *Config) LogConfig() {
 	slog.Info("Configuration loaded",
@@ -171,7 +187,7 @@ func (c *Config) LogConfig() {
 		"jetstream_disable_cursor", c.JetstreamDisableCursor,
 		"backfill_on_start", c.BackfillOnStart,
 		"allowed_origins", c.AllowedOrigins,
-		"labeler_dids", c.LabelerDIDs,
+		"labeler_dids_count", labelerDIDsCount(c.LabelerDIDs),
 	)
 
 	if c.AdminAPIKey != "" {

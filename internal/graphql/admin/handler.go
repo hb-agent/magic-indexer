@@ -57,6 +57,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		params.Query = r.URL.Query().Get("query")
 		params.OperationName = r.URL.Query().Get("operationName")
 	} else {
+		// Cap body size to prevent memory exhaustion via huge JSON.
+		// 2 MiB gives admin tooling a bit more room than the public
+		// endpoint.
+		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 		if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
@@ -71,12 +75,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Get authentication info from context (set by middleware) or X-User-DID header
 	ctx := r.Context()
 	userDID := oauth.UserIDFromContext(ctx)
+	apiKeyAuth := false
 
 	// Trust X-User-DID header only when the request carries a valid admin API key.
 	// This allows frontends and CLI tools to authenticate as a specific user
 	// without requiring the full OAuth flow.
 	if userDID == "" && h.adminAPIKey != "" {
 		if h.validAPIKey(r) {
+			apiKeyAuth = true
 			userDID = r.Header.Get("X-User-DID")
 			if userDID != "" {
 				slog.Info("[admin] Auth via X-User-DID + API key",
@@ -87,6 +93,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("[admin] X-User-DID header rejected: missing or invalid API key",
 				"remote_addr", r.RemoteAddr)
 		}
+	}
+
+	// Reject completely unauthenticated requests. The admin endpoint
+	// was previously mounted behind OptionalAuth to allow API-key auth
+	// without an Authorization header, but that also exposed the
+	// schema (including admin-only fields) to unauthenticated
+	// introspection. Require *some* proof of auth: either a validated
+	// OAuth user, or a valid API key.
+	if userDID == "" && !apiKeyAuth {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
 	}
 	handle := "" // Would need to resolve from DID
 

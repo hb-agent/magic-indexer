@@ -12,6 +12,12 @@ import (
 	"github.com/GainForest/hypergoat/internal/lexicon"
 )
 
+// maxGraphQLBodyBytes caps the size of a POSTed GraphQL request body.
+// 1 MiB is more than enough for any hand-written query; machine-generated
+// persisted queries are shorter. Anything larger is almost certainly an
+// attempt to exhaust memory via the JSON decoder.
+const maxGraphQLBodyBytes = 1 << 20
+
 // Handler handles GraphQL requests.
 type Handler struct {
 	schema *graphql.Schema
@@ -44,6 +50,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		params.OperationName = r.URL.Query().Get("operationName")
 		// Variables from query string would need to be parsed from JSON
 	} else {
+		// Cap request body so an attacker can't stream unlimited JSON
+		// and exhaust memory before the decoder returns.
+		r.Body = http.MaxBytesReader(w, r.Body, maxGraphQLBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return

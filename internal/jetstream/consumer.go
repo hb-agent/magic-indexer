@@ -210,7 +210,11 @@ func (c *Consumer) Stop() {
 }
 
 // UpdateCollections updates the subscribed collections and reconnects.
-func (c *Consumer) UpdateCollections(collections []string) error {
+// The parent context must be the same graceful-shutdown context used
+// to Start the consumer so that Stop on the parent tears this instance
+// down cleanly — passing context.Background here would silently
+// detach the reconnected consumer from shutdown and leak a goroutine.
+func (c *Consumer) UpdateCollections(parent context.Context, collections []string) error {
 	c.clientMu.Lock()
 	wasRunning := c.running
 	oldClient := c.client
@@ -236,12 +240,13 @@ func (c *Consumer) UpdateCollections(collections []string) error {
 	// Reset cursor done channel for new connection
 	c.cursorDone = make(chan struct{})
 
-	// Create new context
+	// Create new context as a child of the supplied parent so
+	// shutdown-from-above cancels us.
 	c.clientMu.Lock()
 	if c.ctxCancel != nil {
 		c.ctxCancel()
 	}
-	c.ctx, c.ctxCancel = context.WithCancel(context.Background())
+	c.ctx, c.ctxCancel = context.WithCancel(parent)
 	ctx := c.ctx
 	c.clientMu.Unlock()
 

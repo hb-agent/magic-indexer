@@ -379,8 +379,10 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 	// Postgres stores neg as BOOLEAN; SQLite as INTEGER. Use
 	// dialect-correct literals so the query plans correctly on both.
 	negFalse, negTrue := "0", "1"
+	nowLit := "datetime('now')"
 	if r.db.Dialect() == database.PostgreSQL {
 		negFalse, negTrue = "false", "true"
+		nowLit = "NOW()"
 	}
 
 	// collection = ?
@@ -425,6 +427,7 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 			SELECT 1 FROM label l
 			WHERE l.uri = r.uri
 			  AND l.neg = %s
+			  AND (l.exp IS NULL OR l.exp > %s)
 			  AND l.val IN (%s)%s
 			  AND NOT EXISTS (
 			    SELECT 1 FROM label neg
@@ -434,7 +437,7 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 			      AND neg.neg = %s
 			      AND neg.cts >= l.cts
 			  )
-		)`, verb, negFalse, strings.Join(valPhs, ", "), srcClause, negTrue)
+		)`, verb, negFalse, nowLit, strings.Join(valPhs, ", "), srcClause, negTrue)
 	}
 
 	// Include: EXISTS a non-negated label whose val matches one of the

@@ -493,10 +493,20 @@ func (c *Consumer) handleLabelMessage(ctx context.Context, msg *LabelMessage) {
 	})
 
 	c.cursorMu.Lock()
+	prev := c.cursor
 	if msg.Seq > c.cursor {
 		c.cursor = msg.Seq
 	}
 	c.cursorMu.Unlock()
+
+	// Labeler seqs should be monotonic and contiguous. A gap means
+	// the labeler dropped frames on its end (it should also send
+	// #info:OutdatedCursor, but we don't want to rely on that). Log
+	// so operators can correlate with upstream outages.
+	if prev > 0 && msg.Seq > prev+1 {
+		slog.Warn("Labeler cursor gap detected",
+			"prev", prev, "seq", msg.Seq, "gap", msg.Seq-prev-1)
+	}
 }
 
 // upsertLabels inserts every label in a batch, ensuring the label_definition
