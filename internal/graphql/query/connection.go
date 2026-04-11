@@ -5,6 +5,31 @@ import (
 	"github.com/graphql-go/graphql"
 )
 
+const (
+	// DefaultPageSize is the number of records returned when no `first`
+	// argument is provided.
+	DefaultPageSize = 20
+
+	// MaxPageSize is the maximum number of records that can be requested
+	// in a single page. Larger requests are clamped to this value; it
+	// protects against a client asking for `first: 100000` and causing
+	// the DB to build a response proportional to that request.
+	MaxPageSize = 100
+)
+
+// ClampPageSize returns a valid page size within [1, MaxPageSize],
+// defaulting to DefaultPageSize when a non-positive value is provided.
+// Adopted from hypercerts-org/hyperindex#34.
+func ClampPageSize(first int) int {
+	if first <= 0 {
+		return DefaultPageSize
+	}
+	if first > MaxPageSize {
+		return MaxPageSize
+	}
+	return first
+}
+
 // PageInfoType defines the Relay-style pagination info GraphQL type.
 var PageInfoType = graphql.NewObject(graphql.ObjectConfig{
 	Name:        "PageInfo",
@@ -29,9 +54,36 @@ var PageInfoType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
-// ConnectionArgs returns standard Relay connection arguments for forward pagination.
-func ConnectionArgs() graphql.FieldConfigArgument {
+// LabelFilterArgs returns the label-based filtering arguments applied to
+// record connection queries. Exposed separately so the generic `records`
+// query (which defines its own `collection` argument) can compose them
+// alongside its existing args.
+//
+// The indexer is neutral about which labeler is authoritative: by default
+// label filters match assertions from any labeler the indexer has
+// ingested. Clients that want to scope to a specific trust set pass
+// `labelerDids: ["did:plc:...", ...]`.
+func LabelFilterArgs() graphql.FieldConfigArgument {
 	return graphql.FieldConfigArgument{
+		"labels": &graphql.ArgumentConfig{
+			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: "Filter to records that have at least one of these active labels. By default any labeler's labels match; scope to a trust set via labelerDids.",
+		},
+		"excludeLabels": &graphql.ArgumentConfig{
+			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: "Exclude records that have any of these active labels. By default any labeler's labels match; scope to a trust set via labelerDids.",
+		},
+		"labelerDids": &graphql.ArgumentConfig{
+			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: "Optional list of labeler DIDs to restrict label-based filtering to. When empty, labels from every configured labeler are considered.",
+		},
+	}
+}
+
+// ConnectionArgs returns standard Relay connection arguments for forward pagination,
+// plus label-based filtering arguments used by record collection queries.
+func ConnectionArgs() graphql.FieldConfigArgument {
+	args := graphql.FieldConfigArgument{
 		"first": &graphql.ArgumentConfig{
 			Type:        graphql.Int,
 			Description: "Number of items to return (default 20)",
@@ -41,6 +93,10 @@ func ConnectionArgs() graphql.FieldConfigArgument {
 			Description: "Cursor to start after (forward pagination)",
 		},
 	}
+	for k, v := range LabelFilterArgs() {
+		args[k] = v
+	}
+	return args
 }
 
 // BuildEdgeType creates an Edge type for a given node type.

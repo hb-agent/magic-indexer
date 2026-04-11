@@ -183,6 +183,20 @@ func (doc *DIDDocument) GetPDSEndpoint() string {
 	return ""
 }
 
+// GetLabelerEndpoint extracts the AtprotoLabeler service endpoint from a DID
+// document. Labelers advertise this service separately from the PDS; it is
+// the host whose /xrpc/com.atproto.label.subscribeLabels and queryLabels
+// endpoints serve label data. Some moderation services colocate the labeler
+// on the same host as their PDS; others run it standalone.
+func (doc *DIDDocument) GetLabelerEndpoint() string {
+	for _, svc := range doc.Service {
+		if svc.Type == "AtprotoLabeler" {
+			return svc.ServiceEndpoint
+		}
+	}
+	return ""
+}
+
 // GetHandle extracts the handle from a DID document's alsoKnownAs field.
 // Returns the first at:// URI stripped of the at:// prefix.
 func (doc *DIDDocument) GetHandle() string {

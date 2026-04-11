@@ -1008,7 +1008,7 @@ func (r *Resolver) CreateLabel(ctx context.Context, uri, val string, cid, exp *s
 		expTime = &t
 	}
 
-	label, err := r.repos.Labels.Insert(ctx, r.domainDID, uri, cid, val, expTime)
+	label, err := r.repos.Labels.Insert(ctx, r.domainDID, uri, cid, val, nil, expTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create label: %w", err)
 	}
@@ -1038,7 +1038,7 @@ func (r *Resolver) NegateLabel(ctx context.Context, uri, val string) (map[string
 		return nil, fmt.Errorf("invalid subject URI: must start with 'at://' or 'did:'")
 	}
 
-	label, err := r.repos.Labels.InsertNegation(ctx, r.domainDID, uri, val)
+	label, err := r.repos.Labels.InsertNegation(ctx, r.domainDID, uri, val, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to negate label: %w", err)
 	}
@@ -1115,7 +1115,7 @@ func (r *Resolver) ResolveReport(ctx context.Context, id int64, action string, l
 			return nil, fmt.Errorf("labelVal required for apply_label action")
 		}
 		// Apply the label
-		_, err := r.repos.Labels.Insert(ctx, r.domainDID, report.SubjectURI, nil, *labelVal, nil)
+		_, err := r.repos.Labels.Insert(ctx, r.domainDID, report.SubjectURI, nil, *labelVal, nil, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to apply label: %w", err)
 		}

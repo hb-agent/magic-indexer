@@ -16,10 +16,18 @@ const (
 )
 
 // Repositories holds all database repositories needed by resolvers.
+//
+// Note: the indexer is deliberately neutral about which labeler is
+// authoritative. Label-filtered queries may restrict themselves to a
+// subset of labelers via the `labelerDids` GraphQL arg, but there is no
+// server-side default labeler — the `labels` field on record nodes
+// returns the full union of active labels from every labeler the
+// indexer has ingested.
 type Repositories struct {
 	Records  *repositories.RecordsRepository
 	Actors   *repositories.ActorsRepository
 	Lexicons *repositories.LexiconsRepository
+	Labels   *repositories.LabelsRepository
 }
 
 // NewRepositories creates a new Repositories from a database executor.
@@ -28,6 +36,7 @@ func NewRepositories(db database.Executor) *Repositories {
 		Records:  repositories.NewRecordsRepository(db),
 		Actors:   repositories.NewActorsRepository(db),
 		Lexicons: repositories.NewLexiconsRepository(db),
+		Labels:   repositories.NewLabelsRepository(db),
 	}
 }
 

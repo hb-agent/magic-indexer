@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -34,6 +35,7 @@ import (
 	"github.com/GainForest/hypergoat/internal/graphql/resolver"
 	"github.com/GainForest/hypergoat/internal/graphql/subscription"
 	"github.com/GainForest/hypergoat/internal/jetstream"
+	"github.com/GainForest/hypergoat/internal/labeler"
 	"github.com/GainForest/hypergoat/internal/lexicon"
 	"github.com/GainForest/hypergoat/internal/oauth"
 	"github.com/GainForest/hypergoat/internal/server"
@@ -70,6 +72,8 @@ type backgroundServices struct {
 	workersCancel      context.CancelFunc
 	jsConsumer         *jetstream.Consumer
 	jsCancel           context.CancelFunc
+	labelerConsumers   []*labeler.Consumer
+	labelerCancel      context.CancelFunc
 }
 
 // Stop cleanly shuts down all background services.
@@ -85,6 +89,12 @@ func (bg *backgroundServices) Stop() {
 	}
 	if bg.jsCancel != nil {
 		bg.jsCancel()
+	}
+	for _, c := range bg.labelerConsumers {
+		c.Stop()
+	}
+	if bg.labelerCancel != nil {
+		bg.labelerCancel()
 	}
 }
 
@@ -114,12 +124,13 @@ func run() error {
 	}
 	defer svc.db.Close()
 
-	// Set up HTTP router with middleware and basic endpoints
-	r := setupRouter(cfg, svc)
-
-	// Track background services for clean shutdown
+	// Track background services for clean shutdown. Created before the
+	// router so the /stats handler can capture a pointer to it.
 	bg := &backgroundServices{}
 	defer bg.Stop()
+
+	// Set up HTTP router with middleware and basic endpoints
+	r := setupRouter(cfg, svc, bg)
 
 	// Set up OAuth endpoints
 	setupOAuth(r, cfg, svc, bg)
@@ -136,6 +147,9 @@ func run() error {
 
 	// Start Jetstream consumer for real-time events
 	startJetstream(cfg, svc, pubsub, collections, adminHandler, bg)
+
+	// Start labeler subscriptions (if any DIDs configured)
+	startLabeler(cfg, svc, bg)
 
 	// Start backfill if configured
 	startBackfill(cfg, svc)
@@ -232,8 +246,10 @@ func populateActivityIfEmpty(ctx context.Context, svc *services) {
 }
 
 // setupRouter creates the chi router with middleware and basic HTTP endpoints
-// (health, stats, root info, XRPC placeholder).
-func setupRouter(cfg *config.Config, svc *services) *chi.Mux {
+// (health, stats, root info, XRPC placeholder). The backgroundServices
+// pointer is captured so the /stats handler can surface per-labeler
+// counters at request time — the slice is populated later in startLabeler.
+func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi.Mux {
 	r := chi.NewRouter()
 
 	// Middleware
@@ -251,8 +267,8 @@ func setupRouter(cfg *config.Config, svc *services) *chi.Mux {
 		}
 	}
 	r.Use(server.CORSMiddleware(server.CORSConfig{
-		AllowedOrigins:    allowedOrigins,
-		TrustProxyHeaders: cfg.TrustProxyHeaders,
+		AllowedOrigins: allowedOrigins,
+		AdminAPIKeySet: cfg.AdminAPIKey != "",
 	}))
 
 	// Health check
@@ -265,7 +281,46 @@ func setupRouter(cfg *config.Config, svc *services) *chi.Mux {
 		})
 	})
 
-	// Stats endpoint
+	// Labeler cursor reset — operator escape hatch to force a re-backfill
+	// on the next startup for a specific labeler DID. Deletes both the
+	// subscription seq cursor and any in-progress backfill checkpoint.
+	// Gated behind ADMIN_API_KEY bearer auth (same mechanism as the
+	// admin GraphQL handler) with constant-time comparison.
+	r.Post("/admin/labeler/reset", func(w http.ResponseWriter, req *http.Request) {
+		if cfg.AdminAPIKey == "" {
+			http.Error(w, "labeler reset disabled: ADMIN_API_KEY is not configured", http.StatusForbidden)
+			return
+		}
+		auth := req.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+			return
+		}
+		token := strings.TrimPrefix(auth, "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.AdminAPIKey)) != 1 {
+			http.Error(w, "invalid bearer token", http.StatusUnauthorized)
+			return
+		}
+		did := req.URL.Query().Get("did")
+		if did == "" {
+			http.Error(w, "missing did query parameter", http.StatusBadRequest)
+			return
+		}
+		reqCtx := req.Context()
+		_ = svc.config.Delete(reqCtx, "labeler_cursor:"+did)
+		_ = svc.config.Delete(reqCtx, "labeler_backfill_cursor:"+did)
+		slog.Info("Labeler cursor reset by admin request",
+			"did", did, "remote_addr", req.RemoteAddr)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"reset": true,
+			"did":   did,
+			"note":  "restart the server to re-run backfill for this labeler",
+		})
+	})
+
+	// Stats endpoint. Includes per-labeler consumer counters so operators
+	// can inspect labeler ingestion health without attaching a debugger.
 	r.Get("/stats", func(w http.ResponseWriter, req *http.Request) {
 		reqCtx := req.Context()
 
@@ -287,11 +342,26 @@ func setupRouter(cfg *config.Config, svc *services) *chi.Mux {
 			lexiconCount = -1
 		}
 
+		labelers := make([]map[string]any, 0, len(bg.labelerConsumers))
+		for _, c := range bg.labelerConsumers {
+			s := c.Stats()
+			labelers = append(labelers, map[string]any{
+				"did":                c.LabelerDID(),
+				"events_received":    s.EventsReceived,
+				"labels_received":    s.LabelsReceived,
+				"labels_persisted":   s.LabelsPersisted,
+				"labels_rejected":    s.LabelsRejected,
+				"reconnect_attempts": s.ReconnectAttempts,
+				"last_seq":           s.LastSeq,
+			})
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"records":  recordCount,
 			"actors":   actorCount,
 			"lexicons": lexiconCount,
+			"labelers": labelers,
 			"time":     time.Now().UTC().Format(time.RFC3339),
 		})
 	})
@@ -415,7 +485,7 @@ func setupAdmin(r *chi.Mux, cfg *config.Config, svc *services) *admin.Handler {
 		domainDID = "did:web:" + cfg.Host
 	}
 
-	adminHandler, err := admin.NewHandler(adminRepos, authMiddleware, svc.config, domainDID, cfg.TrustProxyHeaders)
+	adminHandler, err := admin.NewHandler(adminRepos, authMiddleware, svc.config, domainDID, cfg.AdminAPIKey)
 	if err != nil {
 		slog.Error("Failed to create admin GraphQL handler", "error", err)
 		return nil
@@ -431,9 +501,9 @@ func setupAdmin(r *chi.Mux, cfg *config.Config, svc *services) *admin.Handler {
 
 	// GraphiQL playgrounds
 	r.Get("/graphiql", server.HandleGraphiQL(server.GraphiQLConfig{
-		Endpoint:             cfg.ExternalBaseURL + "/graphql",
-		SubscriptionEndpoint: strings.Replace(cfg.ExternalBaseURL, "http", "ws", 1) + "/graphql/ws",
-		Title:                "Hypergoat GraphQL",
+		EndpointPath:     "/graphql",
+		SubscriptionPath: "/graphql/ws",
+		Title:            "Hypergoat GraphQL",
 		DefaultQuery: `# Hypergoat GraphQL API
 # 
 # Explore the AT Protocol data indexed by this AppView.
@@ -451,12 +521,13 @@ func setupAdmin(r *chi.Mux, cfg *config.Config, svc *services) *admin.Handler {
 	}))
 
 	r.Get("/graphiql/admin", server.HandleGraphiQL(server.GraphiQLConfig{
-		Endpoint: cfg.ExternalBaseURL + "/admin/graphql",
-		Title:    "Hypergoat Admin",
+		EndpointPath: "/admin/graphql",
+		Title:        "Hypergoat Admin",
+		AdminAuth:    true,
 		DefaultQuery: `# Hypergoat Admin API
 #
 # Administrative operations for managing the AppView.
-# Note: Some operations require authentication.
+# Enter your API Key and DID above to authenticate.
 #
 # Example:
 {
@@ -573,11 +644,15 @@ func setupGraphQL(r *chi.Mux, cfg *config.Config, svc *services, pubsub *subscri
 
 	slog.Info("Total lexicons registered", "count", registry.Count())
 
-	// Create GraphQL handler
+	// Create GraphQL handler. The indexer is neutral about which
+	// labeler is authoritative — no DefaultLabelerDID is passed in,
+	// so label-filtered queries match any labeler by default and
+	// clients narrow via the labelerDids arg.
 	repos := &resolver.Repositories{
 		Records:  svc.records,
 		Actors:   svc.actors,
 		Lexicons: svc.lexicons,
+		Labels:   svc.labels,
 	}
 
 	graphqlHandler, err := hgraphql.NewHandler(registry, repos)
@@ -702,6 +777,92 @@ func startJetstream(
 	}
 }
 
+// startLabeler starts one labeler.Consumer per configured DID, resolving
+// each labeler's endpoint via the OAuth DIDResolver (which respects the
+// PLC_DIRECTORY_URL override). Invalid DIDs are skipped with a warning.
+// Consumers are added to backgroundServices for graceful shutdown.
+//
+// Respects two additional config knobs:
+//   - LabelerDryRun: only resolves labeler hosts and logs the results,
+//     does not spawn any consumers or ingest any labels. Useful for
+//     validating configuration in staging without committing state.
+//   - LabelerCursorFlushInterval: seconds between cursor flushes
+//     (0 = package default of 5s).
+func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
+	raw := parseDIDs(cfg.LabelerDIDs)
+	if len(raw) == 0 {
+		slog.Info("Labeler subscriptions disabled (LABELER_DIDS is empty)")
+		return
+	}
+
+	var dids []string
+	for _, d := range raw {
+		if !oauth.IsValidDID(d) {
+			slog.Warn("Ignoring invalid labeler DID",
+				"did", d,
+				"hint", "expected did:plc: or did:web:")
+			continue
+		}
+		dids = append(dids, d)
+	}
+	if len(dids) == 0 {
+		slog.Warn("LABELER_DIDS set but all entries are invalid; no labeler consumers will run")
+		return
+	}
+
+	var resolverOpts []oauth.DIDResolverOption
+	if cfg.PLCDirectoryURL != "" {
+		resolverOpts = append(resolverOpts, oauth.WithPLCDirectoryURL(cfg.PLCDirectoryURL))
+	}
+	didResolver := oauth.NewDIDResolver(resolverOpts...)
+
+	if cfg.LabelerDryRun {
+		for _, did := range dids {
+			doc, err := didResolver.ResolveDID(did)
+			if err != nil {
+				slog.Error("Labeler dry run: DID resolution failed",
+					"did", did, "error", err)
+				continue
+			}
+			host := doc.GetLabelerEndpoint()
+			svcType := "AtprotoLabeler"
+			if host == "" {
+				host = doc.GetPDSEndpoint()
+				svcType = "AtprotoPersonalDataServer (fallback)"
+			}
+			slog.Info("Labeler dry run: resolved",
+				"did", did, "host", host, "service", svcType)
+		}
+		slog.Info("Labeler dry run complete; not starting consumers (LABELER_DRY_RUN=true)")
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	bg.labelerCancel = cancel
+
+	for _, did := range dids {
+		cc := labeler.ConsumerConfig{LabelerDID: did}
+		if cfg.LabelerCursorFlushInterval > 0 {
+			cc.CursorFlushInterval = time.Duration(cfg.LabelerCursorFlushInterval) * time.Second
+		}
+		consumer := labeler.NewConsumer(
+			cc,
+			svc.labels,
+			svc.labelDefinitions,
+			svc.config,
+			didResolver,
+		)
+		bg.labelerConsumers = append(bg.labelerConsumers, consumer)
+
+		go func(did string, c *labeler.Consumer) {
+			slog.Info("Starting labeler subscription", "did", did)
+			if err := c.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Error("Labeler subscription error", "did", did, "error", err)
+			}
+		}(did, consumer)
+	}
+}
+
 // startBackfill runs the initial backfill in the background if BACKFILL_ON_START is set.
 func startBackfill(cfg *config.Config, svc *services) {
 	if !cfg.BackfillOnStart {
@@ -789,6 +950,18 @@ func serve(r *chi.Mux, cfg *config.Config, bg *backgroundServices) error {
 
 	slog.Info("Server stopped gracefully")
 	return nil
+}
+
+// parseDIDs splits a comma-separated list of DIDs and trims whitespace.
+func parseDIDs(commaSeparated string) []string {
+	var out []string
+	for _, s := range strings.Split(commaSeparated, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // loadLexiconsFromDir loads all lexicon JSON files from a directory tree.
