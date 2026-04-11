@@ -115,6 +115,66 @@ func TestOriginMatcher(t *testing.T) {
 			origin:  "https://foo.bar.vercel.app",
 			want:    false,
 		},
+		{
+			name:    "prefix wildcard matches prefixed label",
+			origins: []string{"https://certs-social-*.vercel.app"},
+			origin:  "https://certs-social-abc.vercel.app",
+			want:    true,
+		},
+		{
+			name:    "prefix wildcard matches long real preview URL",
+			origins: []string{"https://certs-social-*.vercel.app"},
+			origin:  "https://certs-social-git-staging-hypercerts-foundation.vercel.app",
+			want:    true,
+		},
+		{
+			name:    "prefix wildcard rejects unrelated project",
+			origins: []string{"https://certs-social-*.vercel.app"},
+			origin:  "https://other-app.vercel.app",
+			want:    false,
+		},
+		{
+			name:    "prefix wildcard requires non-empty suffix",
+			origins: []string{"https://certs-social-*.vercel.app"},
+			origin:  "https://certs-social-.vercel.app",
+			want:    false,
+		},
+		{
+			name:    "prefix wildcard rejects multi-label host",
+			origins: []string{"https://certs-social-*.vercel.app"},
+			origin:  "https://certs-social-foo.bar.vercel.app",
+			want:    false,
+		},
+		{
+			name:    "suffix wildcard matches",
+			origins: []string{"https://*-preview.example.com"},
+			origin:  "https://feature-preview.example.com",
+			want:    true,
+		},
+		{
+			name:    "middle wildcard matches with prefix and suffix",
+			origins: []string{"https://foo-*-bar.example.com"},
+			origin:  "https://foo-abc-bar.example.com",
+			want:    true,
+		},
+		{
+			name:    "middle wildcard rejects when asterisk matches zero chars",
+			origins: []string{"https://foo-*-bar.example.com"},
+			origin:  "https://foo--bar.example.com",
+			want:    false,
+		},
+		{
+			name:    "multiple asterisks in leftmost label is rejected",
+			origins: []string{"https://*-*.vercel.app"},
+			origin:  "https://foo-bar.vercel.app",
+			want:    false,
+		},
+		{
+			name:    "asterisk in non-leftmost label is rejected",
+			origins: []string{"https://foo.*.vercel.app"},
+			origin:  "https://foo.abc.vercel.app",
+			want:    false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

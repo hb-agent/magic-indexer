@@ -13,12 +13,17 @@ type CORSConfig struct {
 	// If empty, defaults to "*" (all origins allowed — suitable for development only).
 	//
 	// Each entry may be either an exact origin (e.g. "https://certs.social") or a
-	// wildcard pattern containing a single "*" in the hostname (e.g.
-	// "https://*.vercel.app"). Wildcards only match within a single DNS label —
-	// "https://*.vercel.app" matches "https://foo.vercel.app" and
-	// "https://foo-bar.vercel.app" but NOT "https://foo.bar.vercel.app" or
-	// "https://vercel.app.attacker.com". The scheme must match exactly; the port
-	// (if any) must also match exactly.
+	// wildcard pattern containing a single "*" in the leftmost DNS label of the
+	// hostname. Supported pattern shapes:
+	//
+	//   "https://*.vercel.app"               matches "https://foo.vercel.app"
+	//   "https://certs-social-*.vercel.app"  matches "https://certs-social-abc.vercel.app"
+	//   "https://*-preview.example.com"      matches "https://foo-preview.example.com"
+	//
+	// The "*" always matches one or more characters within a single DNS label
+	// (i.e. no dots). Everything after the leftmost label must match literally.
+	// The scheme and port (if present) must match exactly. Patterns like
+	// "*.vercel.app" do NOT match "foo.bar.vercel.app" or "vercel.app.attacker.com".
 	AllowedOrigins []string
 
 	// AllowedHeaders is the list of request headers allowed in CORS requests.
@@ -39,15 +44,18 @@ type originMatcher struct {
 	wildcard []wildcardOrigin
 }
 
-// wildcardOrigin represents a parsed "https://*.example.com[:port]" pattern.
-// It matches by comparing scheme + port exactly and requiring the request
-// hostname to end with ".<suffix>" where suffix is the part after "*.".
+// wildcardOrigin represents a parsed wildcard origin pattern. It matches by
+// comparing scheme + port exactly, then splitting the request host into
+// leftmost label + rest and checking that the rest equals hostSuffix and
+// the leftmost label starts with labelPrefix, ends with labelSuffix, and
+// has at least one extra character in between (the "*" must match >=1 char).
 type wildcardOrigin struct {
-	scheme string // "https" or "http"
-	// hostSuffix is the host tail AFTER the leading "*.". For a pattern
-	// "https://*.vercel.app", hostSuffix is "vercel.app". A request host
-	// matches iff it ends with "." + hostSuffix AND the label before the
-	// dot contains no further dots (enforced in matches()).
+	scheme      string // "https" or "http"
+	labelPrefix string // literal text before "*" in the leftmost label
+	labelSuffix string // literal text after "*" in the leftmost label
+	// hostSuffix is the literal host tail AFTER the first dot. For the
+	// pattern "https://certs-social-*.vercel.app", hostSuffix is
+	// "vercel.app".
 	hostSuffix string
 	port       string // "" if no port in the pattern
 }
@@ -63,15 +71,25 @@ func (w wildcardOrigin) matches(origin string) bool {
 		return false
 	}
 	host := u.Hostname()
-	// Require exactly one label in place of "*": host must end with
-	// "." + hostSuffix and the prefix before that dot must be a single
-	// non-empty label (no dots).
-	needle := "." + w.hostSuffix
-	if !strings.HasSuffix(host, needle) {
+	// Split the host into leftmost label + rest on the first dot.
+	dot := strings.IndexByte(host, '.')
+	if dot < 0 {
 		return false
 	}
-	prefix := host[:len(host)-len(needle)]
-	if prefix == "" || strings.Contains(prefix, ".") {
+	label := host[:dot]
+	rest := host[dot+1:]
+	if rest != w.hostSuffix {
+		return false
+	}
+	// The leftmost label must contain no dots (by construction since we
+	// split on the first dot, this is implicit) and must match
+	// labelPrefix + "<non-empty>" + labelSuffix.
+	if !strings.HasPrefix(label, w.labelPrefix) || !strings.HasSuffix(label, w.labelSuffix) {
+		return false
+	}
+	// The "*" must match at least one character — ensure the overlap
+	// between prefix and suffix doesn't consume the whole label.
+	if len(label) <= len(w.labelPrefix)+len(w.labelSuffix) {
 		return false
 	}
 	return true
@@ -91,24 +109,41 @@ func buildOriginMatcher(origins []string) *originMatcher {
 			m.exact[o] = struct{}{}
 			continue
 		}
-		// Parse wildcard pattern. We only support a single "*." immediately
-		// after "://" in the hostname component, e.g. "https://*.vercel.app".
+		// Parse wildcard pattern. We support a single "*" anywhere within
+		// the LEFTMOST DNS label, e.g. "https://*.vercel.app" or
+		// "https://certs-social-*.vercel.app". The part after the first
+		// dot must be literal.
 		u, err := url.Parse(o)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 			continue
 		}
 		host := u.Hostname()
-		if !strings.HasPrefix(host, "*.") {
+		dot := strings.IndexByte(host, '.')
+		if dot < 0 {
+			continue // patterns like "https://*" alone are nonsense
+		}
+		label := host[:dot]
+		rest := host[dot+1:]
+		if rest == "" || strings.Contains(rest, "*") {
+			// The non-leftmost part must be literal.
 			continue
 		}
-		suffix := host[2:]
-		if suffix == "" || strings.Contains(suffix, "*") {
+		star := strings.IndexByte(label, '*')
+		if star < 0 {
+			// No "*" in the leftmost label — the wildcard must be
+			// elsewhere, which we don't support.
+			continue
+		}
+		if strings.IndexByte(label[star+1:], '*') >= 0 {
+			// Multiple "*" in the leftmost label is not supported.
 			continue
 		}
 		m.wildcard = append(m.wildcard, wildcardOrigin{
-			scheme:     u.Scheme,
-			hostSuffix: suffix,
-			port:       u.Port(),
+			scheme:      u.Scheme,
+			labelPrefix: label[:star],
+			labelSuffix: label[star+1:],
+			hostSuffix:  rest,
+			port:        u.Port(),
 		})
 	}
 	return m
