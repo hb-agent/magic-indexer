@@ -482,10 +482,21 @@ func TestAuthMiddleware_OptionalAuth_ValidToken(t *testing.T) {
 }
 
 func TestAuthMiddleware_OptionalAuth_InvalidToken(t *testing.T) {
+	// OptionalAuth passes through on validation failure so that the
+	// downstream handler can apply its own auth scheme (for example,
+	// the admin GraphQL handler's ADMIN_API_KEY bearer token). The
+	// handler is expected to detect missing user context and reject
+	// if its own auth path also fails.
 	middleware := NewAuthMiddleware(&mockTokenStore{}, &mockJTIStore{}, "https://example.com")
 
+	handlerCalled := false
+	var capturedUserID string
 	handler := middleware.OptionalAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("handler should not be called")
+		handlerCalled = true
+		if uid, ok := r.Context().Value(UserIDKey).(string); ok {
+			capturedUserID = uid
+		}
+		w.WriteHeader(http.StatusOK)
 	}))
 
 	req := httptest.NewRequest("GET", "/optional", nil)
@@ -494,8 +505,14 @@ func TestAuthMiddleware_OptionalAuth_InvalidToken(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected status 401, got %d", rec.Code)
+	if !handlerCalled {
+		t.Error("handler should have been called on invalid-token pass-through")
+	}
+	if capturedUserID != "" {
+		t.Errorf("expected no user context on pass-through, got %q", capturedUserID)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected status 200 (pass-through), got %d", rec.Code)
 	}
 }
 

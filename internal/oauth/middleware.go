@@ -242,7 +242,16 @@ func (m *AuthMiddleware) RequireAuth(next http.Handler) http.Handler {
 
 // OptionalAuth returns middleware that accepts optional authentication.
 // Requests without authentication proceed without user context.
-// Requests with invalid authentication receive a 401 response.
+// Requests whose Authorization header is present but *not* a valid
+// OAuth access token also proceed without user context — the
+// downstream handler is expected to perform its own auth check (for
+// example, the admin GraphQL handler accepts an ADMIN_API_KEY bearer
+// token that is not an OAuth token). Previously this middleware
+// returned 401 unconditionally on a failed OAuth validation, which
+// broke the admin API-key auth path.
+//
+// Handlers that need to *require* a valid OAuth token should use
+// RequireAuth, not OptionalAuth.
 func (m *AuthMiddleware) OptionalAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check if Authorization header is present
@@ -252,10 +261,13 @@ func (m *AuthMiddleware) OptionalAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// Auth header present, validate it
+		// Auth header present, try to validate it as an OAuth token.
+		// On failure, pass through with no user context — the
+		// downstream handler may accept a different auth scheme
+		// (API key, etc.).
 		result, err := m.ValidateRequest(r)
 		if err != nil {
-			m.writeError(w, err)
+			next.ServeHTTP(w, r)
 			return
 		}
 

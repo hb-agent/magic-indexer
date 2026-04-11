@@ -45,9 +45,13 @@ COPY --from=builder --chown=hypergoat:hypergoat /hypergoat /app/hypergoat
 # Drop privileges before running the process.
 USER hypergoat
 
-# Persistent data directory (mounted at /app/data) owned by the
-# hypergoat user so SQLite can write its -wal/-shm sidecars.
-VOLUME ["/app/data"]
+# Note: we intentionally do NOT declare VOLUME /app/data here.
+# Railway bans the Dockerfile VOLUME keyword and expects operators
+# to attach persistent storage via its native volume mechanism.
+# Other platforms (plain Docker, Compose, Fly) can mount /app/data
+# at runtime with `-v` / `volumes:` / `mount` without the Dockerfile
+# declaration. SQLite still works — it just writes its -wal/-shm
+# sidecars into whatever directory /app/data resolves to.
 
 # Expose port
 EXPOSE 8080
