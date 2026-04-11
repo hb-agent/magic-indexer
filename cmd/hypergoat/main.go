@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -283,12 +284,21 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 	// Labeler cursor reset — operator escape hatch to force a re-backfill
 	// on the next startup for a specific labeler DID. Deletes both the
 	// subscription seq cursor and any in-progress backfill checkpoint.
-	// Gated on trust headers because it mutates state; the gate is
-	// deliberately minimal since this is local operator tooling, not
-	// a public API.
+	// Gated behind ADMIN_API_KEY bearer auth (same mechanism as the
+	// admin GraphQL handler) with constant-time comparison.
 	r.Post("/admin/labeler/reset", func(w http.ResponseWriter, req *http.Request) {
-		if !cfg.TrustProxyHeaders {
-			http.Error(w, "labeler reset requires TRUST_PROXY_HEADERS=true", http.StatusForbidden)
+		if cfg.AdminAPIKey == "" {
+			http.Error(w, "labeler reset disabled: ADMIN_API_KEY is not configured", http.StatusForbidden)
+			return
+		}
+		auth := req.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+			return
+		}
+		token := strings.TrimPrefix(auth, "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.AdminAPIKey)) != 1 {
+			http.Error(w, "invalid bearer token", http.StatusUnauthorized)
 			return
 		}
 		did := req.URL.Query().Get("did")
@@ -299,7 +309,8 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 		reqCtx := req.Context()
 		_ = svc.config.Delete(reqCtx, "labeler_cursor:"+did)
 		_ = svc.config.Delete(reqCtx, "labeler_backfill_cursor:"+did)
-		slog.Info("Labeler cursor reset by admin request", "did", did)
+		slog.Info("Labeler cursor reset by admin request",
+			"did", did, "remote_addr", req.RemoteAddr)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"reset": true,

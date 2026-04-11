@@ -2,11 +2,28 @@ package types //nolint:revive // package name is descriptive within graphql cont
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/graphql-go/graphql"
 
 	"github.com/GainForest/hypergoat/internal/lexicon"
 )
+
+// ReservedRecordFields are field names that are always injected as
+// record metadata. If a lexicon happens to define a property with one
+// of these names, we drop it with a warning rather than clobbering
+// the injected value at resolve time — clients need to be able to
+// rely on these fields always being present with the canonical type.
+//
+// Imported from hypercerts-org/hyperindex#34 (filter-feature) which
+// established the same policy there for the same reasons.
+var ReservedRecordFields = map[string]bool{
+	"uri":    true,
+	"cid":    true,
+	"did":    true,
+	"rkey":   true,
+	"labels": true,
+}
 
 // ObjectBuilder builds GraphQL object types from lexicon definitions.
 type ObjectBuilder struct {
@@ -88,14 +105,36 @@ func (b *ObjectBuilder) buildFields(contextRef string, def *lexicon.ObjectDef) g
 	return fields
 }
 
-// buildRecordFields builds GraphQL fields from RecordDef properties. The
-// standard record fields (uri, cid, labels) are added after the lexicon
-// properties so they don't silently overwrite a lexicon field of the same
-// name; instead the lexicon field wins. If we need AT-URI access on a
-// colliding record type, the admin-level `records` query exposes the
-// underlying Record.URI directly.
+// buildRecordFields builds GraphQL fields from RecordDef properties.
+// The synthesised metadata fields (uri, cid, did, rkey, labels) are
+// always present on every record type with their canonical Go types.
+// Any lexicon property whose name collides with one of those fields
+// is skipped with a warning — the alternative of letting a lexicon
+// author shadow a type-critical field like `uri` leads to subtle
+// schema mismatches that are harder to debug than a startup warning.
 func (b *ObjectBuilder) buildRecordFields(lexiconID string, def *lexicon.RecordDef) graphql.Fields {
-	fields := graphql.Fields{}
+	fields := graphql.Fields{
+		"uri": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "AT-URI of this record",
+		},
+		"cid": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "CID of this record version",
+		},
+		"did": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "DID of the record author",
+		},
+		"rkey": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "Record key (last segment of the AT-URI)",
+		},
+		"labels": &graphql.Field{
+			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: "Active label values on this record from any ingested labeler.",
+		},
+	}
 
 	// Build required set for quick lookup
 	requiredSet := make(map[string]bool)
@@ -106,31 +145,14 @@ func (b *ObjectBuilder) buildRecordFields(lexiconID string, def *lexicon.RecordD
 	}
 
 	for _, entry := range def.Properties {
+		if ReservedRecordFields[entry.Name] {
+			slog.Warn("Skipping lexicon property that collides with a reserved record field",
+				"lexicon", lexiconID, "property", entry.Name)
+			continue
+		}
 		field := b.buildField(lexiconID, entry.Name, &entry.Property, requiredSet[entry.Name])
 		if field != nil {
 			fields[entry.Name] = field
-		}
-	}
-
-	// Only add the synthesised fields when the lexicon does not already
-	// define them. This preserves the lexicon author's intent if a
-	// record type happens to have its own `uri`, `cid`, or `labels`.
-	if _, clash := fields["uri"]; !clash {
-		fields["uri"] = &graphql.Field{
-			Type:        graphql.NewNonNull(graphql.String),
-			Description: "AT-URI of this record",
-		}
-	}
-	if _, clash := fields["cid"]; !clash {
-		fields["cid"] = &graphql.Field{
-			Type:        graphql.NewNonNull(graphql.String),
-			Description: "CID of this record version",
-		}
-	}
-	if _, clash := fields["labels"]; !clash {
-		fields["labels"] = &graphql.Field{
-			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
-			Description: "Active label values on this record from the configured labeler.",
 		}
 	}
 

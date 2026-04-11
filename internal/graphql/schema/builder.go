@@ -459,11 +459,12 @@ func (b *Builder) resolveRecordConnection(
 		return emptyConnection(), nil
 	}
 
-	// Extract pagination args
-	first, _ := p.Args["first"].(int)
-	if first == 0 {
-		first = 20
-	}
+	// Extract pagination args. ClampPageSize caps `first` at
+	// MaxPageSize (100) and defaults to DefaultPageSize (20) when
+	// unset or non-positive, so a client can't ask for a million
+	// records in one request.
+	rawFirst, _ := p.Args["first"].(int)
+	first := query.ClampPageSize(rawFirst)
 	after, _ := p.Args["after"].(string)
 
 	// Decode composite cursor if provided
@@ -515,15 +516,13 @@ func (b *Builder) resolveRecordConnection(
 			continue
 		}
 
-		// Attach the labels list. If the node is a map (both our
-		// collection and generic resolvers return map[string]interface{}),
-		// we set `labels` only when the key isn't already present — so
-		// a lexicon that happens to define its own `labels` property
-		// keeps control of that field.
+		// Attach the labels list. `labels` is a reserved record field
+		// (see types.ReservedRecordFields) so any lexicon property
+		// with the same name is dropped at schema build time, which
+		// means we can unconditionally overwrite whatever might be
+		// in the record's JSON payload here.
 		if nodeMap, ok := node.(map[string]interface{}); ok {
-			if _, collision := nodeMap["labels"]; !collision {
-				nodeMap["labels"] = labelsByURI[rec.URI]
-			}
+			nodeMap["labels"] = labelsByURI[rec.URI]
 		}
 
 		cursor := encodeCursor(rec.IndexedAt.Format("2006-01-02T15:04:05Z"), rec.URI)
@@ -713,15 +712,14 @@ func (b *Builder) createCollectionResolver(lexiconID string) graphql.FieldResolv
 	return func(p graphql.ResolveParams) (interface{}, error) {
 		return b.resolveRecordConnection(p, lexiconID,
 			func(rec *repositories.Record, data map[string]interface{}) (interface{}, bool) {
-				// Inject standard record fields into the flat data,
-				// but only when the lexicon doesn't already claim the
-				// name — otherwise the lexicon field wins.
-				if _, collision := data["uri"]; !collision {
-					data["uri"] = rec.URI
-				}
-				if _, collision := data["cid"]; !collision {
-					data["cid"] = rec.CID
-				}
+				// Reserved record fields — always our metadata,
+				// always authoritative. Any lexicon property with
+				// the same name has already been dropped in
+				// buildRecordFields.
+				data["uri"] = rec.URI
+				data["cid"] = rec.CID
+				data["did"] = rec.DID
+				data["rkey"] = rec.RKey
 				return data, true
 			})
 	}
@@ -756,25 +754,20 @@ func (b *Builder) createSingleRecordResolver(lexiconID string) graphql.FieldReso
 			return nil, fmt.Errorf("failed to parse record JSON: %w", err)
 		}
 
-		// Add standard record fields, but respect any lexicon property
-		// of the same name (matches the collision avoidance in
-		// buildRecordFields and resolveRecordConnection).
-		if _, collision := data["uri"]; !collision {
-			data["uri"] = rec.URI
-		}
-		if _, collision := data["cid"]; !collision {
-			data["cid"] = rec.CID
-		}
+		// Reserved record fields — always authoritative, unconditional.
+		// The corresponding lexicon property (if any) was dropped in
+		// buildRecordFields.
+		data["uri"] = rec.URI
+		data["cid"] = rec.CID
+		data["did"] = rec.DID
+		data["rkey"] = rec.RKey
 
-		// Attach labels from every ingested labeler (best-effort),
-		// only if the lexicon hasn't claimed the `labels` name. The
-		// single-record resolver does not support a labelerDids arg
-		// today — callers can post-filter client-side — so we pass
-		// nil to get the full union.
-		if _, collision := data["labels"]; !collision {
-			labelsByURI := loadLabelsByURI(p.Context, repos, nil, []*repositories.Record{rec})
-			data["labels"] = labelsByURI[rec.URI]
-		}
+		// Attach labels from every ingested labeler (best-effort).
+		// The single-record resolver does not support a labelerDids
+		// arg today — callers can post-filter client-side — so we
+		// pass nil to get the full union.
+		labelsByURI := loadLabelsByURI(p.Context, repos, nil, []*repositories.Record{rec})
+		data["labels"] = labelsByURI[rec.URI]
 
 		return data, nil
 	}
