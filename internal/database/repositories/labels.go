@@ -344,6 +344,27 @@ func (r *LabelsRepository) GetByID(ctx context.Context, id int64) (*Label, error
 	return &label, nil
 }
 
+// GetAllForURI returns every label row stored against a single URI,
+// including negations and expired labels. This is a diagnostic view
+// used by the /admin/label-chain inspection endpoint — ordinary
+// query paths should use GetByURIs, which filters to the active set.
+// Results are ordered by cts descending so an operator reading the
+// response tops-down sees the most recent activity first.
+func (r *LabelsRepository) GetAllForURI(ctx context.Context, uri string) ([]Label, error) {
+	sqlStr := fmt.Sprintf(`SELECT l.id, l.src, l.uri, l.cid, l.val, l.neg, l.cts, l.exp
+		FROM label l
+		WHERE l.uri = %s
+		ORDER BY l.cts DESC, l.id DESC`, r.db.Placeholder(1))
+
+	rows, err := r.db.DB().QueryContext(ctx, sqlStr, uri)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanLabels(rows)
+}
+
 // GetByURIs retrieves active (non-negated) labels for a list of URIs.
 func (r *LabelsRepository) GetByURIs(ctx context.Context, uris []string) ([]Label, error) {
 	if len(uris) == 0 {

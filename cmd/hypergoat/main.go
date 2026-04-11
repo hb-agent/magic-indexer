@@ -337,19 +337,31 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 	// subscription seq cursor and any in-progress backfill checkpoint.
 	// Gated behind ADMIN_API_KEY bearer auth (same mechanism as the
 	// admin GraphQL handler) with constant-time comparison.
-	r.Post("/admin/labeler/reset", func(w http.ResponseWriter, req *http.Request) {
+	// checkAdminBearer validates the ADMIN_API_KEY bearer token on a
+	// raw HTTP admin endpoint. Returns true if the caller should
+	// proceed; otherwise writes the error response and returns false.
+	// Centralised here so every /admin/* raw HTTP route uses the same
+	// constant-time comparison path instead of re-implementing it.
+	checkAdminBearer := func(w http.ResponseWriter, req *http.Request) bool {
 		if cfg.AdminAPIKey == "" {
-			http.Error(w, "labeler reset disabled: ADMIN_API_KEY is not configured", http.StatusForbidden)
-			return
+			http.Error(w, "admin endpoint disabled: ADMIN_API_KEY is not configured", http.StatusForbidden)
+			return false
 		}
 		auth := req.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
 			http.Error(w, "missing bearer token", http.StatusUnauthorized)
-			return
+			return false
 		}
 		token := strings.TrimPrefix(auth, "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.AdminAPIKey)) != 1 {
 			http.Error(w, "invalid bearer token", http.StatusUnauthorized)
+			return false
+		}
+		return true
+	}
+
+	r.Post("/admin/labeler/reset", func(w http.ResponseWriter, req *http.Request) {
+		if !checkAdminBearer(w, req) {
 			return
 		}
 		did := req.URL.Query().Get("did")
@@ -385,6 +397,81 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 			"reset": true,
 			"did":   did,
 			"note":  "restart the server to re-run backfill for this labeler",
+		})
+	})
+
+	// Pause a single labeler subscription without restarting the
+	// process. Calls Stop() on the matching consumer and removes
+	// it from the labelerConsumers slice. The consumer's cursor is
+	// flushed before Stop returns, so resume on next startup picks
+	// up where it left off. A restart is still required to bring
+	// the consumer back up (we do not currently support in-process
+	// resume); this endpoint is for incident response.
+	r.Post("/admin/labeler/pause", func(w http.ResponseWriter, req *http.Request) {
+		if !checkAdminBearer(w, req) {
+			return
+		}
+		did := req.URL.Query().Get("did")
+		if did == "" {
+			http.Error(w, "missing did query parameter", http.StatusBadRequest)
+			return
+		}
+		if !oauth.IsValidDID(did) {
+			http.Error(w, "invalid did format", http.StatusBadRequest)
+			return
+		}
+		bg.labelerMu.Lock()
+		var paused *labeler.Consumer
+		remaining := bg.labelerConsumers[:0]
+		for _, c := range bg.labelerConsumers {
+			if c.LabelerDID() == did && paused == nil {
+				paused = c
+				continue
+			}
+			remaining = append(remaining, c)
+		}
+		bg.labelerConsumers = remaining
+		bg.labelerMu.Unlock()
+
+		if paused == nil {
+			http.Error(w, "no active labeler consumer for this DID", http.StatusNotFound)
+			return
+		}
+		paused.Stop()
+		slog.Info("Labeler paused by admin request",
+			"did", did, "remote_addr", req.RemoteAddr)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"paused": true,
+			"did":    did,
+			"note":   "restart the server to bring this labeler back up",
+		})
+	})
+
+	// Label-chain inspection. Returns every label (active, negated,
+	// expired) on a single URI with src + val + neg + cts + exp so
+	// an operator can answer "why is this record hidden?" without
+	// attaching a debugger. Deliberately bypasses the exp / neg
+	// filters of the public query path — this is a diagnostic view.
+	r.Get("/admin/label-chain", func(w http.ResponseWriter, req *http.Request) {
+		if !checkAdminBearer(w, req) {
+			return
+		}
+		uri := req.URL.Query().Get("uri")
+		if uri == "" {
+			http.Error(w, "missing uri query parameter", http.StatusBadRequest)
+			return
+		}
+		rows, err := svc.labels.GetAllForURI(req.Context(), uri)
+		if err != nil {
+			slog.Error("label-chain lookup failed", "uri", uri, "error", err)
+			http.Error(w, "failed to query labels", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"uri":    uri,
+			"labels": rows,
 		})
 	})
 

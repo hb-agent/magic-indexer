@@ -157,15 +157,48 @@ func (r *JetstreamActivityRepository) CleanupOldActivity(ctx context.Context, ho
 	var sqlStr string
 	switch r.db.Dialect() {
 	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`DELETE FROM jetstream_activity 
+		sqlStr = fmt.Sprintf(`DELETE FROM jetstream_activity
 			WHERE timestamp < NOW() - INTERVAL '%d hours'`, hours)
 	default:
-		sqlStr = fmt.Sprintf(`DELETE FROM jetstream_activity 
+		sqlStr = fmt.Sprintf(`DELETE FROM jetstream_activity
 			WHERE timestamp < datetime('now', '-%d hours')`, hours)
 	}
 
 	_, err := r.db.Exec(ctx, sqlStr, nil)
 	return err
+}
+
+// OrphanPendingActivity marks any activity row still in 'pending' state
+// after maxAgeMinutes as 'orphaned' with an explanatory error message.
+// This closes the window where LogActivity + UpdateStatus are written
+// separately: if the process crashes between the two writes, the row
+// never leaves pending. The background janitor runs this on a ticker so
+// the admin UI's recentActivity view doesn't accumulate zombie rows.
+func (r *JetstreamActivityRepository) OrphanPendingActivity(ctx context.Context, maxAgeMinutes int) (int64, error) {
+	var sqlStr string
+	switch r.db.Dialect() {
+	case database.PostgreSQL:
+		sqlStr = fmt.Sprintf(`UPDATE jetstream_activity
+			SET status = 'orphaned',
+			    error_message = 'activity status never updated within %d minutes'
+			WHERE status = 'pending'
+			  AND timestamp < NOW() - INTERVAL '%d minutes'`, maxAgeMinutes, maxAgeMinutes)
+	default:
+		sqlStr = fmt.Sprintf(`UPDATE jetstream_activity
+			SET status = 'orphaned',
+			    error_message = 'activity status never updated within %d minutes'
+			WHERE status = 'pending'
+			  AND timestamp < datetime('now', '-%d minutes')`, maxAgeMinutes, maxAgeMinutes)
+	}
+	res, err := r.db.Exec(ctx, sqlStr, nil)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // GetActivityBuckets returns aggregated activity data for the specified time range.
