@@ -66,7 +66,7 @@ func TestRecordsRepository_LabelFilter_Include(t *testing.T) {
 	got, err := db.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
 		ctx, "social.cert.hypercert", 10, "", "",
 		repositories.LabelFilter{
-			LabelerSrc: "did:plc:labelerz",
+			LabelerSrcs: []string{"did:plc:labelerz"},
 			Include:    []string{"high-quality"},
 		},
 	)
@@ -89,7 +89,7 @@ func TestRecordsRepository_LabelFilter_Exclude(t *testing.T) {
 	got, err := db.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
 		ctx, "social.cert.hypercert", 10, "", "",
 		repositories.LabelFilter{
-			LabelerSrc: "did:plc:labelerz",
+			LabelerSrcs: []string{"did:plc:labelerz"},
 			Exclude:    []string{"draft"},
 		},
 	)
@@ -143,7 +143,7 @@ func TestRecordsRepository_LabelFilter_HonorsNegation(t *testing.T) {
 	got, err := db.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
 		ctx, "social.cert.hypercert", 10, "", "",
 		repositories.LabelFilter{
-			LabelerSrc: "did:plc:labelerz",
+			LabelerSrcs: []string{"did:plc:labelerz"},
 			Include:    []string{"high-quality"},
 		},
 	)
@@ -155,18 +155,50 @@ func TestRecordsRepository_LabelFilter_HonorsNegation(t *testing.T) {
 	}
 }
 
-func TestRecordsRepository_LabelFilter_MissingLabelerSrc(t *testing.T) {
+func TestRecordsRepository_LabelFilter_NeutralAcrossLabelers(t *testing.T) {
 	db := seedLabeledRecords(t)
 	ctx := context.Background()
 
-	_, err := db.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
+	// Add a second labeler asserting high-quality on rec3. Without
+	// LabelerSrcs the filter should match labels from BOTH labelers,
+	// so the query returns rec1 (labelerz) and rec3 (labelerz2).
+	ctx2 := context.Background()
+	if _, err := db.Labels.Insert(
+		ctx2, "did:plc:labelerz2",
+		"at://did:plc:alice/social.cert.hypercert/rec3",
+		nil, "high-quality", nil, nil,
+	); err != nil {
+		t.Fatalf("insert second labeler: %v", err)
+	}
+
+	// Neutral filter — no LabelerSrcs → union across all labelers.
+	got, err := db.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
 		ctx, "social.cert.hypercert", 10, "", "",
 		repositories.LabelFilter{
 			Include: []string{"high-quality"},
 		},
 	)
-	if err == nil {
-		t.Fatalf("expected error when LabelerSrc is empty, got nil")
+	if err != nil {
+		t.Fatalf("query (neutral): %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("expected 2 records (union across labelers), got %d: %v",
+			len(got), recordURIs(got))
+	}
+
+	// Narrowed to just the second labeler — should only see rec3.
+	got, err = db.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
+		ctx, "social.cert.hypercert", 10, "", "",
+		repositories.LabelFilter{
+			LabelerSrcs: []string{"did:plc:labelerz2"},
+			Include:     []string{"high-quality"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("query (scoped): %v", err)
+	}
+	if len(got) != 1 || got[0].URI != "at://did:plc:alice/social.cert.hypercert/rec3" {
+		t.Errorf("expected only rec3, got %d: %v", len(got), recordURIs(got))
 	}
 }
 

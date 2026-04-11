@@ -33,19 +33,24 @@ var PageInfoType = graphql.NewObject(graphql.ObjectConfig{
 // record connection queries. Exposed separately so the generic `records`
 // query (which defines its own `collection` argument) can compose them
 // alongside its existing args.
+//
+// The indexer is neutral about which labeler is authoritative: by default
+// label filters match assertions from any labeler the indexer has
+// ingested. Clients that want to scope to a specific trust set pass
+// `labelerDids: ["did:plc:...", ...]`.
 func LabelFilterArgs() graphql.FieldConfigArgument {
 	return graphql.FieldConfigArgument{
 		"labels": &graphql.ArgumentConfig{
 			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
-			Description: "Filter to records that have at least one of these active labels from the configured labeler.",
+			Description: "Filter to records that have at least one of these active labels. By default any labeler's labels match; scope to a trust set via labelerDids.",
 		},
 		"excludeLabels": &graphql.ArgumentConfig{
 			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
-			Description: "Exclude records that have any of these active labels from the configured labeler.",
+			Description: "Exclude records that have any of these active labels. By default any labeler's labels match; scope to a trust set via labelerDids.",
 		},
-		"labelerDid": &graphql.ArgumentConfig{
-			Type:        graphql.String,
-			Description: "DID of the labeler to filter by. Defaults to the server's configured labeler.",
+		"labelerDids": &graphql.ArgumentConfig{
+			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: "Optional list of labeler DIDs to restrict label-based filtering to. When empty, labels from every configured labeler are considered.",
 		},
 	}
 }

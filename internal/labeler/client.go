@@ -2,6 +2,7 @@ package labeler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -11,21 +12,13 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const (
-	// EventChannelBufferSize is the buffer size for the event channel between
-	// the websocket reader and the consumer.
-	EventChannelBufferSize = 256
+// (Package-wide defaults live in defaults.go.)
 
-	// MaxFrameSize bounds a single websocket binary frame from a labeler.
-	// ATProto label frames are small (a few KB at most); 1 MiB leaves
-	// ample headroom for legitimate batches while rejecting malicious
-	// oversized payloads before they exhaust memory.
-	MaxFrameSize = 1 << 20 // 1 MiB
-
-	defaultWriteTimeout = 10 * time.Second
-	defaultPongWait     = 60 * time.Second
-	defaultPingPeriod   = 50 * time.Second
-)
+// errOutdatedCursor is returned from Client.Run when the labeler sends a
+// #info frame with name "OutdatedCursor". The consumer catches this
+// specific error, clears its stored cursor, and re-runs backfill on the
+// next reconnect so nothing is silently lost.
+var errOutdatedCursor = errors.New("labeler reported outdated cursor")
 
 // ClientConfig configures a subscribeLabels websocket client.
 type ClientConfig struct {
@@ -41,7 +34,7 @@ type ClientConfig struct {
 // LabelMessage is a decoded #labels frame ready for the consumer to process.
 type LabelMessage struct {
 	Seq    int64
-	Labels []ProtoLabel
+	Labels []protoLabel
 }
 
 // Client opens a websocket to a labeler and streams decoded #labels frames.
@@ -172,7 +165,7 @@ func (c *Client) Run(ctx context.Context) error {
 			continue
 		}
 
-		hdr, body, err := DecodeFrame(message)
+		hdr, body, err := decodeFrame(message)
 		if err != nil {
 			slog.Warn("Failed to decode labeler frame", "error", err)
 			continue
@@ -180,7 +173,7 @@ func (c *Client) Run(ctx context.Context) error {
 
 		switch {
 		case hdr.Op == 1 && hdr.T == "#labels":
-			lb, err := DecodeLabelsBody(body)
+			lb, err := decodeLabelsBody(body)
 			if err != nil {
 				slog.Warn("Failed to decode labels body", "error", err)
 				continue
@@ -191,13 +184,21 @@ func (c *Client) Run(ctx context.Context) error {
 				return ctx.Err()
 			}
 		case hdr.Op == 1 && hdr.T == "#info":
-			// Informational frame (e.g. OutdatedCursor). Log and continue;
-			// the server may follow up with regular labels frames. We do
-			// not special-case OutdatedCursor yet because the cursor reset
-			// strategy depends on operator preference.
-			slog.Info("Labeler info frame received")
+			if ib, err := decodeInfoBody(body); err == nil {
+				slog.Info("Labeler info frame",
+					"name", ib.Name, "message", ib.Message)
+				// OutdatedCursor signals that our stored cursor is older
+				// than anything the labeler can still serve. Treat it as
+				// a hard signal to reset: return a sentinel error so the
+				// consumer can clear the cursor and re-run backfill.
+				if ib.Name == "OutdatedCursor" {
+					return errOutdatedCursor
+				}
+			} else {
+				slog.Info("Labeler info frame (undecoded)")
+			}
 		case hdr.Op == -1:
-			if eb, err := DecodeErrorBody(body); err == nil {
+			if eb, err := decodeErrorBody(body); err == nil {
 				slog.Warn("Labeler error frame",
 					"code", eb.Error, "message", eb.Message)
 				// The stream is effectively over after an error frame.

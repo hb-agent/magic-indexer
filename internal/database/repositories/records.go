@@ -329,10 +329,17 @@ func (r *RecordsRepository) GetByCollectionWithKeysetCursor(ctx context.Context,
 
 // LabelFilter narrows a record query by labels attached to each record.
 // Empty slices mean "no filter". Include and Exclude can be combined.
+//
+// The indexer is deliberately neutral about which labeler is authoritative:
+// LabelerSrcs is a list (not a single DID) so that a query can scope
+// filtering to a specific subset of labelers, or — when empty — to every
+// labeler whose labels have been ingested. This lets the server serve
+// labels without editorializing about which labeler is "right"; the
+// caller decides their trust set.
 type LabelFilter struct {
-	// LabelerSrc is the DID of the labeler whose labels are considered.
-	// Required when Include or Exclude is non-empty.
-	LabelerSrc string
+	// LabelerSrcs restricts the subquery to labels whose `src` is in this
+	// list. An empty list means "any labeler" (no src filter).
+	LabelerSrcs []string
 	// Include: only records that have at least one of these active labels.
 	Include []string
 	// Exclude: drop records that have any of these active labels.
@@ -357,9 +364,6 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 ) ([]*Record, error) {
 	if filter.IsEmpty() {
 		return r.GetByCollectionWithKeysetCursor(ctx, collection, limit, afterTimestamp, afterURI)
-	}
-	if filter.LabelerSrc == "" {
-		return nil, fmt.Errorf("LabelFilter requires LabelerSrc when Include or Exclude is set")
 	}
 
 	var (
@@ -393,22 +397,35 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 		args = append(args, afterTimestamp, afterTimestamp, afterURI)
 	}
 
-	// Include: EXISTS a non-negated label from our labeler with val in (...)
-	if len(filter.Include) > 0 {
-		srcPh := ph()
-		args = append(args, filter.LabelerSrc)
-
-		valPhs := make([]string, len(filter.Include))
-		for i, v := range filter.Include {
+	// labelFilterSub builds an EXISTS / NOT EXISTS subquery for the
+	// Include or Exclude set. The placeholders are generated in the
+	// same order as they appear in the SQL text so SQLite positional
+	// binding and Postgres numeric binding both match up. An empty
+	// LabelerSrcs list means "any labeler".
+	labelFilterSub := func(vals []string, exists bool) string {
+		valPhs := make([]string, len(vals))
+		for i, v := range vals {
 			valPhs[i] = ph()
 			args = append(args, v)
 		}
-		sub := fmt.Sprintf(`EXISTS (
+		srcClause := ""
+		if len(filter.LabelerSrcs) > 0 {
+			srcPhs := make([]string, len(filter.LabelerSrcs))
+			for i, s := range filter.LabelerSrcs {
+				srcPhs[i] = ph()
+				args = append(args, s)
+			}
+			srcClause = " AND l.src IN (" + strings.Join(srcPhs, ", ") + ")"
+		}
+		verb := "EXISTS"
+		if !exists {
+			verb = "NOT EXISTS"
+		}
+		return fmt.Sprintf(`%s (
 			SELECT 1 FROM label l
 			WHERE l.uri = r.uri
-			  AND l.src = %s
 			  AND l.neg = %s
-			  AND l.val IN (%s)
+			  AND l.val IN (%s)%s
 			  AND NOT EXISTS (
 			    SELECT 1 FROM label neg
 			    WHERE neg.uri = l.uri
@@ -417,36 +434,19 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 			      AND neg.neg = %s
 			      AND neg.cts >= l.cts
 			  )
-		)`, srcPh, negFalse, strings.Join(valPhs, ", "), negTrue)
-		whereClauses = append(whereClauses, sub)
+		)`, verb, negFalse, strings.Join(valPhs, ", "), srcClause, negTrue)
 	}
 
-	// Exclude: NOT EXISTS an active label from our labeler with val in (...)
-	if len(filter.Exclude) > 0 {
-		srcPh := ph()
-		args = append(args, filter.LabelerSrc)
+	// Include: EXISTS a non-negated label whose val matches one of the
+	// Include set (optionally restricted to LabelerSrcs).
+	if len(filter.Include) > 0 {
+		whereClauses = append(whereClauses, labelFilterSub(filter.Include, true))
+	}
 
-		valPhs := make([]string, len(filter.Exclude))
-		for i, v := range filter.Exclude {
-			valPhs[i] = ph()
-			args = append(args, v)
-		}
-		sub := fmt.Sprintf(`NOT EXISTS (
-			SELECT 1 FROM label l
-			WHERE l.uri = r.uri
-			  AND l.src = %s
-			  AND l.neg = %s
-			  AND l.val IN (%s)
-			  AND NOT EXISTS (
-			    SELECT 1 FROM label neg
-			    WHERE neg.uri = l.uri
-			      AND neg.src = l.src
-			      AND neg.val = l.val
-			      AND neg.neg = %s
-			      AND neg.cts >= l.cts
-			  )
-		)`, srcPh, negFalse, strings.Join(valPhs, ", "), negTrue)
-		whereClauses = append(whereClauses, sub)
+	// Exclude: NOT EXISTS an active label whose val matches one of the
+	// Exclude set (optionally restricted to LabelerSrcs).
+	if len(filter.Exclude) > 0 {
+		whereClauses = append(whereClauses, labelFilterSub(filter.Exclude, false))
 	}
 
 	// Build columns with "r." prefix.

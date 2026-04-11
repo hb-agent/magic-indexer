@@ -114,7 +114,12 @@ func (b *Builder) buildConnectionTypes() {
 	}
 }
 
-// RecordEvent GraphQL type for subscriptions
+// RecordEvent GraphQL type for subscriptions.
+//
+// The `labels` field is populated via a per-event resolver that
+// batch-loads from the labels repo — the subscription handler itself
+// does not enrich events with labels because it's in a separate
+// package and has no direct access to repositories.
 var recordEventType = graphql.NewObject(graphql.ObjectConfig{
 	Name:        "RecordEvent",
 	Description: "A real-time record change event",
@@ -142,6 +147,27 @@ var recordEventType = graphql.NewObject(graphql.ObjectConfig{
 		"record": &graphql.Field{
 			Type:        types.JSONScalar,
 			Description: "The record data (null for delete events)",
+		},
+		"labels": &graphql.Field{
+			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: "Active label values on this record from any ingested labeler.",
+			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+				src, ok := p.Source.(map[string]interface{})
+				if !ok {
+					return []string{}, nil
+				}
+				uri, _ := src["uri"].(string)
+				if uri == "" {
+					return []string{}, nil
+				}
+				repos := resolver.GetRepositories(p.Context)
+				if repos == nil {
+					return []string{}, nil
+				}
+				rec := &repositories.Record{URI: uri}
+				labelsByURI := loadLabelsByURI(p.Context, repos, nil, []*repositories.Record{rec})
+				return labelsByURI[uri], nil
+			},
 		},
 	},
 })
@@ -229,7 +255,10 @@ func (b *Builder) buildSubscriptionType() *graphql.Object {
 		},
 	}
 
-	// Add per-collection subscriptions
+	// Add per-collection subscriptions. Each resolver injects the
+	// record's active labels into the emitted payload so subscribers
+	// see the same `labels` field that queries surface — otherwise a
+	// subscription client would always see null for labels.
 	for lexiconID, recordType := range b.recordTypes {
 		fieldName := lexicon.ToFieldName(lexiconID) + "Events"
 		collection := lexiconID // Capture for closure
@@ -245,6 +274,18 @@ func (b *Builder) buildSubscriptionType() *graphql.Object {
 				// Only return if collection matches
 				if event.Collection != collection {
 					return nil, nil
+				}
+				// Best-effort label attachment. We synthesize a minimal
+				// Record so loadLabelsByURI can batch-load; the helper
+				// tolerates DB failures and returns empty slices on
+				// error so subscription delivery is never blocked.
+				repos := resolver.GetRepositories(p.Context)
+				if repos != nil && event.Record != nil {
+					if _, collision := event.Record["labels"]; !collision {
+						rec := &repositories.Record{URI: event.URI}
+						labelsByURI := loadLabelsByURI(p.Context, repos, nil, []*repositories.Record{rec})
+						event.Record["labels"] = labelsByURI[event.URI]
+					}
 				}
 				return event.Record, nil
 			},
@@ -435,11 +476,9 @@ func (b *Builder) resolveRecordConnection(
 		}
 	}
 
-	// Label filter args
-	filter, err := parseLabelFilter(p.Args, repos.DefaultLabelerDID)
-	if err != nil {
-		return nil, err
-	}
+	// Label filter args. The indexer is neutral about labeler choice:
+	// an empty LabelerSrcs list means "match any labeler".
+	filter := parseLabelFilter(p.Args)
 
 	// Fetch first+1 to determine hasNextPage
 	records, err := repos.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
@@ -457,7 +496,9 @@ func (b *Builder) resolveRecordConnection(
 
 	// Batch-load active labels for all records on this page so we can
 	// attach a `labels` field to each node in one query instead of N.
-	labelsByURI := loadLabelsByURI(p.Context, repos, filter.LabelerSrc, records)
+	// When the filter scopes labelers, we honor that in the returned
+	// labels field too so the list the client sees matches the filter.
+	labelsByURI := loadLabelsByURI(p.Context, repos, filter.LabelerSrcs, records)
 
 	// Build edges
 	edges := make([]interface{}, 0, len(records))
@@ -514,18 +555,34 @@ func (b *Builder) resolveRecordConnection(
 // SQLite's 999-parameter limit.
 const MaxLabelFilterValues = 50
 
+// MaxLabelFilterLabelers bounds the number of labeler DIDs that can be
+// passed in a single `labelerDids` GraphQL argument. Even the largest
+// trust sets are nowhere near this in practice.
+const MaxLabelFilterLabelers = 32
+
 // parseLabelFilter extracts the label-related arguments from a GraphQL
-// field resolver's args map and returns a LabelFilter. It respects the
-// labelerDid arg override, falling back to the server's default labeler.
-// Returns an error if the caller requested a label filter but no labeler
-// is configured (so the caller sees an explicit failure rather than
-// silently-ignored filter). Too-long lists are truncated with a warning.
-func parseLabelFilter(args map[string]interface{}, defaultLabeler string) (repositories.LabelFilter, error) {
+// field resolver's args map and returns a LabelFilter. The indexer does
+// NOT impose a default labeler: when labelerDids is empty, the filter
+// matches labels from every labeler that has been ingested. Callers
+// restrict to a trust set via the labelerDids arg.
+//
+// Too-long lists are truncated (with a warn log) to protect the DB.
+func parseLabelFilter(args map[string]interface{}) repositories.LabelFilter {
 	var filter repositories.LabelFilter
 
-	filter.LabelerSrc = defaultLabeler
-	if did, ok := args["labelerDid"].(string); ok && did != "" {
-		filter.LabelerSrc = did
+	if raw, ok := args["labelerDids"].([]interface{}); ok {
+		for _, v := range raw {
+			if len(filter.LabelerSrcs) >= MaxLabelFilterLabelers {
+				break
+			}
+			if s, ok := v.(string); ok && s != "" {
+				filter.LabelerSrcs = append(filter.LabelerSrcs, s)
+			}
+		}
+		if len(raw) > MaxLabelFilterLabelers {
+			slog.Warn("GraphQL: labelerDids argument truncated",
+				"supplied", len(raw), "max", MaxLabelFilterLabelers)
+		}
 	}
 
 	rawIncludeLen := 0
@@ -562,28 +619,27 @@ func parseLabelFilter(args map[string]interface{}, defaultLabeler string) (repos
 			"supplied", rawExcludeLen, "max", MaxLabelFilterValues)
 	}
 
-	// If the caller passed a filter but no labeler DID is configured
-	// (either as server default or via labelerDid), return an explicit
-	// error instead of silently ignoring the filter. This prevents
-	// client code from thinking it filtered results when it didn't.
-	if filter.LabelerSrc == "" && (len(filter.Include) > 0 || len(filter.Exclude) > 0) {
-		return filter, fmt.Errorf("label filter requested but no labeler is configured; pass labelerDid to select one")
-	}
-	return filter, nil
+	return filter
 }
 
 // loadLabelsByURI batch-loads active labels for a page of records and
 // groups them into a map of URI -> []val. Every URI in the input is
 // present in the result (with an empty slice if no labels match) so the
-// GraphQL `labels` field renders as `[]` instead of `null`. If
-// labelerSrc is non-empty, only labels from that labeler are included.
+// GraphQL `labels` field renders as `[]` instead of `null`.
+//
+// When labelerSrcs is non-empty, only labels from those labelers are
+// included. When it is nil/empty, the result is the union of active
+// labels from every labeler ingested — the indexer is neutral about
+// which labeler to trust, so it surfaces all of them and lets the
+// client narrow via the `labelerDids` GraphQL arg.
+//
 // A DB failure is non-fatal and yields empty slices so the main query
 // still succeeds, but the error is logged so operators can detect
 // silent label disappearance.
 func loadLabelsByURI(
 	ctx context.Context,
 	repos *resolver.Repositories,
-	labelerSrc string,
+	labelerSrcs []string,
 	records []*repositories.Record,
 ) map[string][]string {
 	result := make(map[string][]string, len(records))
@@ -605,14 +661,25 @@ func loadLabelsByURI(
 	if err != nil {
 		slog.Warn("GraphQL: failed to batch-load labels for page",
 			"uri_count", len(uris),
-			"labeler_src", labelerSrc,
+			"labeler_srcs", labelerSrcs,
 			"error", err)
 		return result
 	}
 
+	// Optional trust-set filter: empty means "any labeler".
+	var allowed map[string]struct{}
+	if len(labelerSrcs) > 0 {
+		allowed = make(map[string]struct{}, len(labelerSrcs))
+		for _, s := range labelerSrcs {
+			allowed[s] = struct{}{}
+		}
+	}
+
 	for _, l := range labels {
-		if labelerSrc != "" && l.Src != labelerSrc {
-			continue
+		if allowed != nil {
+			if _, ok := allowed[l.Src]; !ok {
+				continue
+			}
 		}
 		result[l.URI] = append(result[l.URI], l.Val)
 	}
@@ -699,10 +766,13 @@ func (b *Builder) createSingleRecordResolver(lexiconID string) graphql.FieldReso
 			data["cid"] = rec.CID
 		}
 
-		// Attach labels from the configured labeler (best-effort),
-		// again only if the lexicon hasn't claimed the `labels` name.
+		// Attach labels from every ingested labeler (best-effort),
+		// only if the lexicon hasn't claimed the `labels` name. The
+		// single-record resolver does not support a labelerDids arg
+		// today — callers can post-filter client-side — so we pass
+		// nil to get the full union.
 		if _, collision := data["labels"]; !collision {
-			labelsByURI := loadLabelsByURI(p.Context, repos, repos.DefaultLabelerDID, []*repositories.Record{rec})
+			labelsByURI := loadLabelsByURI(p.Context, repos, nil, []*repositories.Record{rec})
 			data["labels"] = labelsByURI[rec.URI]
 		}
 

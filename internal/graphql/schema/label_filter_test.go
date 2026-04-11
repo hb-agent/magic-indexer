@@ -4,55 +4,45 @@ import (
 	"testing"
 )
 
-func TestParseLabelFilter_UsesDefault(t *testing.T) {
+func TestParseLabelFilter_NeutralDefault(t *testing.T) {
 	args := map[string]interface{}{
 		"labels": []interface{}{"high-quality"},
 	}
-	filter, err := parseLabelFilter(args, "did:plc:default")
-	if err != nil {
-		t.Fatalf("parseLabelFilter() error = %v", err)
-	}
-	if filter.LabelerSrc != "did:plc:default" {
-		t.Errorf("LabelerSrc = %q, want did:plc:default", filter.LabelerSrc)
+	filter := parseLabelFilter(args)
+	if len(filter.LabelerSrcs) != 0 {
+		t.Errorf("expected empty LabelerSrcs (neutral default), got %v", filter.LabelerSrcs)
 	}
 	if len(filter.Include) != 1 || filter.Include[0] != "high-quality" {
 		t.Errorf("Include = %v, want [high-quality]", filter.Include)
 	}
 }
 
-func TestParseLabelFilter_ExplicitLabelerOverride(t *testing.T) {
+func TestParseLabelFilter_LabelerDidsList(t *testing.T) {
 	args := map[string]interface{}{
-		"labels":     []interface{}{"standard"},
-		"labelerDid": "did:plc:override",
+		"labels":      []interface{}{"standard"},
+		"labelerDids": []interface{}{"did:plc:a", "did:plc:b"},
 	}
-	filter, err := parseLabelFilter(args, "did:plc:default")
-	if err != nil {
-		t.Fatalf("parseLabelFilter() error = %v", err)
+	filter := parseLabelFilter(args)
+	if len(filter.LabelerSrcs) != 2 {
+		t.Fatalf("expected 2 LabelerSrcs, got %v", filter.LabelerSrcs)
 	}
-	if filter.LabelerSrc != "did:plc:override" {
-		t.Errorf("LabelerSrc = %q, want did:plc:override", filter.LabelerSrc)
+	if filter.LabelerSrcs[0] != "did:plc:a" || filter.LabelerSrcs[1] != "did:plc:b" {
+		t.Errorf("LabelerSrcs = %v", filter.LabelerSrcs)
 	}
 }
 
-func TestParseLabelFilter_ErrorsWhenNoLabeler(t *testing.T) {
-	args := map[string]interface{}{
-		"labels": []interface{}{"high-quality"},
-	}
-	_, err := parseLabelFilter(args, "")
-	if err == nil {
-		t.Fatal("expected error when filter is set and no labeler configured")
-	}
-}
-
-func TestParseLabelFilter_NoFilterNoErrorWhenEmpty(t *testing.T) {
+func TestParseLabelFilter_EmptyArgsIsNoFilter(t *testing.T) {
 	args := map[string]interface{}{}
-	_, err := parseLabelFilter(args, "")
-	if err != nil {
-		t.Errorf("unexpected error when filter is empty and no labeler: %v", err)
+	filter := parseLabelFilter(args)
+	if !filter.IsEmpty() {
+		t.Errorf("expected empty filter, got %+v", filter)
+	}
+	if len(filter.LabelerSrcs) != 0 {
+		t.Errorf("expected no labeler srcs, got %v", filter.LabelerSrcs)
 	}
 }
 
-func TestParseLabelFilter_TruncatesOversizedLists(t *testing.T) {
+func TestParseLabelFilter_TruncatesOversizedValues(t *testing.T) {
 	raw := make([]interface{}, MaxLabelFilterValues+10)
 	for i := range raw {
 		raw[i] = "val"
@@ -60,13 +50,26 @@ func TestParseLabelFilter_TruncatesOversizedLists(t *testing.T) {
 	args := map[string]interface{}{
 		"labels": raw,
 	}
-	filter, err := parseLabelFilter(args, "did:plc:x")
-	if err != nil {
-		t.Fatalf("parseLabelFilter() error = %v", err)
-	}
+	filter := parseLabelFilter(args)
 	if len(filter.Include) != MaxLabelFilterValues {
 		t.Errorf("Include length = %d, want %d (truncated)",
 			len(filter.Include), MaxLabelFilterValues)
+	}
+}
+
+func TestParseLabelFilter_TruncatesOversizedLabelerDids(t *testing.T) {
+	raw := make([]interface{}, MaxLabelFilterLabelers+5)
+	for i := range raw {
+		raw[i] = "did:plc:x"
+	}
+	args := map[string]interface{}{
+		"labelerDids": raw,
+		"labels":      []interface{}{"spam"},
+	}
+	filter := parseLabelFilter(args)
+	if len(filter.LabelerSrcs) != MaxLabelFilterLabelers {
+		t.Errorf("LabelerSrcs length = %d, want %d (truncated)",
+			len(filter.LabelerSrcs), MaxLabelFilterLabelers)
 	}
 }
 
@@ -74,11 +77,9 @@ func TestParseLabelFilter_CombinesIncludeAndExclude(t *testing.T) {
 	args := map[string]interface{}{
 		"labels":        []interface{}{"high-quality"},
 		"excludeLabels": []interface{}{"draft", "likely-test"},
+		"labelerDids":   []interface{}{"did:plc:x"},
 	}
-	filter, err := parseLabelFilter(args, "did:plc:x")
-	if err != nil {
-		t.Fatalf("parseLabelFilter() error = %v", err)
-	}
+	filter := parseLabelFilter(args)
 	if len(filter.Include) != 1 || len(filter.Exclude) != 2 {
 		t.Errorf("Include=%v, Exclude=%v", filter.Include, filter.Exclude)
 	}

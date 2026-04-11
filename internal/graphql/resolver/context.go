@@ -16,16 +16,18 @@ const (
 )
 
 // Repositories holds all database repositories needed by resolvers.
+//
+// Note: the indexer is deliberately neutral about which labeler is
+// authoritative. Label-filtered queries may restrict themselves to a
+// subset of labelers via the `labelerDids` GraphQL arg, but there is no
+// server-side default labeler — the `labels` field on record nodes
+// returns the full union of active labels from every labeler the
+// indexer has ingested.
 type Repositories struct {
 	Records  *repositories.RecordsRepository
 	Actors   *repositories.ActorsRepository
 	Lexicons *repositories.LexiconsRepository
 	Labels   *repositories.LabelsRepository
-
-	// DefaultLabelerDID is the labeler whose labels are applied when a
-	// record query uses label filter args without specifying labelerDid.
-	// Empty disables label filtering defaults.
-	DefaultLabelerDID string
 }
 
 // NewRepositories creates a new Repositories from a database executor.

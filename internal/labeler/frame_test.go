@@ -7,7 +7,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-func encodeFrame(t *testing.T, hdr FrameHeader, body any) []byte {
+func encodeFrame(t *testing.T, hdr frameHeader, body any) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	enc := cbor.NewEncoder(&buf)
@@ -21,9 +21,9 @@ func encodeFrame(t *testing.T, hdr FrameHeader, body any) []byte {
 }
 
 func TestDecodeFrame_LabelsBody(t *testing.T) {
-	msg := encodeFrame(t, FrameHeader{Op: 1, T: "#labels"}, LabelsBody{
+	msg := encodeFrame(t, frameHeader{Op: 1, T: "#labels"}, labelsBody{
 		Seq: 42,
-		Labels: []ProtoLabel{
+		Labels: []protoLabel{
 			{
 				Src: "did:plc:labelerz",
 				URI: "at://did:plc:alice/app.bsky.feed.post/1",
@@ -40,7 +40,7 @@ func TestDecodeFrame_LabelsBody(t *testing.T) {
 		},
 	})
 
-	hdr, body, err := DecodeFrame(msg)
+	hdr, body, err := decodeFrame(msg)
 	if err != nil {
 		t.Fatalf("decode frame: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestDecodeFrame_LabelsBody(t *testing.T) {
 		t.Fatalf("unexpected header: %+v", hdr)
 	}
 
-	lb, err := DecodeLabelsBody(body)
+	lb, err := decodeLabelsBody(body)
 	if err != nil {
 		t.Fatalf("decode labels body: %v", err)
 	}
@@ -67,12 +67,12 @@ func TestDecodeFrame_LabelsBody(t *testing.T) {
 }
 
 func TestDecodeFrame_ErrorBody(t *testing.T) {
-	msg := encodeFrame(t, FrameHeader{Op: -1}, ErrorBody{
+	msg := encodeFrame(t, frameHeader{Op: -1}, errorBody{
 		Error:   "ConsumerTooSlow",
 		Message: "cursor too far behind",
 	})
 
-	hdr, body, err := DecodeFrame(msg)
+	hdr, body, err := decodeFrame(msg)
 	if err != nil {
 		t.Fatalf("decode frame: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestDecodeFrame_ErrorBody(t *testing.T) {
 		t.Fatalf("Op = %d, want -1", hdr.Op)
 	}
 
-	eb, err := DecodeErrorBody(body)
+	eb, err := decodeErrorBody(body)
 	if err != nil {
 		t.Fatalf("decode error body: %v", err)
 	}
@@ -89,8 +89,31 @@ func TestDecodeFrame_ErrorBody(t *testing.T) {
 	}
 }
 
+func TestDecodeFrame_InfoBody_OutdatedCursor(t *testing.T) {
+	msg := encodeFrame(t, frameHeader{Op: 1, T: "#info"}, infoBody{
+		Name:    "OutdatedCursor",
+		Message: "cursor is too old",
+	})
+
+	hdr, body, err := decodeFrame(msg)
+	if err != nil {
+		t.Fatalf("decode frame: %v", err)
+	}
+	if hdr.Op != 1 || hdr.T != "#info" {
+		t.Fatalf("unexpected header: %+v", hdr)
+	}
+
+	ib, err := decodeInfoBody(body)
+	if err != nil {
+		t.Fatalf("decode info body: %v", err)
+	}
+	if ib.Name != "OutdatedCursor" {
+		t.Errorf("Name = %q, want OutdatedCursor", ib.Name)
+	}
+}
+
 func TestDecodeFrame_Truncated(t *testing.T) {
-	_, _, err := DecodeFrame([]byte{})
+	_, _, err := decodeFrame([]byte{})
 	if err == nil {
 		t.Fatal("expected error on empty frame, got nil")
 	}

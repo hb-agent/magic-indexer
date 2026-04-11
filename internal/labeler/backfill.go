@@ -13,14 +13,10 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 )
 
-// MaxBackfillBodyBytes bounds the size of a single queryLabels HTTP response
-// so a malicious or misbehaving labeler can't exhaust memory.
-const MaxBackfillBodyBytes = 10 << 20 // 10 MiB
-
 // queryLabelsResponse is the shape returned by com.atproto.label.queryLabels.
 type queryLabelsResponse struct {
 	Cursor string       `json:"cursor,omitempty"`
-	Labels []ProtoLabel `json:"labels"`
+	Labels []protoLabel `json:"labels"`
 }
 
 // BackfillClient pages through com.atproto.label.queryLabels to fetch
@@ -49,26 +45,29 @@ func NewBackfillClient(pdsHost string) *BackfillClient {
 	}
 }
 
-// MaxBackfillPages bounds the number of queryLabels pages we'll fetch in a
-// single Fetch call. At limit=250 per page this allows ~10M labels, which
-// far exceeds any realistic labeler backfill and prevents a runaway loop
-// if the server returns an unexpected cursor sequence.
-const MaxBackfillPages = 40_000
+// PageHandler receives the decoded labels for a single queryLabels page
+// along with the response's next-page cursor. Returning a non-nil error
+// aborts the Fetch loop. A handler may persist `nextCursor` to resume
+// an interrupted backfill from the same position on the next run.
+type PageHandler func(ctx context.Context, labels []protoLabel, nextCursor string) error
 
 // Fetch pages through queryLabels and invokes handle for every batch.
-// If sources is empty, the labeler returns labels from all sources it knows.
-// handle is called once per page; it may return an error to abort.
+// If sources is empty, the labeler returns labels from all sources it
+// knows. Fetch starts from startCursor (empty for a fresh backfill) so
+// interrupted runs can resume from the last checkpointed page without
+// replaying completed work.
 func (b *BackfillClient) Fetch(
 	ctx context.Context,
 	sources []string,
-	handle func(ctx context.Context, labels []ProtoLabel) error,
+	startCursor string,
+	handle PageHandler,
 ) error {
 	base, err := b.endpoint()
 	if err != nil {
 		return err
 	}
 
-	var cursor string
+	cursor := startCursor
 	pages := 0
 	for {
 		if pages >= MaxBackfillPages {
@@ -115,10 +114,8 @@ func (b *BackfillClient) Fetch(
 			return fmt.Errorf("parse queryLabels response: %w", err)
 		}
 
-		if len(parsed.Labels) > 0 {
-			if err := handle(ctx, parsed.Labels); err != nil {
-				return err
-			}
+		if err := handle(ctx, parsed.Labels, parsed.Cursor); err != nil {
+			return err
 		}
 
 		if parsed.Cursor == "" || parsed.Cursor == cursor {

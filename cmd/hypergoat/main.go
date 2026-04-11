@@ -280,6 +280,34 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 		})
 	})
 
+	// Labeler cursor reset — operator escape hatch to force a re-backfill
+	// on the next startup for a specific labeler DID. Deletes both the
+	// subscription seq cursor and any in-progress backfill checkpoint.
+	// Gated on trust headers because it mutates state; the gate is
+	// deliberately minimal since this is local operator tooling, not
+	// a public API.
+	r.Post("/admin/labeler/reset", func(w http.ResponseWriter, req *http.Request) {
+		if !cfg.TrustProxyHeaders {
+			http.Error(w, "labeler reset requires TRUST_PROXY_HEADERS=true", http.StatusForbidden)
+			return
+		}
+		did := req.URL.Query().Get("did")
+		if did == "" {
+			http.Error(w, "missing did query parameter", http.StatusBadRequest)
+			return
+		}
+		reqCtx := req.Context()
+		_ = svc.config.Delete(reqCtx, "labeler_cursor:"+did)
+		_ = svc.config.Delete(reqCtx, "labeler_backfill_cursor:"+did)
+		slog.Info("Labeler cursor reset by admin request", "did", did)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"reset": true,
+			"did":   did,
+			"note":  "restart the server to re-run backfill for this labeler",
+		})
+	})
+
 	// Stats endpoint. Includes per-labeler consumer counters so operators
 	// can inspect labeler ingestion health without attaching a debugger.
 	r.Get("/stats", func(w http.ResponseWriter, req *http.Request) {
@@ -604,13 +632,15 @@ func setupGraphQL(r *chi.Mux, cfg *config.Config, svc *services, pubsub *subscri
 
 	slog.Info("Total lexicons registered", "count", registry.Count())
 
-	// Create GraphQL handler
+	// Create GraphQL handler. The indexer is neutral about which
+	// labeler is authoritative — no DefaultLabelerDID is passed in,
+	// so label-filtered queries match any labeler by default and
+	// clients narrow via the labelerDids arg.
 	repos := &resolver.Repositories{
-		Records:           svc.records,
-		Actors:            svc.actors,
-		Lexicons:          svc.lexicons,
-		Labels:            svc.labels,
-		DefaultLabelerDID: firstDID(cfg.LabelerDIDs),
+		Records:  svc.records,
+		Actors:   svc.actors,
+		Lexicons: svc.lexicons,
+		Labels:   svc.labels,
 	}
 
 	graphqlHandler, err := hgraphql.NewHandler(registry, repos)
@@ -739,6 +769,13 @@ func startJetstream(
 // each labeler's endpoint via the OAuth DIDResolver (which respects the
 // PLC_DIRECTORY_URL override). Invalid DIDs are skipped with a warning.
 // Consumers are added to backgroundServices for graceful shutdown.
+//
+// Respects two additional config knobs:
+//   - LabelerDryRun: only resolves labeler hosts and logs the results,
+//     does not spawn any consumers or ingest any labels. Useful for
+//     validating configuration in staging without committing state.
+//   - LabelerCursorFlushInterval: seconds between cursor flushes
+//     (0 = package default of 5s).
 func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
 	raw := parseDIDs(cfg.LabelerDIDs)
 	if len(raw) == 0 {
@@ -767,14 +804,37 @@ func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
 	}
 	didResolver := oauth.NewDIDResolver(resolverOpts...)
 
+	if cfg.LabelerDryRun {
+		for _, did := range dids {
+			doc, err := didResolver.ResolveDID(did)
+			if err != nil {
+				slog.Error("Labeler dry run: DID resolution failed",
+					"did", did, "error", err)
+				continue
+			}
+			host := doc.GetLabelerEndpoint()
+			svcType := "AtprotoLabeler"
+			if host == "" {
+				host = doc.GetPDSEndpoint()
+				svcType = "AtprotoPersonalDataServer (fallback)"
+			}
+			slog.Info("Labeler dry run: resolved",
+				"did", did, "host", host, "service", svcType)
+		}
+		slog.Info("Labeler dry run complete; not starting consumers (LABELER_DRY_RUN=true)")
+		return
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	bg.labelerCancel = cancel
 
 	for _, did := range dids {
+		cc := labeler.ConsumerConfig{LabelerDID: did}
+		if cfg.LabelerCursorFlushInterval > 0 {
+			cc.CursorFlushInterval = time.Duration(cfg.LabelerCursorFlushInterval) * time.Second
+		}
 		consumer := labeler.NewConsumer(
-			labeler.ConsumerConfig{
-				LabelerDID: did,
-			},
+			cc,
 			svc.labels,
 			svc.labelDefinitions,
 			svc.config,
@@ -878,17 +938,6 @@ func serve(r *chi.Mux, cfg *config.Config, bg *backgroundServices) error {
 
 	slog.Info("Server stopped gracefully")
 	return nil
-}
-
-// firstDID returns the first non-empty DID from a comma-separated list.
-func firstDID(commaSeparated string) string {
-	for _, s := range strings.Split(commaSeparated, ",") {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			return s
-		}
-	}
-	return ""
 }
 
 // parseDIDs splits a comma-separated list of DIDs and trims whitespace.

@@ -19,67 +19,67 @@ func TestValidateLabel(t *testing.T) {
 
 	cases := []struct {
 		name string
-		l    ProtoLabel
+		l    protoLabel
 		want bool
 	}{
 		{
 			name: "valid at:// label",
-			l:    ProtoLabel{Src: "did:plc:x", URI: "at://did:plc:alice/app.bsky.feed.post/1", Val: "spam"},
+			l:    protoLabel{Src: "did:plc:x", URI: "at://did:plc:alice/app.bsky.feed.post/1", Val: "spam"},
 			want: true,
 		},
 		{
 			name: "empty src",
-			l:    ProtoLabel{Src: "", URI: "at://did:plc:alice/x/1", Val: "spam"},
+			l:    protoLabel{Src: "", URI: "at://did:plc:alice/x/1", Val: "spam"},
 			want: false,
 		},
 		{
 			name: "empty uri",
-			l:    ProtoLabel{Src: "did:plc:x", URI: "", Val: "spam"},
+			l:    protoLabel{Src: "did:plc:x", URI: "", Val: "spam"},
 			want: false,
 		},
 		{
 			name: "empty val",
-			l:    ProtoLabel{Src: "did:plc:x", URI: "at://did:plc:alice/x/1", Val: ""},
+			l:    protoLabel{Src: "did:plc:x", URI: "at://did:plc:alice/x/1", Val: ""},
 			want: false,
 		},
 		{
 			name: "account-level did: URI rejected",
-			l:    ProtoLabel{Src: "did:plc:x", URI: "did:plc:alice", Val: "spam"},
+			l:    protoLabel{Src: "did:plc:x", URI: "did:plc:alice", Val: "spam"},
 			want: false,
 		},
 		{
 			name: "bare at:// with no record path rejected",
-			l:    ProtoLabel{Src: "did:plc:x", URI: "at://", Val: "spam"},
+			l:    protoLabel{Src: "did:plc:x", URI: "at://", Val: "spam"},
 			want: false,
 		},
 		{
 			name: "http:// URI rejected",
-			l:    ProtoLabel{Src: "did:plc:x", URI: "http://example.com/x", Val: "spam"},
+			l:    protoLabel{Src: "did:plc:x", URI: "http://example.com/x", Val: "spam"},
 			want: false,
 		},
 		{
 			name: "oversized val rejected",
-			l:    ProtoLabel{Src: "did:plc:x", URI: "at://did:plc:alice/x/1", Val: strings.Repeat("a", MaxLabelValLen+1)},
+			l:    protoLabel{Src: "did:plc:x", URI: "at://did:plc:alice/x/1", Val: strings.Repeat("a", MaxLabelValLen+1)},
 			want: false,
 		},
 		{
 			name: "val exactly at cap is allowed",
-			l:    ProtoLabel{Src: "did:plc:x", URI: "at://did:plc:alice/x/1", Val: strings.Repeat("a", MaxLabelValLen)},
+			l:    protoLabel{Src: "did:plc:x", URI: "at://did:plc:alice/x/1", Val: strings.Repeat("a", MaxLabelValLen)},
 			want: true,
 		},
 		{
 			name: "oversized src rejected",
-			l:    ProtoLabel{Src: strings.Repeat("s", MaxLabelSrcLen+1), URI: "at://did:plc:alice/x/1", Val: "spam"},
+			l:    protoLabel{Src: strings.Repeat("s", MaxLabelSrcLen+1), URI: "at://did:plc:alice/x/1", Val: "spam"},
 			want: false,
 		},
 		{
 			name: "oversized uri rejected",
-			l:    ProtoLabel{Src: "did:plc:x", URI: "at://" + strings.Repeat("a", MaxLabelURILen), Val: "spam"},
+			l:    protoLabel{Src: "did:plc:x", URI: "at://" + strings.Repeat("a", MaxLabelURILen), Val: "spam"},
 			want: false,
 		},
 		{
 			name: "oversized cid rejected",
-			l:    ProtoLabel{Src: "did:plc:x", URI: "at://did:plc:alice/x/1", Val: "spam", CID: strings.Repeat("c", MaxLabelCIDLen+1)},
+			l:    protoLabel{Src: "did:plc:x", URI: "at://did:plc:alice/x/1", Val: "spam", CID: strings.Repeat("c", MaxLabelCIDLen+1)},
 			want: false,
 		},
 	}

@@ -35,20 +35,16 @@ type ConsumerConfig struct {
 	SkipBackfill bool
 }
 
-// MaxKnownVals caps the size of the in-process label-definition memoisation
-// map to prevent unbounded growth if a labeler emits many distinct vals.
-// On overflow, ensureDefinition falls through to a DB check per call — slow
-// but memory-safe.
-const MaxKnownVals = 10_000
-
 // Stats tracks per-consumer counters for operational visibility.
 type Stats struct {
-	EventsReceived    int64 // #labels frames consumed
-	LabelsReceived    int64 // raw labels decoded (pre-validation)
-	LabelsPersisted   int64 // labels successfully upserted
-	LabelsRejected    int64 // labels dropped due to validation or DB error
-	ReconnectAttempts int64
-	LastSeq           int64 // most recent seq acked
+	EventsReceived      int64 // #labels frames consumed
+	LabelsReceived      int64 // raw labels decoded (pre-validation)
+	LabelsPersisted     int64 // labels successfully upserted
+	LabelsRejected      int64 // labels dropped due to validation or DB error
+	AccountLevelSkipped int64 // labels rejected because URI is did:... (unreachable)
+	ReconnectAttempts   int64
+	OutdatedCursors     int64 // times the server reported OutdatedCursor
+	LastSeq             int64 // most recent seq acked
 }
 
 // Consumer runs one labeler subscription end-to-end: resolve DID, run the
@@ -71,10 +67,13 @@ type Consumer struct {
 	cursor   int64
 	cursorMu sync.Mutex
 
-	// knownVals memoises label_definition vals we've already ensured so we
-	// don't thrash the DB on every incoming label. Bounded by MaxKnownVals.
-	knownValsMu sync.Mutex
-	knownVals   map[string]struct{}
+	// knownVals memoises label_definition vals we've already ensured so
+	// we don't thrash the DB on every incoming label. Bounded by
+	// MaxKnownVals with FIFO eviction so memoization stays active even
+	// under a labeler that emits an unbounded number of distinct vals.
+	knownValsMu    sync.Mutex
+	knownVals      map[string]struct{}
+	knownValsOrder []string
 
 	// Stats (protected by statsMu)
 	stats   Stats
@@ -83,7 +82,8 @@ type Consumer struct {
 	ctx       context.Context
 	ctxCancel context.CancelFunc
 
-	stopOnce sync.Once
+	startOnce sync.Once
+	stopOnce  sync.Once
 }
 
 // NewConsumer creates a new labeler consumer.
@@ -128,7 +128,17 @@ func (c *Consumer) cursorKey() string {
 
 // Start runs the consumer: resolve the labeler host, backfill if needed,
 // then stream updates with automatic reconnect until ctx is cancelled.
+// Guarded by startOnce so a second Start call on the same Consumer is a
+// no-op (mirrors Stop's sync.Once protection).
 func (c *Consumer) Start(ctx context.Context) error {
+	var started bool
+	c.startOnce.Do(func() {
+		started = true
+	})
+	if !started {
+		return fmt.Errorf("labeler: Consumer already started")
+	}
+
 	c.clientMu.Lock()
 	c.ctx, c.ctxCancel = context.WithCancel(ctx)
 	c.clientMu.Unlock()
@@ -147,22 +157,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 	)
 
 	// One-time backfill if we have no stored cursor for this labeler.
-	if !c.config.SkipBackfill && !c.config.DisableCursor {
-		existing, err := c.loadCursor(c.ctx)
-		if err != nil {
-			slog.Debug("No stored labeler cursor, will run backfill",
-				"did", c.config.LabelerDID)
-			existing = 0
-		}
-		if existing == 0 {
-			slog.Info("Running labeler backfill", "did", c.config.LabelerDID)
-			if err := c.runBackfill(c.ctx); err != nil {
-				slog.Error("Labeler backfill failed",
-					"did", c.config.LabelerDID, "error", err)
-				// Fall through: start the live subscription anyway.
-			}
-		}
-	}
+	c.backfillIfNeeded()
 
 	backoff := time.Second
 	maxBackoff := 2 * time.Minute
@@ -176,6 +171,26 @@ func (c *Consumer) Start(ctx context.Context) error {
 			c.finalFlush()
 			return c.ctx.Err()
 		default:
+		}
+
+		// OutdatedCursor recovery: the labeler has garbage-collected
+		// seqs older than our stored cursor, so we cannot resume from
+		// where we left off. Clear both the subscription cursor AND
+		// any stale backfill checkpoint, re-run backfill to catch
+		// up, and reconnect fresh.
+		if errors.Is(err, errOutdatedCursor) {
+			slog.Warn("Labeler cursor is outdated; clearing and re-backfilling",
+				"did", c.config.LabelerDID)
+			c.statsAdd(func(s *Stats) { s.OutdatedCursors++ })
+			c.cursorMu.Lock()
+			c.cursor = 0
+			c.cursorMu.Unlock()
+			if cerr := c.clearCursor(c.ctx); cerr != nil {
+				slog.Warn("Failed to clear labeler cursor on OutdatedCursor recovery",
+					"did", c.config.LabelerDID, "error", cerr)
+			}
+			c.clearBackfillCursor(c.ctx)
+			c.backfillIfNeeded()
 		}
 
 		attempt++
@@ -312,16 +327,82 @@ func (c *Consumer) resolveLabelerHost() (string, error) {
 	return "", fmt.Errorf("no AtprotoLabeler or AtprotoPersonalDataServer endpoint on %s", c.config.LabelerDID)
 }
 
-// BackfillProgressInterval controls how often a mid-backfill progress line
-// is emitted while the initial queryLabels sweep is running.
-const BackfillProgressInterval = 1000
-
 // runBackfill fetches every existing label from queryLabels and upserts.
+// backfillIfNeeded runs the initial queryLabels backfill when the
+// stored cursor is zero (either the first start for a labeler, or
+// after OutdatedCursor recovery). A non-zero cursor means we already
+// have a complete view up to that seq and can go straight to the
+// subscription stream.
+func (c *Consumer) backfillIfNeeded() {
+	if c.config.SkipBackfill || c.config.DisableCursor {
+		return
+	}
+	existing, err := c.loadCursor(c.ctx)
+	if err != nil {
+		slog.Debug("No stored labeler cursor, will run backfill",
+			"did", c.config.LabelerDID)
+		existing = 0
+	}
+	if existing != 0 {
+		return
+	}
+	slog.Info("Running labeler backfill", "did", c.config.LabelerDID)
+	if err := c.runBackfill(c.ctx); err != nil {
+		slog.Error("Labeler backfill failed",
+			"did", c.config.LabelerDID, "error", err)
+		// Fall through: start the live subscription anyway.
+	}
+}
+
+// backfillCursorKey is the config-table key used to checkpoint the
+// queryLabels pagination cursor during a backfill. It's distinct from
+// the subscription seq cursor (cursorKey) because the two come from
+// different spaces — the backfill cursor is the opaque string returned
+// by the labeler's queryLabels response, while the subscription cursor
+// is an int64 seq.
+func (c *Consumer) backfillCursorKey() string {
+	return "labeler_backfill_cursor:" + c.config.LabelerDID
+}
+
+func (c *Consumer) loadBackfillCursor(ctx context.Context) string {
+	v, err := c.cfgRepo.Get(ctx, c.backfillCursorKey())
+	if err != nil {
+		return ""
+	}
+	return v
+}
+
+func (c *Consumer) saveBackfillCursor(ctx context.Context, cursor string) {
+	if err := c.cfgRepo.Set(ctx, c.backfillCursorKey(), cursor); err != nil {
+		slog.Warn("Failed to checkpoint backfill cursor",
+			"did", c.config.LabelerDID, "error", err)
+	}
+}
+
+func (c *Consumer) clearBackfillCursor(ctx context.Context) {
+	if err := c.cfgRepo.Delete(ctx, c.backfillCursorKey()); err != nil {
+		slog.Debug("Failed to clear backfill cursor on completion",
+			"did", c.config.LabelerDID, "error", err)
+	}
+}
+
 func (c *Consumer) runBackfill(ctx context.Context) error {
 	bf := NewBackfillClient(c.config.PDSHost)
 	var total, totalRejected int
 	lastLogged := 0
-	err := bf.Fetch(ctx, []string{c.config.LabelerDID}, func(ctx context.Context, labels []ProtoLabel) error {
+	pagesSinceCheckpoint := 0
+
+	// Resume from the last checkpointed page so a crashed backfill
+	// doesn't replay completed work on restart. Combined with the
+	// partial unique indexes from migration 007 this makes backfill
+	// fully idempotent — both correct AND efficient.
+	resumeFrom := c.loadBackfillCursor(ctx)
+	if resumeFrom != "" {
+		slog.Info("Resuming labeler backfill from checkpoint",
+			"did", c.config.LabelerDID)
+	}
+
+	err := bf.Fetch(ctx, []string{c.config.LabelerDID}, resumeFrom, func(ctx context.Context, labels []protoLabel, nextCursor string) error {
 		rejected := c.upsertLabels(ctx, labels)
 		total += len(labels)
 		totalRejected += rejected
@@ -339,6 +420,17 @@ func (c *Consumer) runBackfill(ctx context.Context) error {
 				"rejected", totalRejected)
 			lastLogged = total
 		}
+
+		// Checkpoint the queryLabels pagination cursor every N pages
+		// so an interrupted run can resume without re-fetching the
+		// completed prefix. We deliberately don't checkpoint every
+		// page — excess DB writes — but we also don't wait for the
+		// whole run, which could be hours on a large labeler.
+		pagesSinceCheckpoint++
+		if nextCursor != "" && pagesSinceCheckpoint >= BackfillCheckpointInterval {
+			c.saveBackfillCursor(ctx, nextCursor)
+			pagesSinceCheckpoint = 0
+		}
 		return nil
 	})
 	if err != nil {
@@ -349,14 +441,15 @@ func (c *Consumer) runBackfill(ctx context.Context) error {
 		"received", total,
 		"rejected", totalRejected)
 
-	// Persist a cursor so subsequent restarts skip the backfill. The
-	// subscription seq and the backfill are disjoint number spaces, so we
-	// only save a sentinel if backfill got any labels; otherwise leave the
-	// cursor unset so the next start retries.
+	// Backfill done — drop the checkpoint key and persist the
+	// subscription sentinel so the next start goes straight to the
+	// live stream.
+	c.clearBackfillCursor(ctx)
 	if total > 0 && !c.config.DisableCursor {
-		// Use a sentinel (1) so loadCursor returns non-zero and we won't
-		// re-run backfill on restart. The subscription starts from "live"
-		// because the labeler's real seq numbers are much larger.
+		// Use a sentinel (1) so loadCursor returns non-zero and we
+		// won't re-run backfill on restart. The subscription starts
+		// from "live" because the labeler's real seq numbers are
+		// much larger.
 		if err := c.saveCursor(ctx, 1); err != nil {
 			slog.Warn("Failed to persist backfill sentinel",
 				"did", c.config.LabelerDID, "error", err)
@@ -406,18 +499,6 @@ func (c *Consumer) handleLabelMessage(ctx context.Context, msg *LabelMessage) {
 	c.cursorMu.Unlock()
 }
 
-// Length caps bound individual label fields so a malicious or misbehaving
-// labeler cannot bloat our DB with multi-megabyte strings. These values
-// are intentionally generous compared to typical ATProto data (DIDs are
-// ~32 bytes, AT-URIs typically under 100 bytes, CIDs ~60 bytes) while
-// still rejecting pathological inputs before they hit the DB.
-const (
-	MaxLabelValLen = 128
-	MaxLabelSrcLen = 512
-	MaxLabelURILen = 512
-	MaxLabelCIDLen = 256
-)
-
 // upsertLabels inserts every label in a batch, ensuring the label_definition
 // row exists first. Individual label failures are rolled up into a single
 // log line per batch (with the first failing label as a sample) so that
@@ -427,11 +508,11 @@ const (
 // Returns the count of labels that were rejected rather than successfully
 // persisted. A rejected count is not treated as an error here; callers log
 // the summary via the batch-level metrics.
-func (c *Consumer) upsertLabels(ctx context.Context, labels []ProtoLabel) (rejected int) {
+func (c *Consumer) upsertLabels(ctx context.Context, labels []protoLabel) (rejected int) {
 	var firstErr error
 	var firstErrURI, firstErrVal string
 
-	record := func(err error, l *ProtoLabel) {
+	record := func(err error, l *protoLabel) {
 		rejected++
 		if firstErr == nil {
 			firstErr = err
@@ -440,11 +521,18 @@ func (c *Consumer) upsertLabels(ctx context.Context, labels []ProtoLabel) (rejec
 		}
 	}
 
+	var accountLevelSkipped int
 	for i := range labels {
 		l := &labels[i]
 		if ctx.Err() != nil {
 			rejected++
 			continue
+		}
+		// Track the account-level case separately so operators can
+		// see at a glance whether a labeler is mostly sending
+		// unreachable labels (rather than just grepping debug logs).
+		if l != nil && l.URI != "" && !strings.HasPrefix(l.URI, "at://") {
+			accountLevelSkipped++
 		}
 		if !c.validateLabel(l) {
 			rejected++
@@ -485,6 +573,11 @@ func (c *Consumer) upsertLabels(ctx context.Context, labels []ProtoLabel) (rejec
 			"first_err_val", firstErrVal,
 			"first_err", firstErr)
 	}
+	if accountLevelSkipped > 0 {
+		c.statsAdd(func(s *Stats) {
+			s.AccountLevelSkipped += int64(accountLevelSkipped)
+		})
+	}
 	return rejected
 }
 
@@ -498,7 +591,7 @@ func (c *Consumer) upsertLabels(ctx context.Context, labels []ProtoLabel) (rejec
 //
 // Each stringy field also has a byte-length cap so a malicious labeler
 // can't bloat our DB with multi-megabyte values on any of src/uri/cid/val.
-func (c *Consumer) validateLabel(l *ProtoLabel) bool {
+func (c *Consumer) validateLabel(l *protoLabel) bool {
 	if l == nil || l.Src == "" || l.URI == "" || l.Val == "" {
 		return false
 	}
@@ -547,16 +640,17 @@ func parseLabelTime(s string) *time.Time {
 }
 
 // ensureDefinition upserts a label_definition row so the foreign key on
-// label.val is always satisfied. Results are memoised per-process, bounded
-// by MaxKnownVals to prevent unbounded memory growth from a malicious or
-// buggy labeler emitting many distinct vals.
+// label.val is always satisfied. Results are memoised per-process via a
+// FIFO cache bounded at MaxKnownVals: when full, the oldest entry is
+// evicted. This keeps the fast path active even when a labeler emits
+// more than MaxKnownVals distinct values, rather than the old
+// "overflow = permanent slow path" behaviour.
 func (c *Consumer) ensureDefinition(ctx context.Context, val string) error {
 	c.knownValsMu.Lock()
 	if _, ok := c.knownVals[val]; ok {
 		c.knownValsMu.Unlock()
 		return nil
 	}
-	atCap := len(c.knownVals) >= MaxKnownVals
 	c.knownValsMu.Unlock()
 
 	exists, err := c.labelDef.Exists(ctx, val)
@@ -572,15 +666,18 @@ func (c *Consumer) ensureDefinition(ctx context.Context, val string) error {
 		}
 	}
 
-	if !atCap {
-		c.knownValsMu.Lock()
-		// Re-check under lock in case we crossed the cap between the first
-		// read and here.
-		if len(c.knownVals) < MaxKnownVals {
-			c.knownVals[val] = struct{}{}
-		}
-		c.knownValsMu.Unlock()
+	c.knownValsMu.Lock()
+	defer c.knownValsMu.Unlock()
+	if _, ok := c.knownVals[val]; ok {
+		return nil
 	}
+	if len(c.knownVals) >= MaxKnownVals && len(c.knownValsOrder) > 0 {
+		oldest := c.knownValsOrder[0]
+		c.knownValsOrder = c.knownValsOrder[1:]
+		delete(c.knownVals, oldest)
+	}
+	c.knownVals[val] = struct{}{}
+	c.knownValsOrder = append(c.knownValsOrder, val)
 	return nil
 }
 
@@ -653,5 +750,12 @@ func (c *Consumer) loadCursor(ctx context.Context) (int64, error) {
 
 func (c *Consumer) saveCursor(ctx context.Context, cursor int64) error {
 	return c.cfgRepo.Set(ctx, c.cursorKey(), strconv.FormatInt(cursor, 10))
+}
+
+// clearCursor deletes the cursor row for this labeler so the next
+// Start detects "no cursor" and re-runs backfill. Used by the
+// OutdatedCursor recovery path and by the admin reset mutation.
+func (c *Consumer) clearCursor(ctx context.Context) error {
+	return c.cfgRepo.Delete(ctx, c.cursorKey())
 }
 
