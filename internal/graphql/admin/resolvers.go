@@ -682,7 +682,9 @@ func (r *Resolver) RecentActivity(ctx context.Context, hours int) ([]map[string]
 	return result, nil
 }
 
-// LabelDefinitions returns all label definitions.
+// LabelDefinitions returns all label definitions. Each entry now
+// includes the owning labeler's `src` DID (the pre-seeded Bluesky
+// defaults live under repositories.SystemLabelerSrc).
 func (r *Resolver) LabelDefinitions(ctx context.Context) ([]map[string]interface{}, error) {
 	defs, err := r.repos.LabelDefinitions.GetAll(ctx)
 	if err != nil {
@@ -692,6 +694,7 @@ func (r *Resolver) LabelDefinitions(ctx context.Context) ([]map[string]interface
 	result := make([]map[string]interface{}, 0, len(defs))
 	for _, def := range defs {
 		result = append(result, map[string]interface{}{
+			"src":               def.Src,
 			"val":               def.Val,
 			"description":       def.Description,
 			"severity":          string(def.Severity),
@@ -703,35 +706,40 @@ func (r *Resolver) LabelDefinitions(ctx context.Context) ([]map[string]interface
 	return result, nil
 }
 
-// ViewerLabelPreferences returns the current user's label preferences.
+// ViewerLabelPreferences returns the current user's label
+// preferences, joined against the non-system label definitions. A
+// user can override visibility independently per (labeler, val) tuple.
 func (r *Resolver) ViewerLabelPreferences(ctx context.Context, userDID string) ([]map[string]interface{}, error) {
-	// Get all label definitions
+	// Get all non-system label definitions (both per-labeler and
+	// legacy rows that don't belong to an external labeler).
 	defs, err := r.repos.LabelDefinitions.GetNonSystem(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get label definitions: %w", err)
 	}
 
-	// Get user preferences
+	// Get user preferences across every labeler.
 	prefs, err := r.repos.LabelPreferences.GetByDID(ctx, userDID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user preferences: %w", err)
 	}
 
-	// Build preference map for quick lookup
-	prefMap := make(map[string]repositories.LabelVisibility)
+	// Build preference map keyed by (src, val) for quick lookup.
+	type prefKey struct{ src, val string }
+	prefMap := make(map[prefKey]repositories.LabelVisibility)
 	for _, pref := range prefs {
-		prefMap[pref.LabelVal] = pref.Visibility
+		prefMap[prefKey{pref.Src, pref.LabelVal}] = pref.Visibility
 	}
 
 	// Build result with effective visibility
 	result := make([]map[string]interface{}, 0, len(defs))
 	for _, def := range defs {
 		visibility := def.DefaultVisibility
-		if userVis, ok := prefMap[def.Val]; ok {
+		if userVis, ok := prefMap[prefKey{def.Src, def.Val}]; ok {
 			visibility = userVis
 		}
 
 		result = append(result, map[string]interface{}{
+			"src":               def.Src,
 			"val":               def.Val,
 			"description":       def.Description,
 			"severity":          string(def.Severity),
@@ -982,20 +990,36 @@ func (r *Resolver) PopulateActivity(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
-// CreateLabel creates a new label on a record or account.
+// CreateLabel creates a new label on a record or account. The admin
+// creates labels under this server's domain DID, so we check the
+// label definition under that same src — a label value defined
+// elsewhere by a remote labeler doesn't authorise this server to
+// emit it.
 func (r *Resolver) CreateLabel(ctx context.Context, uri, val string, cid, exp *string) (map[string]interface{}, error) {
 	// Validate URI format
 	if !repositories.IsValidSubjectURI(uri) {
 		return nil, fmt.Errorf("invalid subject URI: must start with 'at://' or 'did:'")
 	}
 
-	// Validate label value exists
-	exists, err := r.repos.LabelDefinitions.Exists(ctx, val)
+	// Validate label value is defined for this server's labeler src.
+	// Pre-seeded Bluesky values live under SystemLabelerSrc, so we
+	// also accept those as a fallback for the built-in takedown
+	// vocabulary.
+	exists, err := r.repos.LabelDefinitions.Exists(ctx, r.domainDID, val)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check label definition: %w", err)
 	}
 	if !exists {
-		return nil, fmt.Errorf("label value '%s' not defined", val)
+		// Fallback: accept pre-seeded system labels like !takedown
+		// without requiring the admin to pre-create them under the
+		// domain DID.
+		systemExists, err := r.repos.LabelDefinitions.Exists(ctx, repositories.SystemLabelerSrc, val)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check label definition: %w", err)
+		}
+		if !systemExists {
+			return nil, fmt.Errorf("label value '%s' not defined for this labeler", val)
+		}
 	}
 
 	// Parse expiration if provided
@@ -1053,8 +1077,15 @@ func (r *Resolver) NegateLabel(ctx context.Context, uri, val string) (map[string
 	}, nil
 }
 
-// CreateLabelDefinition creates a new label definition.
-func (r *Resolver) CreateLabelDefinition(ctx context.Context, val, description, severity string, defaultVisibility *string) (map[string]interface{}, error) {
+// CreateLabelDefinition creates a new label definition under this
+// server's labeler (r.domainDID). Admins can still seed globally-
+// scoped system labels by passing src = SystemLabelerSrc explicitly
+// via the admin GraphQL mutation — see admin/schema.go.
+func (r *Resolver) CreateLabelDefinition(ctx context.Context, src, val, description, severity string, defaultVisibility *string) (map[string]interface{}, error) {
+	if src == "" {
+		src = r.domainDID
+	}
+
 	// Validate severity
 	sev, err := repositories.ValidateSeverity(severity)
 	if err != nil {
@@ -1070,25 +1101,26 @@ func (r *Resolver) CreateLabelDefinition(ctx context.Context, val, description, 
 		}
 	}
 
-	// Check if already exists
-	exists, err := r.repos.LabelDefinitions.Exists(ctx, val)
+	// Check if already exists for this labeler
+	exists, err := r.repos.LabelDefinitions.Exists(ctx, src, val)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check label definition: %w", err)
 	}
 	if exists {
-		return nil, fmt.Errorf("label '%s' already exists", val)
+		return nil, fmt.Errorf("label '%s' already exists for labeler %s", val, src)
 	}
 
-	if err := r.repos.LabelDefinitions.Insert(ctx, val, description, sev, vis); err != nil {
+	if err := r.repos.LabelDefinitions.Insert(ctx, src, val, description, sev, vis); err != nil {
 		return nil, fmt.Errorf("failed to create label definition: %w", err)
 	}
 
-	def, err := r.repos.LabelDefinitions.Get(ctx, val)
+	def, err := r.repos.LabelDefinitions.Get(ctx, src, val)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve created definition: %w", err)
 	}
 
 	return map[string]interface{}{
+		"src":               def.Src,
 		"val":               def.Val,
 		"description":       def.Description,
 		"severity":          string(def.Severity),

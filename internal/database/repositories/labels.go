@@ -435,45 +435,77 @@ func (r *LabelsRepository) GetPaginated(ctx context.Context, uriFilter, valFilte
 	}, nil
 }
 
-// HasTakedown checks if a URI has an active takedown label.
-func (r *LabelsRepository) HasTakedown(ctx context.Context, uri string) (bool, error) {
+// HasTakedown checks if a URI has an active !takedown label from any
+// trusted labeler. When allowedSrcs is non-empty, only takedowns from
+// those labelers count; an empty list means "any labeler". In a
+// multi-labeler deployment this lets operators scope which labelers
+// can initiate a takedown across the whole index.
+func (r *LabelsRepository) HasTakedown(ctx context.Context, uri string, allowedSrcs []string) (bool, error) {
 	negFalse, negTrue := r.negLiterals()
+
+	params := []database.Value{database.Text(uri)}
+	paramIdx := 2
+	srcClause := ""
+	if len(allowedSrcs) > 0 {
+		srcPhs := make([]string, len(allowedSrcs))
+		for i, s := range allowedSrcs {
+			srcPhs[i] = r.db.Placeholder(paramIdx)
+			paramIdx++
+			params = append(params, database.Text(s))
+		}
+		srcClause = " AND src IN (" + strings.Join(srcPhs, ", ") + ")"
+	}
+
 	sqlStr := fmt.Sprintf(`SELECT COUNT(*) FROM label
-		WHERE uri = %s AND val = '!takedown' AND neg = %s
+		WHERE uri = %s AND val = '!takedown' AND neg = %s%s
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg
 			WHERE neg.uri = label.uri AND neg.src = label.src AND neg.val = '!takedown'
 			  AND neg.neg = %s AND neg.cts >= label.cts
-		)`, r.db.Placeholder(1), negFalse, negTrue)
+		)`, r.db.Placeholder(1), negFalse, srcClause, negTrue)
 
 	var count int64
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(uri)}, &count)
+	err := r.db.QueryRow(ctx, sqlStr, params, &count)
 	if err != nil {
 		return false, err
 	}
 	return count > 0, nil
 }
 
-// GetTakedownURIs returns URIs that have active takedown labels from a list.
-func (r *LabelsRepository) GetTakedownURIs(ctx context.Context, uris []string) ([]string, error) {
+// GetTakedownURIs returns the subset of the given URIs that have an
+// active !takedown label from any trusted labeler. When allowedSrcs is
+// non-empty, only takedowns from those labelers are considered.
+func (r *LabelsRepository) GetTakedownURIs(ctx context.Context, uris, allowedSrcs []string) ([]string, error) {
 	if len(uris) == 0 {
 		return nil, nil
 	}
 
-	placeholders := r.db.Placeholders(len(uris), 1)
 	negFalse, negTrue := r.negLiterals()
+
+	uriPhs := make([]string, len(uris))
+	params := make([]any, 0, len(uris)+len(allowedSrcs))
+	for i, u := range uris {
+		uriPhs[i] = r.db.Placeholder(i + 1)
+		params = append(params, u)
+	}
+
+	srcClause := ""
+	if len(allowedSrcs) > 0 {
+		srcPhs := make([]string, len(allowedSrcs))
+		for i, s := range allowedSrcs {
+			srcPhs[i] = r.db.Placeholder(len(uris) + i + 1)
+			params = append(params, s)
+		}
+		srcClause = " AND l.src IN (" + strings.Join(srcPhs, ", ") + ")"
+	}
+
 	sqlStr := fmt.Sprintf(`SELECT DISTINCT l.uri FROM label l
-		WHERE l.uri IN (%s) AND l.val = '!takedown' AND l.neg = %s
+		WHERE l.uri IN (%s) AND l.val = '!takedown' AND l.neg = %s%s
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg
 			WHERE neg.uri = l.uri AND neg.src = l.src AND neg.val = '!takedown'
 			  AND neg.neg = %s AND neg.cts >= l.cts
-		)`, placeholders, negFalse, negTrue)
-
-	params := make([]any, len(uris))
-	for i, uri := range uris {
-		params[i] = uri
-	}
+		)`, strings.Join(uriPhs, ", "), negFalse, srcClause, negTrue)
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, params...)
 	if err != nil {

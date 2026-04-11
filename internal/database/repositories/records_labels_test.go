@@ -16,15 +16,17 @@ func seedLabeledRecords(t *testing.T) *testutil.TestDB {
 	db := testutil.SetupTestDB(t)
 	ctx := context.Background()
 
-	// Ensure the two domain labels exist in the definition table.
-	// (The default seed only has Bluesky labels.)
+	// Ensure the two domain labels exist in the definition table
+	// under the labeler that asserts them below. Post-issue-#2 the
+	// label_definition PK is composite, so we scope these to the
+	// specific labeler DID rather than the global system sentinel.
 	if err := db.LabelDefinitions.Insert(
-		ctx, "high-quality", "", repositories.SeverityInform, repositories.VisibilityShow,
+		ctx, "did:plc:labelerz", "high-quality", "", repositories.SeverityInform, repositories.VisibilityShow,
 	); err != nil {
 		t.Fatalf("insert label definition high-quality: %v", err)
 	}
 	if err := db.LabelDefinitions.Insert(
-		ctx, "draft", "", repositories.SeverityInform, repositories.VisibilityWarn,
+		ctx, "did:plc:labelerz", "draft", "", repositories.SeverityInform, repositories.VisibilityWarn,
 	); err != nil {
 		t.Fatalf("insert label definition draft: %v", err)
 	}
@@ -162,7 +164,17 @@ func TestRecordsRepository_LabelFilter_NeutralAcrossLabelers(t *testing.T) {
 	// Add a second labeler asserting high-quality on rec3. Without
 	// LabelerSrcs the filter should match labels from BOTH labelers,
 	// so the query returns rec1 (labelerz) and rec3 (labelerz2).
+	//
+	// The label definition for high-quality needs to exist under
+	// labelerz2's src — in production the consumer's ensureDefinition
+	// handles this, but in a direct-insert test we seed it manually.
 	ctx2 := context.Background()
+	if err := db.LabelDefinitions.Insert(
+		ctx2, "did:plc:labelerz2", "high-quality", "",
+		repositories.SeverityInform, repositories.VisibilityShow,
+	); err != nil {
+		t.Fatalf("insert labelerz2 definition: %v", err)
+	}
 	if _, err := db.Labels.Insert(
 		ctx2, "did:plc:labelerz2",
 		"at://did:plc:alice/social.cert.hypercert/rec3",

@@ -357,11 +357,16 @@ var OAuthClientType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
-// LabelDefinitionType represents a label type definition.
+// LabelDefinitionType represents a label type definition. Post-issue-#2,
+// definitions are scoped to a specific labeler via `src`.
 var LabelDefinitionType = graphql.NewObject(graphql.ObjectConfig{
 	Name:        "LabelDefinition",
-	Description: "A label type definition",
+	Description: "A label type definition owned by a specific labeler",
 	Fields: graphql.Fields{
+		"src": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "DID of the labeler that owns this definition (did:web:system for pre-seeded defaults)",
+		},
 		"val": &graphql.Field{
 			Type:        graphql.NewNonNull(graphql.String),
 			Description: "Label value (e.g., 'porn', '!takedown')",
@@ -385,11 +390,16 @@ var LabelDefinitionType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
-// LabelPreferenceType represents a user's preference for a label.
+// LabelPreferenceType represents a user's preference for a specific
+// (labeler, label value) combination.
 var LabelPreferenceType = graphql.NewObject(graphql.ObjectConfig{
 	Name:        "LabelPreference",
-	Description: "A user's preference for a specific label type",
+	Description: "A user's preference for a specific (labeler, label value) combination",
 	Fields: graphql.Fields{
+		"src": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "DID of the labeler this preference applies to",
+		},
 		"val": &graphql.Field{
 			Type:        graphql.NewNonNull(graphql.String),
 			Description: "Label value",

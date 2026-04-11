@@ -416,8 +416,12 @@ func (b *SchemaBuilder) buildMutationType() *graphql.Object {
 			},
 			"createLabelDefinition": &graphql.Field{
 				Type:        graphql.NewNonNull(LabelDefinitionType),
-				Description: "Create a new label definition (admin only)",
+				Description: "Create a new label definition (admin only). Definitions are scoped per-labeler via src.",
 				Args: graphql.FieldConfigArgument{
+					"src": &graphql.ArgumentConfig{
+						Type:        graphql.String,
+						Description: "Labeler DID that owns this definition (defaults to this server's domain DID)",
+					},
 					"val": &graphql.ArgumentConfig{
 						Type:        graphql.NewNonNull(graphql.String),
 						Description: "Label value",
@@ -439,6 +443,7 @@ func (b *SchemaBuilder) buildMutationType() *graphql.Object {
 					if err := requireAdmin(p.Context); err != nil {
 						return nil, err
 					}
+					src, _ := p.Args["src"].(string)
 					val, _ := p.Args["val"].(string)
 					description, _ := p.Args["description"].(string)
 					severity, _ := p.Args["severity"].(string)
@@ -449,7 +454,7 @@ func (b *SchemaBuilder) buildMutationType() *graphql.Object {
 						visPtr = &defaultVisibility
 					}
 
-					return b.resolver.CreateLabelDefinition(p.Context, val, description, severity, visPtr)
+					return b.resolver.CreateLabelDefinition(p.Context, src, val, description, severity, visPtr)
 				},
 			},
 			"resolveReport": &graphql.Field{

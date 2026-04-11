@@ -319,7 +319,7 @@ func TestLabelsRepository_HasTakedown(t *testing.T) {
 			t.Fatalf("Insert() error = %v", err)
 		}
 
-		has, err := repo.HasTakedown(ctx, uri)
+		has, err := repo.HasTakedown(ctx, uri, nil)
 		if err != nil {
 			t.Fatalf("HasTakedown() error = %v", err)
 		}
@@ -334,7 +334,7 @@ func TestLabelsRepository_HasTakedown(t *testing.T) {
 			t.Fatalf("InsertNegation() error = %v", err)
 		}
 
-		has, err := repo.HasTakedown(ctx, uri)
+		has, err := repo.HasTakedown(ctx, uri, nil)
 		if err != nil {
 			t.Fatalf("HasTakedown() error = %v", err)
 		}
@@ -349,7 +349,7 @@ func TestLabelsRepository_GetTakedownURIs(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("empty returns nil", func(t *testing.T) {
-		uris, err := repo.GetTakedownURIs(ctx, []string{})
+		uris, err := repo.GetTakedownURIs(ctx, []string{}, nil)
 		if err != nil {
 			t.Fatalf("GetTakedownURIs() error = %v", err)
 		}
@@ -373,7 +373,7 @@ func TestLabelsRepository_GetTakedownURIs(t *testing.T) {
 			t.Fatalf("Insert() error = %v", err)
 		}
 
-		uris, err := repo.GetTakedownURIs(ctx, []string{uri1, uri2, uri3})
+		uris, err := repo.GetTakedownURIs(ctx, []string{uri1, uri2, uri3}, nil)
 		if err != nil {
 			t.Fatalf("GetTakedownURIs() error = %v", err)
 		}

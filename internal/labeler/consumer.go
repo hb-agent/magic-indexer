@@ -538,7 +538,7 @@ func (c *Consumer) upsertLabels(ctx context.Context, labels []protoLabel) (rejec
 			rejected++
 			continue
 		}
-		if err := c.ensureDefinition(ctx, l.Val); err != nil {
+		if err := c.ensureDefinition(ctx, l.Src, l.Val); err != nil {
 			record(err, l)
 			continue
 		}
@@ -639,28 +639,35 @@ func parseLabelTime(s string) *time.Time {
 	return nil
 }
 
-// ensureDefinition upserts a label_definition row so the foreign key on
-// label.val is always satisfied. Results are memoised per-process via a
-// FIFO cache bounded at MaxKnownVals: when full, the oldest entry is
-// evicted. This keeps the fast path active even when a labeler emits
-// more than MaxKnownVals distinct values, rather than the old
-// "overflow = permanent slow path" behaviour.
-func (c *Consumer) ensureDefinition(ctx context.Context, val string) error {
+// ensureDefinition upserts a label_definition row for a specific
+// (labeler src, val) pair. Post-issue-#2 the label_definition PK is
+// composite, so we no longer silently discard a second labeler's
+// semantics when two labelers happen to emit the same val — each
+// gets its own row keyed by (src, val).
+//
+// Results are memoised per-process via a FIFO cache bounded at
+// MaxKnownVals: when full, the oldest entry is evicted. This keeps
+// the fast path active even when a labeler emits more than
+// MaxKnownVals distinct values, rather than the old "overflow =
+// permanent slow path" behaviour.
+func (c *Consumer) ensureDefinition(ctx context.Context, src, val string) error {
+	cacheKey := src + "\x00" + val
+
 	c.knownValsMu.Lock()
-	if _, ok := c.knownVals[val]; ok {
+	if _, ok := c.knownVals[cacheKey]; ok {
 		c.knownValsMu.Unlock()
 		return nil
 	}
 	c.knownValsMu.Unlock()
 
-	exists, err := c.labelDef.Exists(ctx, val)
+	exists, err := c.labelDef.Exists(ctx, src, val)
 	if err != nil {
 		return err
 	}
 	if !exists {
-		if err := c.labelDef.Insert(ctx, val, "", repositories.SeverityInform, repositories.VisibilityWarn); err != nil {
+		if err := c.labelDef.Insert(ctx, src, val, "", repositories.SeverityInform, repositories.VisibilityWarn); err != nil {
 			// Another racing insert could have created it; tolerate that.
-			if existsAfter, checkErr := c.labelDef.Exists(ctx, val); checkErr != nil || !existsAfter {
+			if existsAfter, checkErr := c.labelDef.Exists(ctx, src, val); checkErr != nil || !existsAfter {
 				return err
 			}
 		}
@@ -668,7 +675,7 @@ func (c *Consumer) ensureDefinition(ctx context.Context, val string) error {
 
 	c.knownValsMu.Lock()
 	defer c.knownValsMu.Unlock()
-	if _, ok := c.knownVals[val]; ok {
+	if _, ok := c.knownVals[cacheKey]; ok {
 		return nil
 	}
 	if len(c.knownVals) >= MaxKnownVals && len(c.knownValsOrder) > 0 {
@@ -676,8 +683,8 @@ func (c *Consumer) ensureDefinition(ctx context.Context, val string) error {
 		c.knownValsOrder = c.knownValsOrder[1:]
 		delete(c.knownVals, oldest)
 	}
-	c.knownVals[val] = struct{}{}
-	c.knownValsOrder = append(c.knownValsOrder, val)
+	c.knownVals[cacheKey] = struct{}{}
+	c.knownValsOrder = append(c.knownValsOrder, cacheKey)
 	return nil
 }
 
