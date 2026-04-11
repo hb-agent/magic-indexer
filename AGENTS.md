@@ -222,6 +222,57 @@ keep the tighter default.
 See [SECURITY.md](SECURITY.md) for the full operator contract
 (rate limiting, required env vars, admin auth shape).
 
+## Deployment
+
+The dev deployment lives at **https://magic-indexer-dev.up.railway.app**,
+running on Railway with a Postgres backing store. The full deploy
+playbook — first-time provisioning, routine deploys, env vars,
+secrets management, common gotchas — is in
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md). Read that **before** touching
+the live environment.
+
+Key facts an AI session should know up front:
+- The Railway service is named `magic-indexer` in the `dev`
+  environment of project `magic-index` (project ID
+  `7d6c4e52-de61-439f-96c0-3ded4114b9be`).
+- The active branch is `per-labeler-definitions`. Routine deploys
+  are `railway up --service magic-indexer --detach` from a clean
+  checkout of that branch.
+- Secrets (`SECRET_KEY_BASE`, `ADMIN_API_KEY`, Railway API token)
+  live in the operator's password manager and the Railway
+  dashboard. **Never commit them.** `config.Validate()` rejects the
+  dev placeholder string at startup.
+- Railway bans `VOLUME` in Dockerfiles. Don't reintroduce it.
+- The Railway CLI uses `RAILWAY_API_TOKEN` (not `RAILWAY_TOKEN`)
+  for account-scoped tokens.
+
+## Operations
+
+Day-to-day operational tasks — uploading lexicons (always from
+the npm package `@hypercerts-org/lexicon`, never from the
+upstream main branch), enabling/disabling labelers, pausing a
+single labeler without redeploying, inspecting why a record is
+hidden, rotating secrets, common labeler failure modes — are
+all in [`docs/RUNBOOK.md`](docs/RUNBOOK.md). It is the canonical
+"how do I do X in production" reference.
+
+## Review history
+
+This branch went through **23 rounds of overnight review**
+producing 59 fixes and 3 regression tests before the first
+deploy. The per-round logs and final reports are in
+[`docs/reviews/`](docs/reviews/). Read the index there if you
+want to know what's already been audited (so you don't waste a
+session re-finding the same things) or which items were
+deferred with explicit reasoning.
+
+Two open issues are deliberate deferrals:
+- [#10 — Labeler signature verification](https://github.com/hb-agent/magic-indexer/issues/10) (waiting for upstream spec stability)
+- [#13 — GDPR hard-delete endpoint](https://github.com/hb-agent/magic-indexer/issues/13) (waiting for product/legal trigger)
+
+Don't re-discover them. If a real trigger appears, follow the
+re-open criteria documented in each issue.
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below.

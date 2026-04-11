@@ -29,10 +29,25 @@ go run ./cmd/hypergoat
 Open http://localhost:8080/graphiql/admin to access the admin interface.
 
 `make setup` calls `scripts/setup-env.sh`, which refuses to overwrite
-an existing `.env` and fails fast if `openssl` isn't installed. For a
-production deployment, see [SECURITY.md](SECURITY.md) — it spells out
-the required environment variables, the rate-limiting expectations
-at the reverse proxy, and the HTTPS / HSTS / admin-auth contract.
+an existing `.env` and fails fast if `openssl` isn't installed.
+
+## Live deployment
+
+A dev instance runs at **https://magic-indexer-dev.up.railway.app**
+on Railway, backed by managed Postgres. Endpoints:
+
+- GraphQL public — https://magic-indexer-dev.up.railway.app/graphql
+- GraphiQL playground — https://magic-indexer-dev.up.railway.app/graphiql
+- Admin GraphQL — https://magic-indexer-dev.up.railway.app/admin/graphql (requires `ADMIN_API_KEY` + `X-User-DID`)
+- Health — https://magic-indexer-dev.up.railway.app/health
+- Stats — https://magic-indexer-dev.up.railway.app/stats
+- Prometheus metrics — https://magic-indexer-dev.up.railway.app/metrics
+
+For the full operations playbook — first-time deploy, routine
+deploys, lexicon upload, labeler enable / disable, secrets
+rotation, incident response — see [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+For the operator security contract (required env vars, reverse-proxy
+rate limits, HTTPS / HSTS / admin auth shape) see [SECURITY.md](SECURITY.md).
 
 ## Usage
 
