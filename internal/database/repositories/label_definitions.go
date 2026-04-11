@@ -125,12 +125,29 @@ func (r *LabelDefinitionsRepository) Get(ctx context.Context, src, val string) (
 	return &def, nil
 }
 
-// Insert creates a new label definition for the given labeler. Fails
-// on conflict — use Upsert if you want idempotent behaviour.
+// Insert creates a new label definition for the given labeler.
+//
+// Idempotent on (src, val) via ON CONFLICT DO NOTHING. This closes a
+// race on the labeler ingest path: two consumer goroutines can both
+// observe Exists=false before either commits, then both try to Insert,
+// and the loser previously saw a duplicate-key error. With ON CONFLICT
+// DO NOTHING the loser returns nil and the existing row is kept.
+// Callers that specifically want to know whether a new row was created
+// vs a pre-existing row won in the race can call Exists() afterwards.
 func (r *LabelDefinitionsRepository) Insert(ctx context.Context, src, val, description string, severity LabelSeverity, defaultVisibility LabelVisibility) error {
-	sqlStr := fmt.Sprintf(`INSERT INTO label_definition (src, val, description, severity, default_visibility)
-		VALUES (%s, %s, %s, %s, %s)`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), r.db.Placeholder(5))
+	var sqlStr string
+	switch r.db.Dialect() {
+	case database.PostgreSQL:
+		sqlStr = fmt.Sprintf(`INSERT INTO label_definition (src, val, description, severity, default_visibility)
+			VALUES (%s, %s, %s, %s, %s)
+			ON CONFLICT (src, val) DO NOTHING`,
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), r.db.Placeholder(5))
+	default:
+		sqlStr = fmt.Sprintf(`INSERT INTO label_definition (src, val, description, severity, default_visibility)
+			VALUES (%s, %s, %s, %s, %s)
+			ON CONFLICT DO NOTHING`,
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), r.db.Placeholder(5))
+	}
 
 	params := []database.Value{
 		database.Text(src),

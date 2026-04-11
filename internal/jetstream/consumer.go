@@ -426,17 +426,24 @@ func (c *Consumer) cursorFlusher(ctx context.Context) {
 	ticker := time.NewTicker(c.config.CursorFlushInterval)
 	defer ticker.Stop()
 
+	// finalFlush uses a bounded context so shutdown can't hang
+	// indefinitely on a slow DB. 5s is enough for a tiny single-row
+	// write even under moderate pressure.
+	finalFlush := func() {
+		fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		c.flushCursor(fctx)
+	}
+
 	var lastFlushed int64
 
 	for {
 		select {
 		case <-ctx.Done():
-			// Final flush
-			c.flushCursor(context.Background())
+			finalFlush()
 			return
 		case <-c.cursorDone:
-			// Final flush
-			c.flushCursor(context.Background())
+			finalFlush()
 			return
 		case <-ticker.C:
 			c.cursorMu.Lock()

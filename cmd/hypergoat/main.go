@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -72,8 +73,16 @@ type backgroundServices struct {
 	workersCancel      context.CancelFunc
 	jsConsumer         *jetstream.Consumer
 	jsCancel           context.CancelFunc
-	labelerConsumers   []*labeler.Consumer
-	labelerCancel      context.CancelFunc
+
+	// labelerMu guards the slice and the labeler cancel: startLabeler
+	// appends at startup, backgroundServices.Stop iterates at shutdown,
+	// and the /stats HTTP handler reads it at request time — all
+	// potentially concurrently.
+	labelerMu        sync.RWMutex
+	labelerConsumers []*labeler.Consumer
+	labelerCancel    context.CancelFunc
+
+	backfillCancel context.CancelFunc
 }
 
 // Stop cleanly shuts down all background services.
@@ -90,12 +99,36 @@ func (bg *backgroundServices) Stop() {
 	if bg.jsCancel != nil {
 		bg.jsCancel()
 	}
-	for _, c := range bg.labelerConsumers {
+	// Snapshot labelers under the lock, then release before calling
+	// Stop() on each — Stop blocks on the consumer's final flush and
+	// we don't want to hold the slice lock across that.
+	bg.labelerMu.Lock()
+	consumers := bg.labelerConsumers
+	bg.labelerConsumers = nil
+	cancel := bg.labelerCancel
+	bg.labelerCancel = nil
+	bg.labelerMu.Unlock()
+
+	for _, c := range consumers {
 		c.Stop()
 	}
-	if bg.labelerCancel != nil {
-		bg.labelerCancel()
+	if cancel != nil {
+		cancel()
 	}
+	if bg.backfillCancel != nil {
+		bg.backfillCancel()
+	}
+}
+
+// LabelerConsumers returns a snapshot of the currently-running labeler
+// consumers under the read lock. Used by the /stats handler which
+// needs a consistent view.
+func (bg *backgroundServices) LabelerConsumers() []*labeler.Consumer {
+	bg.labelerMu.RLock()
+	defer bg.labelerMu.RUnlock()
+	out := make([]*labeler.Consumer, len(bg.labelerConsumers))
+	copy(out, bg.labelerConsumers)
+	return out
 }
 
 func run() error {
@@ -152,7 +185,7 @@ func run() error {
 	startLabeler(cfg, svc, bg)
 
 	// Start backfill if configured
-	startBackfill(cfg, svc)
+	startBackfill(cfg, svc, bg)
 
 	// Run HTTP server with graceful shutdown
 	return serve(r, cfg, bg)
@@ -306,9 +339,27 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 			http.Error(w, "missing did query parameter", http.StatusBadRequest)
 			return
 		}
+		// Validate the DID format before using it as a config key —
+		// otherwise an attacker with the API key could inject
+		// arbitrary config-key shapes like `labeler_cursor:../..` and
+		// delete unrelated rows.
+		if !oauth.IsValidDID(did) {
+			http.Error(w, "invalid did format (expected did:plc: or did:web:)", http.StatusBadRequest)
+			return
+		}
 		reqCtx := req.Context()
-		_ = svc.config.Delete(reqCtx, "labeler_cursor:"+did)
-		_ = svc.config.Delete(reqCtx, "labeler_backfill_cursor:"+did)
+		if err := svc.config.Delete(reqCtx, "labeler_cursor:"+did); err != nil {
+			slog.Error("Labeler reset: failed to delete subscription cursor",
+				"did", did, "error", err)
+			http.Error(w, "failed to delete subscription cursor", http.StatusInternalServerError)
+			return
+		}
+		if err := svc.config.Delete(reqCtx, "labeler_backfill_cursor:"+did); err != nil {
+			slog.Error("Labeler reset: failed to delete backfill checkpoint",
+				"did", did, "error", err)
+			http.Error(w, "failed to delete backfill checkpoint", http.StatusInternalServerError)
+			return
+		}
 		slog.Info("Labeler cursor reset by admin request",
 			"did", did, "remote_addr", req.RemoteAddr)
 		w.Header().Set("Content-Type", "application/json")
@@ -342,17 +393,20 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 			lexiconCount = -1
 		}
 
-		labelers := make([]map[string]any, 0, len(bg.labelerConsumers))
-		for _, c := range bg.labelerConsumers {
+		consumers := bg.LabelerConsumers()
+		labelers := make([]map[string]any, 0, len(consumers))
+		for _, c := range consumers {
 			s := c.Stats()
 			labelers = append(labelers, map[string]any{
-				"did":                c.LabelerDID(),
-				"events_received":    s.EventsReceived,
-				"labels_received":    s.LabelsReceived,
-				"labels_persisted":   s.LabelsPersisted,
-				"labels_rejected":    s.LabelsRejected,
-				"reconnect_attempts": s.ReconnectAttempts,
-				"last_seq":           s.LastSeq,
+				"did":                   c.LabelerDID(),
+				"events_received":       s.EventsReceived,
+				"labels_received":       s.LabelsReceived,
+				"labels_persisted":      s.LabelsPersisted,
+				"labels_rejected":       s.LabelsRejected,
+				"account_level_skipped": s.AccountLevelSkipped,
+				"outdated_cursors":      s.OutdatedCursors,
+				"reconnect_attempts":    s.ReconnectAttempts,
+				"last_seq":              s.LastSeq,
 			})
 		}
 
@@ -761,11 +815,17 @@ func startJetstream(
 					pubsub,
 				)
 
+				// Use a tracked context derived from a fresh
+				// cancel func so graceful shutdown still stops
+				// this dynamically-created consumer.
+				dynCtx, dynCancel := context.WithCancel(context.Background())
+				bg.jsCancel = dynCancel
+
 				go func() {
 					slog.Info("Starting Jetstream consumer (dynamic)",
 						"collections", updatedCollections,
 					)
-					if err := bg.jsConsumer.Start(context.Background()); err != nil {
+					if err := bg.jsConsumer.Start(dynCtx); err != nil {
 						slog.Error("Jetstream consumer error", "error", err)
 					}
 				}()
@@ -838,8 +898,9 @@ func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	bg.labelerCancel = cancel
 
+	bg.labelerMu.Lock()
+	bg.labelerCancel = cancel
 	for _, did := range dids {
 		cc := labeler.ConsumerConfig{LabelerDID: did}
 		if cfg.LabelerCursorFlushInterval > 0 {
@@ -853,18 +914,27 @@ func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
 			didResolver,
 		)
 		bg.labelerConsumers = append(bg.labelerConsumers, consumer)
+	}
+	consumers := make([]*labeler.Consumer, len(bg.labelerConsumers))
+	copy(consumers, bg.labelerConsumers)
+	bg.labelerMu.Unlock()
 
-		go func(did string, c *labeler.Consumer) {
+	for _, c := range consumers {
+		go func(c *labeler.Consumer) {
+			did := c.LabelerDID()
 			slog.Info("Starting labeler subscription", "did", did)
 			if err := c.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("Labeler subscription error", "did", did, "error", err)
 			}
-		}(did, consumer)
+		}(c)
 	}
 }
 
-// startBackfill runs the initial backfill in the background if BACKFILL_ON_START is set.
-func startBackfill(cfg *config.Config, svc *services) {
+// startBackfill runs the initial backfill in the background if
+// BACKFILL_ON_START is set. The goroutine gets a tracked cancel so
+// graceful shutdown can interrupt an in-progress backfill instead of
+// hanging indefinitely on bg.Stop.
+func startBackfill(cfg *config.Config, svc *services, bg *backgroundServices) {
 	if !cfg.BackfillOnStart {
 		return
 	}
@@ -881,12 +951,15 @@ func startBackfill(cfg *config.Config, svc *services) {
 
 	backfiller := backfill.NewBackfiller(bfConfig, svc.records, svc.actors, svc.activity)
 
+	bfCtx, bfCancel := context.WithCancel(context.Background())
+	bg.backfillCancel = bfCancel
+
 	go func() {
 		slog.Info("Starting backfill operation",
 			"collections", bfConfig.Collections,
 			"relay", bfConfig.RelayURL,
 		)
-		stats, err := backfiller.Run(context.Background())
+		stats, err := backfiller.Run(bfCtx)
 		if err != nil {
 			slog.Error("Backfill failed", "error", err)
 		} else {
@@ -937,15 +1010,18 @@ func serve(r *chi.Mux, cfg *config.Config, bg *backgroundServices) error {
 
 	slog.Info("Shutting down server...")
 
-	// Stop background services
-	bg.Stop()
-
-	// Graceful shutdown with timeout
+	// Drain in-flight HTTP requests first so the server stops
+	// accepting new work. Background services are still up at this
+	// point, which lets already-running GraphQL queries finish against
+	// a valid DB and consumer state. Once HTTP is drained we stop the
+	// background services (which flushes cursors, etc.).
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return err
+	httpErr := srv.Shutdown(shutdownCtx)
+	bg.Stop()
+	if httpErr != nil {
+		return httpErr
 	}
 
 	slog.Info("Server stopped gracefully")

@@ -1086,6 +1086,23 @@ func (r *Resolver) CreateLabelDefinition(ctx context.Context, src, val, descript
 		src = r.domainDID
 	}
 
+	// Bound the stringy fields so the admin API can't blow up the DB
+	// with multi-megabyte values. The wire-side labeler ingest path
+	// already caps these via labeler.MaxLabelValLen et al; mirror
+	// those limits here.
+	if val == "" {
+		return nil, fmt.Errorf("val is required")
+	}
+	if len(val) > 128 {
+		return nil, fmt.Errorf("val must be at most 128 bytes")
+	}
+	if len(description) > 1024 {
+		return nil, fmt.Errorf("description must be at most 1024 bytes")
+	}
+	if len(src) > 512 {
+		return nil, fmt.Errorf("src must be at most 512 bytes")
+	}
+
 	// Validate severity
 	sev, err := repositories.ValidateSeverity(severity)
 	if err != nil {

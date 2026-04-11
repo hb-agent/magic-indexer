@@ -645,11 +645,16 @@ func parseLabelTime(s string) *time.Time {
 // semantics when two labelers happen to emit the same val — each
 // gets its own row keyed by (src, val).
 //
+// The underlying Insert uses ON CONFLICT DO NOTHING, so a concurrent
+// goroutine racing on the same (src, val) is safe and cheap — the
+// loser returns without error and the existing row is kept. No
+// pre-check via Exists is needed, which also closes a TOCTOU window
+// between the old Exists-then-Insert path.
+//
 // Results are memoised per-process via a FIFO cache bounded at
 // MaxKnownVals: when full, the oldest entry is evicted. This keeps
 // the fast path active even when a labeler emits more than
-// MaxKnownVals distinct values, rather than the old "overflow =
-// permanent slow path" behaviour.
+// MaxKnownVals distinct values.
 func (c *Consumer) ensureDefinition(ctx context.Context, src, val string) error {
 	cacheKey := src + "\x00" + val
 
@@ -660,17 +665,8 @@ func (c *Consumer) ensureDefinition(ctx context.Context, src, val string) error 
 	}
 	c.knownValsMu.Unlock()
 
-	exists, err := c.labelDef.Exists(ctx, src, val)
-	if err != nil {
+	if err := c.labelDef.Insert(ctx, src, val, "", repositories.SeverityInform, repositories.VisibilityWarn); err != nil {
 		return err
-	}
-	if !exists {
-		if err := c.labelDef.Insert(ctx, src, val, "", repositories.SeverityInform, repositories.VisibilityWarn); err != nil {
-			// Another racing insert could have created it; tolerate that.
-			if existsAfter, checkErr := c.labelDef.Exists(ctx, src, val); checkErr != nil || !existsAfter {
-				return err
-			}
-		}
 	}
 
 	c.knownValsMu.Lock()

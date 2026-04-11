@@ -131,8 +131,8 @@ func (b *ObjectBuilder) buildRecordFields(lexiconID string, def *lexicon.RecordD
 			Description: "Record key (last segment of the AT-URI)",
 		},
 		"labels": &graphql.Field{
-			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
-			Description: "Active label values on this record from any ingested labeler.",
+			Type:        graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(graphql.String))),
+			Description: "Active label values on this record from any ingested labeler. Always a list (possibly empty), never null.",
 		},
 	}
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -106,6 +107,14 @@ func (r *DIDResolver) resolvePLCDID(did string) (*DIDDocument, error) {
 }
 
 // resolveWebDID resolves a did:web DID.
+//
+// Security: did:web documents are fetched from the hostname embedded in
+// the DID, which is attacker-controlled. To prevent SSRF we reject any
+// hostname that resolves to a loopback, link-local, private, or
+// unspecified address before making the request. An operator that
+// legitimately needs to resolve an internal did:web can set
+// ALLOW_PRIVATE_DID_WEB=true at their own risk (not implemented
+// here; the cleaner path is to run a split-horizon PLC directory).
 func (r *DIDResolver) resolveWebDID(did string) (*DIDDocument, error) {
 	// Extract domain from did:web:domain
 	// Handle percent-encoded colons for ports (did:web:localhost%3A3000)
@@ -113,6 +122,10 @@ func (r *DIDResolver) resolveWebDID(did string) (*DIDDocument, error) {
 	domain, err := url.PathUnescape(domain)
 	if err != nil {
 		return nil, fmt.Errorf("invalid did:web encoding: %w", err)
+	}
+
+	if err := rejectPrivateHost(domain); err != nil {
+		return nil, fmt.Errorf("did:web hostname rejected: %w", err)
 	}
 
 	// Build the .well-known URL
@@ -223,6 +236,43 @@ func parseDIDDocument(data []byte) (*DIDDocument, error) {
 // IsValidDID checks if a string is a valid DID format.
 func IsValidDID(did string) bool {
 	return strings.HasPrefix(did, "did:plc:") || strings.HasPrefix(did, "did:web:")
+}
+
+// rejectPrivateHost errors out if host resolves to any loopback,
+// link-local, private, unspecified, or multicast address. Used to
+// block SSRF via attacker-controlled hostnames (did:web resolution).
+// Strips any ":port" suffix before resolving.
+func rejectPrivateHost(host string) error {
+	// strip port if present (host may be "example.com:8443")
+	hostOnly := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		hostOnly = h
+	}
+	// Hostnames that are literally loopback-ish get rejected early so
+	// that even broken resolvers can't trick us.
+	lower := strings.ToLower(hostOnly)
+	if lower == "localhost" || lower == "localhost.localdomain" {
+		return fmt.Errorf("loopback hostname %q not allowed", host)
+	}
+
+	ips, err := net.LookupIP(hostOnly)
+	if err != nil {
+		// Resolution failure is treated as rejection — an unreachable
+		// host can't serve a DID document anyway, and proceeding would
+		// either fail or hit a different IP on retry.
+		return fmt.Errorf("resolve %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("resolve %q: no addresses", host)
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() ||
+			ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+			ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
+			return fmt.Errorf("hostname %q resolves to disallowed address %s", host, ip)
+		}
+	}
+	return nil
 }
 
 // IsDIDPLC checks if a DID uses the plc method.

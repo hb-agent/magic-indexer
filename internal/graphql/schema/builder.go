@@ -149,8 +149,8 @@ var recordEventType = graphql.NewObject(graphql.ObjectConfig{
 			Description: "The record data (null for delete events)",
 		},
 		"labels": &graphql.Field{
-			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
-			Description: "Active label values on this record from any ingested labeler.",
+			Type:        graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(graphql.String))),
+			Description: "Active label values on this record from any ingested labeler. Always a list (possibly empty), never null.",
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 				src, ok := p.Source.(map[string]interface{})
 				if !ok {
@@ -328,8 +328,8 @@ var genericRecordType = graphql.NewObject(graphql.ObjectConfig{
 			Description: "The record data as JSON",
 		},
 		"labels": &graphql.Field{
-			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
-			Description: "Active label values on this record from the configured labeler.",
+			Type:        graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(graphql.String))),
+			Description: "Active label values on this record from any ingested labeler. Always a list (possibly empty), never null.",
 		},
 	},
 })
