@@ -1,54 +1,206 @@
-# AGENTS.md - Magic Indexer Development Guide
+# AGENTS.md — Magic Indexer (single-source onboarding)
 
-Magic Indexer is an AT Protocol AppView server that indexes
-Lexicon-defined records and exposes them via a dynamically-generated GraphQL API.
-The compiled binary is still called `hypergoat` inside the container and the Go
-module path is `github.com/GainForest/hypergoat` — historical names from when
-the project was originally called Hypergoat. Every `go run ./cmd/hypergoat` /
-`bin/hypergoat` reference below is pointing at that binary path, not a
-different product.
+> **If you are an AI assistant or a new contributor opening this
+> repo for the first time, this file is your complete onboarding.
+> Reading just this file should be enough to be useful. The other
+> docs (`docs/RUNBOOK.md`, `docs/reviews/`, `SECURITY.md`,
+> `README.md`) are deeper references; this file is the digest.**
 
-**Status:** Core functionality complete (Phases 1-7). All tests passing.
+If, after reading this file, you are unsure about anything that
+isn't covered here, that is a documentation bug — flag it to the
+operator and they will tighten this file rather than re-explain.
 
-Use `bd` for task tracking. Run `bd onboard` to get started.
+---
 
-## Build/Test Commands
+## What this is
+
+**Magic Indexer** is an AT Protocol AppView server that ingests
+records from Jetstream + labels from ATProto labelers and exposes
+both via a dynamically-generated GraphQL API.
+
+It is the `hb-agent/magic-indexer` fork of the
+`hypercerts-org/hyperindex` project. The compiled binary inside
+the container is named `hypergoat`, and the Go module path is
+`github.com/GainForest/hypergoat`. Both names are historical
+artefacts from when the project was originally called Hypergoat.
+Every command in this repo that mentions `hypergoat` or
+`./cmd/hypergoat` is referring to that binary path — not a
+different product. **Do not rename the module or the binary**;
+it would touch ~80 files for a brand-only change.
+
+The product name in user-facing documentation, configuration,
+deployments, and conversation is **Magic Indexer**.
+
+---
+
+## Live deployment (the dev environment)
+
+| Item                     | Value                                                                  |
+|--------------------------|------------------------------------------------------------------------|
+| Public URL               | `https://magic-indexer-dev.up.railway.app`                              |
+| Public GraphQL           | `https://magic-indexer-dev.up.railway.app/graphql`                      |
+| GraphQL subscriptions    | `wss://magic-indexer-dev.up.railway.app/graphql/ws`                     |
+| Admin GraphQL            | `https://magic-indexer-dev.up.railway.app/admin/graphql`                |
+| GraphiQL playground      | `https://magic-indexer-dev.up.railway.app/graphiql`                     |
+| GraphiQL admin           | `https://magic-indexer-dev.up.railway.app/graphiql/admin`               |
+| Health                   | `https://magic-indexer-dev.up.railway.app/health`                       |
+| Stats                    | `https://magic-indexer-dev.up.railway.app/stats`                        |
+| Prometheus metrics       | `https://magic-indexer-dev.up.railway.app/metrics`                      |
+| Railway project ID       | `7d6c4e52-de61-439f-96c0-3ded4114b9be`                                  |
+| Railway project name     | `magic-index`                                                           |
+| Railway environment      | `dev`                                                                   |
+| Railway service          | `magic-indexer`                                                         |
+| Railway dashboard        | `https://railway.com/project/7d6c4e52-de61-439f-96c0-3ded4114b9be`      |
+| GitHub repo              | `https://github.com/hb-agent/magic-indexer`                             |
+| Active branch            | `per-labeler-definitions`                                               |
+| Backing database         | Postgres 18, Railway-managed, in the same project                       |
+| Currently ingesting from | Jetstream (23 lexicon-derived collections, no labelers)                 |
+
+The 23 collections currently being ingested all start with one
+of three NSID prefixes: `org.hypercerts.*`, `app.certified.*`,
+`org.hyperboards.*`. Lexicons are uploaded via the admin API
+from the npm package `@hypercerts-org/lexicon` (see Operations
+below).
+
+---
+
+## Safety rules — read these first
+
+These are non-negotiable. Apply before doing anything that
+touches state.
+
+1. **Never commit secrets.** `SECRET_KEY_BASE`, `ADMIN_API_KEY`,
+   the Railway API token, OAuth signing keys, and `.env` files
+   stay out of git. The repo's `.gitignore` excludes `.env` and
+   `.env.local`. `config.Validate()` at startup rejects the
+   literal `development-secret-key-change-in-production-64chars`
+   placeholder so a misconfigured deploy fails fast instead of
+   booting with a public key.
+
+2. **Never echo secrets in unredacted form** in chat output, log
+   files, or anything that could be persisted. When the operator
+   pastes a secret to you, store it in `/tmp/...` with `chmod
+   600` and reference the variable, don't reproduce the value.
+
+3. **Confirm with the operator before destructive actions.** This
+   includes (but isn't limited to): `railway down`, deleting
+   Railway services, dropping the Postgres volume, force-pushing
+   to `per-labeler-definitions`, deleting GitHub branches, mass
+   issue closure, `git reset --hard`, `git rebase -i`,
+   `gh repo delete`, dropping or truncating any database table,
+   `railway redeploy` against a service whose latest commit you
+   haven't built locally, rotating any secret without first
+   confirming the operator has the new value, and any operation
+   that affects the upstream `hypercerts-org/hyperindex` repo
+   (this is a fork — your default scope is `hb-agent/magic-indexer`).
+
+4. **Read-then-act, not act-then-explain.** When investigating a
+   problem, read the relevant code with file:line evidence
+   before proposing changes. Roughly half the "CRITICAL" findings
+   in the 23 review rounds were false positives that disappeared
+   after looking at the actual lines cited.
+
+5. **Quality gates before commit.** No code change is "done"
+   until all four pass:
+   ```bash
+   go build ./...
+   go vet ./...
+   go test -race ./...
+   golangci-lint run ./...
+   ```
+   CI also runs Postgres tests via `TEST_DATABASE_URL` and a
+   reproducible-build diff job. Both should stay green.
+
+6. **Commit message convention.** Each commit ends with a
+   `Co-Authored-By:` trailer naming the model/agent that wrote
+   it. The repo's recent history follows this; match the style.
+
+7. **`git push` is not optional.** A change you didn't push is
+   work that doesn't survive the session. The "Landing the
+   plane" checklist at the bottom of this file is mandatory.
+
+---
+
+## Self-test for a fresh session
+
+After you've read this file, test your understanding by
+mentally answering these. If you can answer all of them without
+re-reading, you're oriented:
+
+1. What is the project called, and what does it do in one sentence?
+2. Where is it deployed, on what platform, with what backing store?
+3. What's currently in the database (records, actors, lexicons,
+   labelers)?
+4. What's the active branch and the last commit on it?
+5. Which two issues are deliberately deferred and why?
+6. What two facts about lexicons do you have to remember when
+   uploading them?
+7. What is the *one* command an operator runs to deploy a code
+   change?
+8. What's the difference between `RAILWAY_TOKEN` and
+   `RAILWAY_API_TOKEN`?
+9. What's the rule about the `VOLUME` keyword in `Dockerfile`?
+10. Why is `OptionalAuth` middleware permissive on bad bearer
+    tokens, and why is that not a security hole?
+
+Answers are scattered through the rest of this file. If any of
+the questions don't have a clear answer here, that's a
+documentation bug — say so.
+
+---
+
+## Build, test, lint (local development)
+
+From a clean checkout:
 
 ```bash
-# Build
-make build                     # Build binary to bin/hypergoat
-go build ./...                 # Build all packages (quick check)
-
-# Run
-make run                       # Build and run server
-go run ./cmd/hypergoat         # Run directly
-make dev                       # Run with hot reload (requires air)
-
-# Test - ALL TESTS
-make test                      # Run all tests with race detector
-go test ./...                  # Run all tests (faster, no race)
-
-# Test - SINGLE TEST
-go test -v -run TestName ./...                    # Run test by name pattern
-go test -v -run TestParseLexicon ./internal/lexicon/...  # Specific package
-go test -v ./internal/graphql/admin/...           # All tests in package
-
-# Test - WITH COVERAGE
-make test-coverage             # Generate coverage.html report
-
-# Lint & Format
-make lint                      # Run golangci-lint
-make fmt                       # Format with go fmt + gofumpt
-go fmt ./...                   # Format only
-
-# Install dev tools
-make tools                     # Install air, golangci-lint, gofumpt, migrate
+git clone https://github.com/hb-agent/magic-indexer.git
+cd magic-indexer
+git checkout per-labeler-definitions
+make setup           # generates .env with a fresh SECRET_KEY_BASE
+go run ./cmd/hypergoat
 ```
 
-## Code Style Guidelines
+Quality gates that must pass before any commit:
+
+```bash
+go build ./...                   # also: make build
+go vet ./...
+go test ./...                    # also: make test (adds -race)
+go test -race ./...
+golangci-lint run ./...          # also: make lint
+```
+
+Single test patterns:
+
+```bash
+go test -v -run TestParseLexicon ./internal/lexicon/...
+go test -v ./internal/graphql/admin/...
+```
+
+Coverage report:
+
+```bash
+make test-coverage               # writes coverage.html
+```
+
+To run the integration test suite (build tag `integration`):
+
+```bash
+go test -tags=integration ./internal/integration/...
+```
+
+CI runs all of the above on every push to `main` and every PR
+targeting `main`, against both SQLite and Postgres (`TEST_DATABASE_URL`),
+plus a reproducible-build diff job. See `.github/workflows/ci.yml`.
+
+---
+
+## Code style
 
 ### Imports
-Group imports in this order with blank lines between:
+Three groups, blank lines between them, in this order:
+
 ```go
 import (
     "context"           // 1. Standard library
@@ -60,142 +212,140 @@ import (
 )
 ```
 
-### Package Documentation
-Every package must have a doc comment:
+### Package documentation
+Every package has a doc comment on `package`:
+
 ```go
-// Package config handles application configuration loading from environment variables.
+// Package config handles configuration loading from environment variables.
 package config
 ```
 
-### Naming Conventions
-- **Packages:** lowercase, single word (`lexicon`, `oauth`, `backfill`)
-- **Files:** lowercase with underscores (`did_resolver.go`, `jetstream_activity.go`)
-- **Types:** PascalCase (`Executor`, `RecordFetcher`, `WhereClause`)
-- **Interfaces:** Noun or -er suffix (`Executor`, `Fetcher`, `Resolver`)
-- **Constants:** PascalCase exported, camelCase private
-- **Acronyms:** All caps (`URI`, `DID`, `HTTP`, `JSON`)
+### Naming
+- Packages: lowercase, single word (`lexicon`, `oauth`, `backfill`).
+- Files: lowercase with underscores (`did_resolver.go`).
+- Types: PascalCase (`Executor`, `RecordFetcher`).
+- Interfaces: noun or `-er` suffix (`Executor`, `Fetcher`).
+- Acronyms: all caps (`URI`, `DID`, `HTTP`, `JSON`).
 
-### Error Handling
-Always wrap errors with context:
+### Errors
+Always wrap with context, prefer `%w`:
+
 ```go
 if err != nil {
     return fmt.Errorf("failed to query records: %w", err)
 }
 ```
 
-For typed errors:
-```go
-type DBError struct {
-    Code    string
-    Message string
-    Cause   error
-}
-func (e *DBError) Error() string { return e.Message }
-func (e *DBError) Unwrap() error { return e.Cause }
-```
+For OAuth-style validation errors prefer package-level sentinel
+vars (see `internal/oauth/dpop.go` for the canonical pattern
+that came out of review Round 8).
 
 ### Context
-Always pass context as the first parameter:
+Always pass `ctx` as the first parameter to any I/O method:
+
 ```go
 func (r *RecordsRepository) GetByURI(ctx context.Context, uri string) (*Record, error)
 ```
 
-### Repository Pattern
-All database access goes through repositories in `internal/database/repositories/`:
-```go
-type RecordsRepository struct {
-    db database.Executor
-}
-
-func NewRecordsRepository(db database.Executor) *RecordsRepository {
-    return &RecordsRepository{db: db}
-}
-
-func (r *RecordsRepository) GetByURI(ctx context.Context, uri string) (*Record, error) {
-    // Use r.db.Placeholder() for SQL parameters
-    sqlStr := fmt.Sprintf("SELECT %s FROM record WHERE uri = %s", r.recordColumns(), r.db.Placeholder(1))
-    // ...
-}
-```
-
-### Testing
-Use table-driven tests:
-```go
-func TestParseLexicon(t *testing.T) {
-    tests := []struct {
-        name    string
-        input   string
-        want    *Lexicon
-        wantErr bool
-    }{
-        {name: "simple record", input: `{"lexicon":1}`, want: &Lexicon{}},
-        {name: "invalid json", input: `{`, wantErr: true},
-    }
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            got, err := ParseLexicon(tt.input)
-            if (err != nil) != tt.wantErr {
-                t.Errorf("error = %v, wantErr %v", err, tt.wantErr)
-            }
-        })
-    }
-}
-```
+### Repository pattern
+Database access lives in `internal/database/repositories/`.
+Constructors take a `database.Executor`. SQL is built with
+`r.db.Placeholder(n)` for dialect-aware parameters. Every method
+takes `ctx`. Don't reach into the executor from outside the
+repositories layer.
 
 ### Logging
-Use structured logging with `log/slog`:
+Use `log/slog` everywhere. Structured fields, never string
+interpolation:
+
 ```go
 slog.Info("Starting backfill", "collections", collections, "count", len(repos))
 slog.Warn("Failed to resolve DID", "did", did, "error", err)
 slog.Error("Database connection failed", "error", err)
 ```
 
-## Project Structure
+The mutation log line in the admin handler logs **variable
+keys, not values** — never reintroduce value logging without an
+audit, it's a log-injection vector that Round 3 caught and
+fixed.
+
+### Testing
+Table-driven tests, fresh setup per test, no shared state:
+
+```go
+func TestSomething(t *testing.T) {
+    tests := []struct {
+        name    string
+        input   string
+        wantErr bool
+    }{
+        {"happy path", "valid", false},
+        {"bad input",  "junk",  true},
+    }
+    for _, tc := range tests {
+        t.Run(tc.name, func(t *testing.T) {
+            _, err := DoThing(tc.input)
+            if (err != nil) != tc.wantErr {
+                t.Errorf("err = %v, wantErr %v", err, tc.wantErr)
+            }
+        })
+    }
+}
+```
+
+For DB tests, use `testutil.SetupTestDB(t)` which honours
+`TEST_DATABASE_URL` and falls back to in-memory SQLite.
+
+---
+
+## Project structure
 
 ```
-cmd/hypergoat/          # Main entry point (server initialization, routing)
+cmd/hypergoat/          # Main entry point (server init, routing, lifecycle)
 internal/
-  backfill/             # Historical data backfill from AT Protocol relays
-  config/               # Configuration loading from environment
+  backfill/             # Historical record backfill from AT Protocol relays
+  config/               # Configuration loading from environment + Validate()
   database/
-    migrations/         # SQL migrations (auto-run on startup)
-    repositories/       # Data access layer (records, actors, lexicons, oauth, etc.)
-    sqlite/             # SQLite implementation (pure Go, no CGO)
+    migrations/         # SQL migrations (auto-run on startup, transactional)
+    repositories/       # Data access layer (records, labels, label_definitions, etc.)
+    sqlite/             # SQLite implementation (pure Go, modernc)
     postgres/           # PostgreSQL implementation (pgx)
   graphql/
-    admin/              # Admin API (schema.go, resolvers.go, handler.go, types.go)
+    admin/              # Admin API (POST-only, bearer-or-OAuth gated)
     schema/             # Public schema builder (dynamic from lexicons)
-    resolver/           # Public resolvers and context
-    query/              # Connection types (Relay spec)
-    depth/              # Pre-execution GraphQL query depth guard
+    resolver/           # Public resolver wiring + repository context injection
+    query/              # Connection types (Relay spec) + ClampPageSize
+    depth/              # Pre-execution GraphQL query depth guard (max 15 / 20)
     subscription/       # WebSocket subscriptions (graphql-transport-ws)
-    types/              # GraphQL type mapping from lexicons
+    types/              # GraphQL type mapping from lexicon definitions
   integration/          # Integration tests (build tag: integration)
   jetstream/            # Real-time AT Protocol event consumer
   labeler/              # ATProto labeler subscribeLabels + queryLabels client
   lexicon/              # Lexicon parsing, registry, NSID utilities
   metrics/              # Prometheus counters + /metrics HTTP handler
   oauth/                # OAuth 2.0 + DPoP + PKCE + did:plc / did:web resolution
-  server/               # HTTP handlers (GraphiQL with CSP, OAuth endpoints,
-                        # security headers middleware, CORS middleware)
-  workers/              # Background jobs (activity cleanup + orphan janitor,
-                        # backfill state, OAuth cleanup)
-docs/                   # Implementation plan and documentation
+  server/               # HTTP handlers, security headers, CORS, GraphiQL UI
+  workers/              # Background jobs (activity cleanup + orphan janitor, etc.)
+docs/                   # RUNBOOK + reviews + plans
 scripts/                # Deployment helpers (setup-env.sh)
 testdata/               # Test fixtures and sample lexicons
 ```
 
-## Labeler subsystem (internal/labeler/)
+---
 
-Mirrors `internal/jetstream/` but speaks the ATProto labeler protocol:
+## Subsystem highlights (the things that bit us in review)
 
-- `client.go` — websocket client for
-  `com.atproto.label.subscribeLabels`. Uses `fxamacker/cbor/v2`
-  for the two-CBOR-object frame format (`#labels`, `#info`,
-  `#error`). `SetReadLimit` bounds frame size. Non-normal close
-  codes are surfaced at Warn; empty-body `#labels` frames are
-  dropped explicitly; `#info` decode failures are elevated to
-  Warn so `OutdatedCursor` signals cannot be silently lost.
+### Labeler subsystem (`internal/labeler/`)
+Mirrors `internal/jetstream/` but speaks the ATProto labeler
+protocol:
+
+- `client.go` — websocket client for `com.atproto.label.subscribeLabels`.
+  Uses `fxamacker/cbor/v2` for the two-CBOR-object frame format
+  (`#labels`, `#info`, `#error`). `SetReadLimit` bounds frame
+  size. Non-normal close codes are surfaced at Warn; empty-body
+  `#labels` frames are dropped explicitly; `#info` decode failures
+  are elevated to Warn so `OutdatedCursor` signals cannot be
+  silently lost.
 - `backfill.go` — one-time `com.atproto.label.queryLabels`
   paginated backfill via `hashicorp/go-retryablehttp`.
 - `consumer.go` — lifecycle: load cursor → backfill if needed →
@@ -204,90 +354,348 @@ Mirrors `internal/jetstream/` but speaks the ATProto labeler protocol:
   in `cmd/hypergoat/main.go` so one labeler cannot take down the
   process. Logs cursor gaps at Warn.
 
-Label definitions are auto-upserted via
-`INSERT ... ON CONFLICT DO NOTHING` keyed on the composite
-`(src, val)` PK added in migration 009, so concurrent labelers
-cannot race a new `(src, val)` pair.
+Label definitions are auto-upserted via `INSERT ... ON CONFLICT
+DO NOTHING` keyed on the composite `(src, val)` PK from migration
+009 — concurrent labelers cannot race a new `(src, val)` pair.
 
-## Security headers middleware
+### Jetstream consumer (`internal/jetstream/`)
+- `client.go` — websocket client for the Jetstream firehose.
+  `SetReadLimit(8 MiB)` bounds per-frame memory.
+- `consumer.go` — lifecycle + reconnect loop. The cursor is
+  persisted to the `config` table every 5 s by default. Critical
+  invariant from Round 14: `c.cursorDone`, `c.config`, and
+  `c.ctxCancel` must all be mutated under `clientMu`; the
+  `Start()` reconnect loop and `UpdateCollections()` both take
+  the lock around their state writes.
+- The lexicon change callback dynamically restarts the Jetstream
+  consumer with a fresh `wantedCollections` list whenever
+  lexicons are uploaded via the admin API. No process restart
+  needed.
 
-`internal/server/security_headers.go` emits
-`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+### Security headers middleware (`internal/server/security_headers.go`)
+Emits `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
 `Referrer-Policy: no-referrer`, and conditionally
 `Strict-Transport-Security` (only when `EXTERNAL_BASE_URL` is
-https). `/graphiql` sets its own `Content-Security-Policy`
+`https://`). `/graphiql` sets its own `Content-Security-Policy`
 allowing the unpkg CDN for bootstrap assets; JSON API endpoints
 keep the tighter default.
 
-See [SECURITY.md](SECURITY.md) for the full operator contract
-(rate limiting, required env vars, admin auth shape).
+### `OptionalAuth` middleware (`internal/oauth/middleware.go`)
+**Important contract**: when the `Authorization` header is
+present but fails OAuth token validation, `OptionalAuth` passes
+through with no user context — it does **not** return 401. This
+is required because `/admin/graphql` is mounted with
+`OptionalAuth` and the admin handler accepts two auth schemes:
+a validated OAuth user, and an `ADMIN_API_KEY` bearer token.
+Returning 401 in the middleware on a non-OAuth bearer (like the
+admin API key) would prevent the API-key path from ever being
+reached. The admin handler does its own 401 check on empty
+userDID + no API key, so security posture is unchanged.
+Round 8 introduced this behaviour live during the first deploy
+when admin auth via `ADMIN_API_KEY` returned `invalid_token`.
 
-## Deployment
+### Activity log empty-event-json normalisation (`internal/database/repositories/jetstream_activity.go`)
+The Jetstream consumer passes `string(commit.Record)` into
+`LogActivity`. For delete operations `commit.Record` is nil and
+the result is `""`. Postgres `JSONB NOT NULL` rejects empty
+strings; SQLite stores them loosely as TEXT. The repository
+normalises empty / whitespace-only payloads to the JSON literal
+`null` so both dialects accept the row. Discovered live during
+the Railway deploy.
 
-The dev deployment lives at **https://magic-indexer-dev.up.railway.app**,
-running on Railway with a Postgres backing store. The full deploy
-playbook — first-time provisioning, routine deploys, env vars,
-secrets management, common gotchas — is in
-[`docs/RUNBOOK.md`](docs/RUNBOOK.md). Read that **before** touching
-the live environment.
+### `config.Validate()` (`internal/config/config.go`)
+- Refuses to start if `SECRET_KEY_BASE` is shorter than 64 bytes
+  or matches the literal `development-secret-key-change-in-production-64chars`
+  placeholder.
+- Refuses to start on out-of-range `PORT`.
+- Logs a Warn (not silent fallback) when `getEnvInt` is given a
+  malformed integer value.
 
-Key facts an AI session should know up front:
-- The Railway service is named `magic-indexer` in the `dev`
-  environment of project `magic-index` (project ID
-  `7d6c4e52-de61-439f-96c0-3ded4114b9be`).
-- The active branch is `per-labeler-definitions`. Routine deploys
-  are `railway up --service magic-indexer --detach` from a clean
-  checkout of that branch.
-- Secrets (`SECRET_KEY_BASE`, `ADMIN_API_KEY`, Railway API token)
-  live in the operator's password manager and the Railway
-  dashboard. **Never commit them.** `config.Validate()` rejects the
-  dev placeholder string at startup.
-- Railway bans `VOLUME` in Dockerfiles. Don't reintroduce it.
-- The Railway CLI uses `RAILWAY_API_TOKEN` (not `RAILWAY_TOKEN`)
-  for account-scoped tokens.
+### Migrations (`internal/database/migrations/`)
+- Each migration's `UpSQL` and the `schema_migrations` insert
+  run inside a single transaction (`applyMigrationTx`). A crash
+  in the middle leaves both rolled back.
+- `Rollback` follows the same pattern.
+- Migrations 001–009 are present in both `sqlite/` and `postgres/`
+  variants and are tested for round-trip equivalence.
 
-## Operations
+### Repositories that touch labels
+- `LabelsRepository` — `Insert` / `InsertNegation` use
+  `ON CONFLICT DO NOTHING` keyed on a partial unique index per
+  migration 007. Active-set queries (`GetByURIs`, `HasTakedown`,
+  `GetTakedownURIs`, plus the records label-filter subquery) all
+  filter expired labels via `(l.exp IS NULL OR l.exp > nowLiteral())`.
+- `LabelDefinitionsRepository` — composite `(src, val)` primary
+  key from migration 009 so two labelers can both define
+  `high-quality` with different semantics.
+- `OAuthDPoPJTIRepository.InsertIfNew` — atomic `INSERT ... ON
+  CONFLICT DO NOTHING` for race-safe DPoP replay detection.
 
-Day-to-day operational tasks — uploading lexicons (always from
-the npm package `@hypercerts-org/lexicon`, never from the
-upstream main branch), enabling/disabling labelers, pausing a
-single labeler without redeploying, inspecting why a record is
-hidden, rotating secrets, common labeler failure modes — are
-all in [`docs/RUNBOOK.md`](docs/RUNBOOK.md). It is the canonical
-"how do I do X in production" reference.
+---
 
-## Review history
+## Deploying — the short version
+
+The full deploy playbook (first-time provisioning, lexicon
+upload, secret rotation, common gotchas) is in
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md). Read that **before**
+touching the live environment for anything beyond a routine
+code redeploy.
+
+### Routine code deploy
+
+```bash
+cd /path/to/magic-indexer
+git checkout per-labeler-definitions
+git pull
+export RAILWAY_API_TOKEN='<from-password-manager>'
+railway up --service magic-indexer --detach
+railway logs --service magic-indexer --deployment --lines 100
+```
+
+### Watch a deploy
+
+```bash
+railway logs --service magic-indexer --build         # build phase
+railway logs --service magic-indexer --deployment    # runtime
+```
+
+### Railway gotchas (the things that broke our first deploys)
+
+- **`VOLUME` is banned in Dockerfiles.** Railway rejects any
+  `VOLUME` instruction. Don't reintroduce it. Use Railway's
+  native volume mechanism via the dashboard if you need
+  persistent storage.
+- **Use `RAILWAY_API_TOKEN` for account-scoped tokens, not
+  `RAILWAY_TOKEN`.** `RAILWAY_TOKEN` is for project-scoped
+  tokens. Whoami fails silently with the wrong variable.
+- **`railway add --database postgres` shows a prompt that looks
+  like a hang but the service is created anyway.** Don't double-
+  run; you'll get duplicate Postgres services. If you do, delete
+  the duplicate via the GraphQL API: `mutation { serviceDelete(id: "<dup-id>") }`.
+- **`railway variables --set NAME=` (empty value) is rejected by
+  the CLI.** To clear a variable, use the GraphQL API:
+  `mutation { variableUpsert(input: { ..., value: "" }) }`.
+- **HSTS only emits when `EXTERNAL_BASE_URL` starts with
+  `https://`**. A deployed instance with `http://` in that env
+  var will not send HSTS. By design.
+- **Railway auto-discovers + exposes `${{Postgres.DATABASE_URL}}`
+  variable references** at runtime; use that form, not the raw
+  resolved URL, so a Postgres credential rotation propagates
+  automatically.
+
+---
+
+## Operations — the short version
+
+The full operator playbook is in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+Two essential rules to remember:
+
+### Lexicons come from npm, never from main
+
+The canonical source for hypercerts/certified/hyperboards
+lexicons is the npm package `@hypercerts-org/lexicon`. **Do not
+read from the upstream `hypercerts-org/hypercerts-lexicon` main
+branch directly.** The README of that repo says so explicitly,
+and there's a good reason: main is unstable and contains
+work-in-progress schema changes that may be broken or
+incompatible. The npm package is the versioned, tested
+distribution.
+
+To upload lexicons matching a set of NSID prefixes:
+
+```bash
+# 1. Resolve latest version
+VERSION=$(curl -s https://registry.npmjs.org/@hypercerts-org/lexicon \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['dist-tags']['latest'])")
+
+# 2. Download the tarball
+curl -sL "https://registry.npmjs.org/@hypercerts-org/lexicon/-/lexicon-$VERSION.tgz" \
+  -o /tmp/lexicon.tgz
+mkdir -p /tmp/lexicon-pkg && tar -xzf /tmp/lexicon.tgz -C /tmp/lexicon-pkg
+
+# 3. Filter to the prefixes you want
+cd /tmp/lexicon-pkg
+mkdir -p upload-staging
+find package/lexicons -name "*.json" | while read f; do
+  id=$(python3 -c "import json; print(json.load(open('$f'))['id'])")
+  case "$id" in
+    org.hypercerts.*|app.certified.*|org.hyperboards.*)
+      rel=${f#package/lexicons/}
+      mkdir -p "upload-staging/$(dirname "$rel")"
+      cp "$f" "upload-staging/$rel"
+      ;;
+  esac
+done
+
+# 4. Zip + base64
+( cd upload-staging && zip -r ../lexicons.zip . )
+base64 -w0 lexicons.zip > lexicons.zip.b64
+
+# 5. Upload via admin GraphQL
+ADMIN_API_KEY='<from-password-manager>'
+ADMIN_DID='did:plc:<your-did>'
+python3 -c "
+import json
+print(json.dumps({
+  'query': 'mutation Upload(\$zip: String!) { uploadLexicons(zipBase64: \$zip) }',
+  'variables': {'zip': open('lexicons.zip.b64').read().strip()}
+}))" > upload-payload.json
+
+curl -X POST https://magic-indexer-dev.up.railway.app/admin/graphql \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H "X-User-DID: $ADMIN_DID" \
+  -H "Content-Type: application/json" \
+  --data-binary @upload-payload.json
+# expected: {"data":{"uploadLexicons":<count>}}
+```
+
+After upload, the Jetstream consumer **automatically restarts**
+with the new union of `wantedCollections`. No human action needed.
+
+### Labeler enable / disable / pause
+
+```bash
+# Enable: comma-separated DIDs
+railway variables --service magic-indexer \
+  --set "LABELER_DIDS=did:plc:abc...,did:plc:def..."
+
+# Disable all: empty string via GraphQL (CLI doesn't allow empty values)
+curl -X POST https://backboard.railway.com/graphql/v2 \
+  -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"mutation { variableUpsert(input: { projectId: \"7d6c4e52-de61-439f-96c0-3ded4114b9be\", environmentId: \"<env-id>\", serviceId: \"<service-id>\", name: \"LABELER_DIDS\", value: \"\" }) }"}'
+railway redeploy --service magic-indexer --yes
+
+# Pause one labeler without restart (admin endpoint)
+curl -X POST -H "Authorization: Bearer $ADMIN_API_KEY" \
+  "https://magic-indexer-dev.up.railway.app/admin/labeler/pause?did=did:plc:..."
+
+# Reset cursor (force re-backfill on next start)
+curl -X POST -H "Authorization: Bearer $ADMIN_API_KEY" \
+  "https://magic-indexer-dev.up.railway.app/admin/labeler/reset?did=did:plc:..."
+```
+
+### Diagnose "why is this record hidden?"
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_API_KEY" \
+  "https://magic-indexer-dev.up.railway.app/admin/label-chain?uri=at://did:plc:abc/app.bsky.feed.post/xyz"
+```
+
+Returns every label on the URI (active, negated, expired) with
+provenance. Bypasses the public query path's filters because
+this is a diagnostic view.
+
+### Common labeler failure modes
+
+| Symptom                                              | Likely cause                                                                                                  |
+|------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
+| `dial labeler: connection refused`                   | Labeler's PLC entry points at a non-public host (e.g. `http://localhost:4100`). Operator must update DID doc. |
+| `dial labeler: websocket: bad handshake`             | Labeler host serves queryLabels HTTP but not subscribeLabels WS. Backfill works, live stream doesn't.         |
+| `Labeler backfill complete ... received=0`           | No labels published under this DID's `src`. Either new labeler with no data, or wrong DID.                    |
+| Cursor gap warning in logs                           | Labeler dropped frames upstream. Indexer keeps going.                                                          |
+
+The reconnect loop uses exponential backoff (1 s → 2 min cap),
+so a permanently-broken labeler settles to one log line per two
+minutes per labeler.
+
+---
+
+## Review history (so you don't waste a session)
 
 This branch went through **23 rounds of overnight review**
 producing 59 fixes and 3 regression tests before the first
 deploy. The per-round logs and final reports are in
 [`docs/reviews/`](docs/reviews/). Read the index there if you
-want to know what's already been audited (so you don't waste a
-session re-finding the same things) or which items were
-deferred with explicit reasoning.
+suspect something has already been audited.
 
-Two open issues are deliberate deferrals:
-- [#10 — Labeler signature verification](https://github.com/hb-agent/magic-indexer/issues/10) (waiting for upstream spec stability)
-- [#13 — GDPR hard-delete endpoint](https://github.com/hb-agent/magic-indexer/issues/13) (waiting for product/legal trigger)
+Combined totals:
 
-Don't re-discover them. If a real trigger appears, follow the
-re-open criteria documented in each issue.
+| Rounds | Reviewers | Critical | Major | Minor | Nice | Fixed |
+|--------|-----------|----------|-------|-------|------|-------|
+| 1–10   | 200       | 35       | 100   | 95    | 19   | 55 fixes + 3 regression tests |
+| 11–18  | 160       | 2        | 1     | 0     | 0    | 3 fixes (jetstream state races, Round 14) |
+| 19–23  | 100       | 0        | 0     | 0     | 0    | 1 mid-deploy fix (`OptionalAuth` pass-through) |
+| **total** | **460** | **37** | **101** | **95** | **19** | **59 fixes + 3 regression tests** |
 
-## Landing the Plane (Session Completion)
+### Items deliberately deferred (do not re-discover)
 
-**When ending a work session**, you MUST complete ALL steps below.
+Two open issues are **deliberate** deferrals. Both have full
+rationale + design questions documented as comments on the
+GitHub issue. Read the comments before proposing work in either
+area.
 
-1. **Run quality gates** (if code changed):
+- **[#10 — Labeler signature verification](https://github.com/hb-agent/magic-indexer/issues/10)**.
+  Re-open when a labeler we ingest starts shipping cryptographic
+  signatures against a stable scheme.
+- **[#13 — GDPR hard-delete endpoint](https://github.com/hb-agent/magic-indexer/issues/13)**.
+  Re-open when there's a real erasure request or a legal
+  obligation.
+
+Other things that came up in review and were intentionally
+**not** changed:
+- The Go module path stays `github.com/GainForest/hypergoat`
+  and the binary stays `hypergoat`. Renaming would touch ~80
+  files for a brand-only change. The product is "Magic Indexer"
+  in docs, the binary is `hypergoat` on disk.
+- **Takedown is opt-in.** A record with an active `!takedown`
+  label is *not* hidden by default. Clients must pass
+  `excludeLabels: ["!takedown"]` explicitly. This is a
+  deliberate product decision (the indexer is labeler-neutral).
+
+---
+
+## Landing the plane (mandatory checklist when ending a session)
+
+1. **Quality gates** (if code changed):
    ```bash
    go build ./...
-   go test ./...
+   go vet ./...
+   go test -race ./...
+   golangci-lint run ./...
    ```
-2. **Commit and PUSH**:
-   ```bash
-   git add -A && git commit -m "feat: description"
-   git push origin $branchname
-   git status  # MUST show "up to date with origin"
-   ```
-3. **Verify** - Work is NOT complete until `git push` succeeds
+   All four green or you have a real reason for the failure
+   that's documented in the commit message.
 
-**CRITICAL:** Never stop before pushing - that leaves work stranded locally.
+2. **Commit with the right convention**:
+   ```bash
+   git add -A
+   git commit -m "<area>: <one-line summary>
+
+   <body>
+
+   Co-Authored-By: <your model name> <noreply@anthropic.com>"
+   ```
+   Refer to closed issues with `Closes #N` where applicable.
+
+3. **Push**:
+   ```bash
+   git push origin per-labeler-definitions
+   git status                    # MUST show "up to date with origin"
+   ```
+
+4. **Verify**: nothing that affects the live deployment is
+   considered "shipped" until `railway up && /health → 200` and
+   the relevant log line you expected is visible in
+   `railway logs --service magic-indexer --deployment`.
+
+5. **Don't leave secrets in `/tmp`** if the session is ending
+   without recovery. `shred -u /tmp/<file>` or leave them in
+   place if the operator will be back to use them.
+
+**Never stop before pushing.** Local-only work is work that
+doesn't survive.
+
+---
+
+## See also (for the things this digest abbreviates)
+
+- [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — full operator playbook
+  with first-time deploy, lexicon walkthrough, secret rotation,
+  incident response, every gotcha worked out long-form.
+- [`docs/reviews/README.md`](docs/reviews/README.md) — index of
+  the 23-round overnight review history.
+- [`SECURITY.md`](SECURITY.md) — required env vars, reverse-proxy
+  rate limits, admin auth contract.
+- [`README.md`](README.md) — high-level project intro and live URL.
+- [`scripts/setup-env.sh`](scripts/setup-env.sh) — what `make setup` actually runs.
