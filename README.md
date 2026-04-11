@@ -1,21 +1,27 @@
 <p align="center">
-  <img src="hypergoat.png" alt="Hyperindex" width="600">
+  <img src="hypergoat.png" alt="Magic Indexer" width="600">
 </p>
 
-# Hyperindex (hi)
+# Magic Indexer
 
 **A Go AT Protocol AppView server that indexes records and exposes them via GraphQL**
 
-*Formerly known as Hypergoat.*
+*This repository is the `hb-agent/magic-index` fork of the
+`hypercerts-org/hyperindex` project. The product is branded
+**Magic Indexer**; the compiled binary is still named `hypergoat`
+as a historical artefact from when the project was originally
+called Hypergoat. Every command below that mentions `hypergoat`
+or `./cmd/hypergoat` is referring to that binary path — not a
+different product.*
 
-Hyperindex (hi) connects to the AT Protocol network, indexes records matching your configured Lexicons, and provides a GraphQL API for querying them. It's a Go port of [Quickslice](https://github.com/quickslice/quickslice).
+Magic Indexer connects to the AT Protocol network, indexes records matching your configured Lexicons, and provides a GraphQL API for querying them.
 
 ## Quick Start
 
 ```bash
 # Clone and run
-git clone https://github.com/GainForest/hypergoat.git
-cd hypergoat
+git clone https://github.com/hb-agent/magic-index.git
+cd magic-index
 make setup          # creates .env with a freshly generated SECRET_KEY_BASE
 go run ./cmd/hypergoat
 ```
@@ -49,7 +55,7 @@ Or place lexicon JSON files in a directory and set `LEXICON_DIR` environment var
 
 ### 2. Start Indexing
 
-Once lexicons are registered, Hyperindex automatically:
+Once lexicons are registered, Magic Indexer automatically:
 - **Connects to Jetstream** for real-time events
 - **Indexes matching records** to your database
 
@@ -234,8 +240,8 @@ docker compose up --build
 Or build manually:
 
 ```bash
-docker build -t hyperindex .
-docker run -p 8080:8080 -v ./data:/data hyperindex
+docker build -t magic-indexer .
+docker run -p 8080:8080 -v ./data:/app/data magic-indexer
 ```
 
 ## Admin API
@@ -271,7 +277,7 @@ mutations out of access logs. Mutation logs redact variable
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                   Hyperindex (hi) Server                  │
+│                    Magic Indexer Server                    │
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
 │  Jetstream ──→ Consumer ──→ Records DB ──→ GraphQL API │
@@ -315,7 +321,7 @@ Migrations run automatically on startup.
 
 ## History
 
-Hyperindex was incubated and created by [GainForest](https://gainforest.earth) and [Claude Opus 4.5](https://www.anthropic.com/claude) (Anthropic), originally under the name *Hypergoat*. It has since been moved to [hypercerts-org](https://github.com/hypercerts-org) for community maintenance.
+The original project was incubated and created by [GainForest](https://gainforest.earth) and [Claude Opus 4.5](https://www.anthropic.com/claude) (Anthropic), originally under the name *Hypergoat*, later renamed to *Hyperindex* under [hypercerts-org](https://github.com/hypercerts-org) for community maintenance. This `hb-agent/magic-index` fork rebrands the product as **Magic Indexer** and carries the per-labeler label-definition work plus the production hardening landed during the overnight review process (see `docs/` / commit history for details). The binary is still called `hypergoat` inside the container to avoid a noisy module rename.
 
 ## License
 

@@ -28,8 +28,11 @@ rate limiting. Rate limiting in a long-running Go app competes with
 every sliding-window / token-bucket implementation in every
 reverse-proxy tier you already have. Pick one and enforce it there.
 
-Recommended limits when hypergoat sits behind nginx, Caddy, Traefik,
-HAProxy, Cloudflare, or a Vercel / Railway edge:
+Recommended limits when Magic Indexer sits behind nginx, Caddy,
+Traefik, HAProxy, Cloudflare, or a Vercel / Railway edge (the
+`proxy_pass http://hypergoat` examples below reference whatever
+upstream name you've chosen in your own reverse-proxy config —
+the historical binary name is just the convenient label):
 
 | Route | Limit | Reasoning |
 |---|---|---|
@@ -73,7 +76,7 @@ The application emits `Strict-Transport-Security` **only** when
 at a proxy, set the env var accordingly and the process will do the
 right thing.
 
-Never run hypergoat on a public port without TLS — the OAuth flow,
+Never run Magic Indexer on a public port without TLS — the OAuth flow,
 admin API, and DPoP proofs all assume a trusted transport.
 
 ## Admin surface

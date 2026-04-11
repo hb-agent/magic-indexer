@@ -1,7 +1,12 @@
-# AGENTS.md - Hypergoat Development Guide
+# AGENTS.md - Magic Indexer Development Guide
 
-Hypergoat is a Go port of Quickslice - an AT Protocol AppView server that indexes
+Magic Indexer is an AT Protocol AppView server that indexes
 Lexicon-defined records and exposes them via a dynamically-generated GraphQL API.
+The compiled binary is still called `hypergoat` inside the container and the Go
+module path is `github.com/GainForest/hypergoat` — historical names from when
+the project was originally called Hypergoat. Every `go run ./cmd/hypergoat` /
+`bin/hypergoat` reference below is pointing at that binary path, not a
+different product.
 
 **Status:** Core functionality complete (Phases 1-7). All tests passing.
 
