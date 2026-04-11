@@ -409,7 +409,7 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 			      AND neg.src = l.src
 			      AND neg.val = l.val
 			      AND neg.neg = 1
-			      AND neg.id > l.id
+			      AND neg.cts >= l.cts
 			  )
 		)`, srcPh, strings.Join(valPhs, ", "))
 		whereClauses = append(whereClauses, sub)
@@ -437,7 +437,7 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 			      AND neg.src = l.src
 			      AND neg.val = l.val
 			      AND neg.neg = 1
-			      AND neg.id > l.id
+			      AND neg.cts >= l.cts
 			  )
 		)`, srcPh, strings.Join(valPhs, ", "))
 		whereClauses = append(whereClauses, sub)

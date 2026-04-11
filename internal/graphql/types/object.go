@@ -88,23 +88,14 @@ func (b *ObjectBuilder) buildFields(contextRef string, def *lexicon.ObjectDef) g
 	return fields
 }
 
-// buildRecordFields builds GraphQL fields from RecordDef properties.
+// buildRecordFields builds GraphQL fields from RecordDef properties. The
+// standard record fields (uri, cid, labels) are added after the lexicon
+// properties so they don't silently overwrite a lexicon field of the same
+// name; instead the lexicon field wins. If we need AT-URI access on a
+// colliding record type, the admin-level `records` query exposes the
+// underlying Record.URI directly.
 func (b *ObjectBuilder) buildRecordFields(lexiconID string, def *lexicon.RecordDef) graphql.Fields {
-	fields := graphql.Fields{
-		// Standard record fields
-		"uri": &graphql.Field{
-			Type:        graphql.NewNonNull(graphql.String),
-			Description: "AT-URI of this record",
-		},
-		"cid": &graphql.Field{
-			Type:        graphql.NewNonNull(graphql.String),
-			Description: "CID of this record version",
-		},
-		"labels": &graphql.Field{
-			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
-			Description: "Active label values on this record from the configured labeler.",
-		},
-	}
+	fields := graphql.Fields{}
 
 	// Build required set for quick lookup
 	requiredSet := make(map[string]bool)
@@ -118,6 +109,28 @@ func (b *ObjectBuilder) buildRecordFields(lexiconID string, def *lexicon.RecordD
 		field := b.buildField(lexiconID, entry.Name, &entry.Property, requiredSet[entry.Name])
 		if field != nil {
 			fields[entry.Name] = field
+		}
+	}
+
+	// Only add the synthesised fields when the lexicon does not already
+	// define them. This preserves the lexicon author's intent if a
+	// record type happens to have its own `uri`, `cid`, or `labels`.
+	if _, clash := fields["uri"]; !clash {
+		fields["uri"] = &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "AT-URI of this record",
+		}
+	}
+	if _, clash := fields["cid"]; !clash {
+		fields["cid"] = &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "CID of this record version",
+		}
+	}
+	if _, clash := fields["labels"]; !clash {
+		fields["labels"] = &graphql.Field{
+			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: "Active label values on this record from the configured labeler.",
 		}
 	}
 

@@ -2,9 +2,11 @@ package labeler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -212,7 +214,8 @@ func (c *Consumer) Start(ctx context.Context) error {
 // runOnce opens one websocket connection and processes events until it
 // disconnects. processEvents and cursorFlusher receive the current client
 // and the current generation's context by parameter, so they can never
-// observe a later generation's state.
+// observe a later generation's state. On return, the client is always
+// stopped so its event channel closes and processEvents exits cleanly.
 func (c *Consumer) runOnce(ctx context.Context) error {
 	// Stop any lingering client from a previous generation.
 	c.clientMu.Lock()
@@ -236,13 +239,15 @@ func (c *Consumer) runOnce(ctx context.Context) error {
 		Cursor:  cursor,
 	})
 
-	c.clientMu.Lock()
-	c.client = client
-	c.clientMu.Unlock()
-
+	// Connect before publishing the client to c.client so that a dead
+	// client (failed connect) never leaks into shared state.
 	if err := client.Connect(ctx); err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
+
+	c.clientMu.Lock()
+	c.client = client
+	c.clientMu.Unlock()
 
 	// Each generation gets its own flusher-stop channel. When Run returns
 	// we close it so the flusher for this generation exits; the next
@@ -251,10 +256,16 @@ func (c *Consumer) runOnce(ctx context.Context) error {
 	if !c.config.DisableCursor {
 		go c.cursorFlusher(ctx, genDone)
 	}
-	go c.processEvents(client)
+	go c.processEvents(ctx, client)
 
 	runErr := client.Run(ctx)
 	close(genDone)
+
+	// Always stop the client so its events channel closes and
+	// processEvents (which ranges over it) can exit. Without this, a
+	// Run() that returns an error would leave the goroutine stuck.
+	client.Stop()
+
 	return runErr
 }
 
@@ -355,35 +366,44 @@ func (c *Consumer) runBackfill(ctx context.Context) error {
 }
 
 // processEvents drains decoded #labels frames from a specific client.
-// The client is passed explicitly (not read from c.client) so that a stale
-// goroutine from a previous reconnect cycle never touches the current client.
-func (c *Consumer) processEvents(client *Client) {
-	ctx := c.ctx
-	for msg := range client.Events() {
-		rejected := c.upsertLabels(ctx, msg.Labels)
-
-		c.statsAdd(func(s *Stats) {
-			s.LabelsReceived += int64(len(msg.Labels))
-			s.LabelsPersisted += int64(len(msg.Labels) - rejected)
-			s.LabelsRejected += int64(rejected)
-			s.EventsReceived++
-			s.LastSeq = msg.Seq
-		})
-
-		if rejected > 0 {
-			slog.Warn("Labeler: rejected some labels in batch",
-				"did", c.config.LabelerDID,
-				"seq", msg.Seq,
-				"rejected", rejected,
-				"total", len(msg.Labels))
+// The client and ctx are passed explicitly (not read from the Consumer)
+// so that a stale goroutine from a previous reconnect cycle never touches
+// the current generation's state. The select on ctx.Done() guarantees
+// exit even if Client.Stop is racing with the range loop.
+func (c *Consumer) processEvents(ctx context.Context, client *Client) {
+	events := client.Events()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-events:
+			if !ok {
+				return
+			}
+			c.handleLabelMessage(ctx, msg)
 		}
-
-		c.cursorMu.Lock()
-		if msg.Seq > c.cursor {
-			c.cursor = msg.Seq
-		}
-		c.cursorMu.Unlock()
 	}
+}
+
+// handleLabelMessage persists a single #labels frame's worth of labels
+// and updates the cursor + stats. upsertLabels logs its own batch-level
+// summary on failures; we only record stats here.
+func (c *Consumer) handleLabelMessage(ctx context.Context, msg *LabelMessage) {
+	rejected := c.upsertLabels(ctx, msg.Labels)
+
+	c.statsAdd(func(s *Stats) {
+		s.LabelsReceived += int64(len(msg.Labels))
+		s.LabelsPersisted += int64(len(msg.Labels) - rejected)
+		s.LabelsRejected += int64(rejected)
+		s.EventsReceived++
+		s.LastSeq = msg.Seq
+	})
+
+	c.cursorMu.Lock()
+	if msg.Seq > c.cursor {
+		c.cursor = msg.Seq
+	}
+	c.cursorMu.Unlock()
 }
 
 // MaxLabelValLen bounds the length of a label val to avoid storing
@@ -391,23 +411,39 @@ func (c *Consumer) processEvents(client *Client) {
 const MaxLabelValLen = 128
 
 // upsertLabels inserts every label in a batch, ensuring the label_definition
-// row exists first. Individual label failures are logged and skipped so one
-// bad row does not block cursor advancement for the rest of the batch. The
-// number of labels that were rejected (as opposed to successfully persisted)
-// is returned for observability; it is not treated as an error.
+// row exists first. Individual label failures are rolled up into a single
+// log line per batch (with the first failing label as a sample) so that
+// sustained DB issues don't produce O(batch-size) log spam. Context
+// cancellation is treated as expected shutdown, not an error.
+//
+// Returns the count of labels that were rejected rather than successfully
+// persisted. A rejected count is not treated as an error here; callers log
+// the summary via the batch-level metrics.
 func (c *Consumer) upsertLabels(ctx context.Context, labels []ProtoLabel) (rejected int) {
+	var firstErr error
+	var firstErrURI, firstErrVal string
+
+	record := func(err error, l *ProtoLabel) {
+		rejected++
+		if firstErr == nil {
+			firstErr = err
+			firstErrURI = l.URI
+			firstErrVal = l.Val
+		}
+	}
+
 	for i := range labels {
 		l := &labels[i]
+		if ctx.Err() != nil {
+			rejected++
+			continue
+		}
 		if !c.validateLabel(l) {
 			rejected++
 			continue
 		}
 		if err := c.ensureDefinition(ctx, l.Val); err != nil {
-			slog.Warn("Labeler: failed to ensure label definition",
-				"did", c.config.LabelerDID,
-				"val", l.Val,
-				"error", err)
-			rejected++
+			record(err, l)
 			continue
 		}
 
@@ -415,13 +451,7 @@ func (c *Consumer) upsertLabels(ctx context.Context, labels []ProtoLabel) (rejec
 
 		if l.Neg {
 			if _, err := c.labels.InsertNegation(ctx, l.Src, l.URI, l.Val, cts); err != nil {
-				slog.Warn("Labeler: insert negation failed",
-					"did", c.config.LabelerDID,
-					"src", l.Src,
-					"uri", l.URI,
-					"val", l.Val,
-					"error", err)
-				rejected++
+				record(err, l)
 			}
 			continue
 		}
@@ -434,25 +464,35 @@ func (c *Consumer) upsertLabels(ctx context.Context, labels []ProtoLabel) (rejec
 		expPtr := parseLabelTime(l.Exp)
 
 		if _, err := c.labels.Insert(ctx, l.Src, l.URI, cidPtr, l.Val, cts, expPtr); err != nil {
-			slog.Warn("Labeler: insert label failed",
-				"did", c.config.LabelerDID,
-				"src", l.Src,
-				"uri", l.URI,
-				"val", l.Val,
-				"error", err)
-			rejected++
+			record(err, l)
 		}
+	}
+
+	if firstErr != nil && !errors.Is(firstErr, context.Canceled) {
+		slog.Warn("Labeler: batch upsert had failures",
+			"did", c.config.LabelerDID,
+			"rejected", rejected,
+			"total", len(labels),
+			"first_err_uri", firstErrURI,
+			"first_err_val", firstErrVal,
+			"first_err", firstErr)
 	}
 	return rejected
 }
 
 // validateLabel rejects protocol-invalid labels before they touch the DB.
+//
+// Account-level labels (uri = "did:plc:...") are stored in the DB but
+// cannot be reached by record-level queries (the record JOIN only
+// matches at:// URIs), so we reject them here with a debug log. If the
+// data model gains account-level label support in the future, this
+// check can be relaxed.
 func (c *Consumer) validateLabel(l *ProtoLabel) bool {
 	if l == nil || l.Src == "" || l.URI == "" || l.Val == "" {
 		return false
 	}
-	if !repositories.IsValidSubjectURI(l.URI) {
-		slog.Debug("Labeler: skipping label with invalid URI",
+	if !strings.HasPrefix(l.URI, "at://") || len(l.URI) <= len("at://") {
+		slog.Debug("Labeler: skipping label with non-record URI",
 			"did", c.config.LabelerDID, "uri", l.URI)
 		return false
 	}

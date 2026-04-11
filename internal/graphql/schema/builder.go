@@ -436,7 +436,10 @@ func (b *Builder) resolveRecordConnection(
 	}
 
 	// Label filter args
-	filter := parseLabelFilter(p.Args, repos.DefaultLabelerDID)
+	filter, err := parseLabelFilter(p.Args, repos.DefaultLabelerDID)
+	if err != nil {
+		return nil, err
+	}
 
 	// Fetch first+1 to determine hasNextPage
 	records, err := repos.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
@@ -510,8 +513,10 @@ const MaxLabelFilterValues = 50
 // parseLabelFilter extracts the label-related arguments from a GraphQL
 // field resolver's args map and returns a LabelFilter. It respects the
 // labelerDid arg override, falling back to the server's default labeler.
-// Values beyond MaxLabelFilterValues are silently truncated.
-func parseLabelFilter(args map[string]interface{}, defaultLabeler string) repositories.LabelFilter {
+// Returns an error if the caller requested a label filter but no labeler
+// is configured (so the caller sees an explicit failure rather than
+// silently-ignored filter). Too-long lists are truncated with a warning.
+func parseLabelFilter(args map[string]interface{}, defaultLabeler string) (repositories.LabelFilter, error) {
 	var filter repositories.LabelFilter
 
 	filter.LabelerSrc = defaultLabeler
@@ -519,7 +524,9 @@ func parseLabelFilter(args map[string]interface{}, defaultLabeler string) reposi
 		filter.LabelerSrc = did
 	}
 
+	rawIncludeLen := 0
 	if raw, ok := args["labels"].([]interface{}); ok {
+		rawIncludeLen = len(raw)
 		for _, v := range raw {
 			if len(filter.Include) >= MaxLabelFilterValues {
 				break
@@ -529,7 +536,9 @@ func parseLabelFilter(args map[string]interface{}, defaultLabeler string) reposi
 			}
 		}
 	}
+	rawExcludeLen := 0
 	if raw, ok := args["excludeLabels"].([]interface{}); ok {
+		rawExcludeLen = len(raw)
 		for _, v := range raw {
 			if len(filter.Exclude) >= MaxLabelFilterValues {
 				break
@@ -540,27 +549,45 @@ func parseLabelFilter(args map[string]interface{}, defaultLabeler string) reposi
 		}
 	}
 
-	// If no labeler is configured, clear the filters — there's nothing
-	// meaningful to filter against and the repo method would reject them.
-	if filter.LabelerSrc == "" {
-		filter.Include = nil
-		filter.Exclude = nil
+	if rawIncludeLen > MaxLabelFilterValues {
+		slog.Warn("GraphQL: labels argument truncated",
+			"supplied", rawIncludeLen, "max", MaxLabelFilterValues)
 	}
-	return filter
+	if rawExcludeLen > MaxLabelFilterValues {
+		slog.Warn("GraphQL: excludeLabels argument truncated",
+			"supplied", rawExcludeLen, "max", MaxLabelFilterValues)
+	}
+
+	// If the caller passed a filter but no labeler DID is configured
+	// (either as default or via labelerDid), return an explicit error
+	// instead of silently ignoring the filter. This prevents client
+	// code from thinking it filtered results when it didn't.
+	if filter.LabelerSrc == "" && (len(filter.Include) > 0 || len(filter.Exclude) > 0) {
+		return filter, fmt.Errorf("label filter requested but no labeler configured: set LABELER_DIDS or pass labelerDid explicitly")
+	}
+	return filter, nil
 }
 
 // loadLabelsByURI batch-loads active labels for a page of records and
-// groups them into a map of URI -> []val. If labelerSrc is non-empty,
-// only labels from that labeler are included. Failure is non-fatal and
-// yields an empty map so the main query still succeeds, but the error
-// is logged so operators can detect silent label disappearance.
+// groups them into a map of URI -> []val. Every URI in the input is
+// present in the result (with an empty slice if no labels match) so the
+// GraphQL `labels` field renders as `[]` instead of `null`. If
+// labelerSrc is non-empty, only labels from that labeler are included.
+// A DB failure is non-fatal and yields empty slices so the main query
+// still succeeds, but the error is logged so operators can detect
+// silent label disappearance.
 func loadLabelsByURI(
 	ctx context.Context,
 	repos *resolver.Repositories,
 	labelerSrc string,
 	records []*repositories.Record,
 ) map[string][]string {
-	result := make(map[string][]string)
+	result := make(map[string][]string, len(records))
+	// Prime every record URI with an empty slice so the caller always
+	// gets a non-nil []string per record.
+	for _, rec := range records {
+		result[rec.URI] = []string{}
+	}
 	if repos.Labels == nil || len(records) == 0 {
 		return result
 	}

@@ -123,12 +123,13 @@ func run() error {
 	}
 	defer svc.db.Close()
 
-	// Set up HTTP router with middleware and basic endpoints
-	r := setupRouter(cfg, svc)
-
-	// Track background services for clean shutdown
+	// Track background services for clean shutdown. Created before the
+	// router so the /stats handler can capture a pointer to it.
 	bg := &backgroundServices{}
 	defer bg.Stop()
+
+	// Set up HTTP router with middleware and basic endpoints
+	r := setupRouter(cfg, svc, bg)
 
 	// Set up OAuth endpoints
 	setupOAuth(r, cfg, svc, bg)
@@ -244,8 +245,10 @@ func populateActivityIfEmpty(ctx context.Context, svc *services) {
 }
 
 // setupRouter creates the chi router with middleware and basic HTTP endpoints
-// (health, stats, root info, XRPC placeholder).
-func setupRouter(cfg *config.Config, svc *services) *chi.Mux {
+// (health, stats, root info, XRPC placeholder). The backgroundServices
+// pointer is captured so the /stats handler can surface per-labeler
+// counters at request time — the slice is populated later in startLabeler.
+func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi.Mux {
 	r := chi.NewRouter()
 
 	// Middleware
@@ -277,7 +280,8 @@ func setupRouter(cfg *config.Config, svc *services) *chi.Mux {
 		})
 	})
 
-	// Stats endpoint
+	// Stats endpoint. Includes per-labeler consumer counters so operators
+	// can inspect labeler ingestion health without attaching a debugger.
 	r.Get("/stats", func(w http.ResponseWriter, req *http.Request) {
 		reqCtx := req.Context()
 
@@ -299,11 +303,26 @@ func setupRouter(cfg *config.Config, svc *services) *chi.Mux {
 			lexiconCount = -1
 		}
 
+		labelers := make([]map[string]any, 0, len(bg.labelerConsumers))
+		for _, c := range bg.labelerConsumers {
+			s := c.Stats()
+			labelers = append(labelers, map[string]any{
+				"did":                c.LabelerDID(),
+				"events_received":    s.EventsReceived,
+				"labels_received":    s.LabelsReceived,
+				"labels_persisted":   s.LabelsPersisted,
+				"labels_rejected":    s.LabelsRejected,
+				"reconnect_attempts": s.ReconnectAttempts,
+				"last_seq":           s.LastSeq,
+			})
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"records":  recordCount,
 			"actors":   actorCount,
 			"lexicons": lexiconCount,
+			"labelers": labelers,
 			"time":     time.Now().UTC().Format(time.RFC3339),
 		})
 	})

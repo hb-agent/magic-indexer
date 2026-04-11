@@ -43,53 +43,38 @@ func NewLabelsRepository(db database.Executor) *LabelsRepository {
 //
 // If cts is non-nil, it is stored as the label's canonical timestamp.
 // If cts is nil (e.g. labels authored locally via the admin API) the
-// database default (datetime('now') / NOW()) is used. Callers ingesting
-// labels from a remote labeler should pass the original cts from the
-// wire so that ordering and audit semantics match the labeler's
-// perspective, not the AppView's local clock.
+// current time is used. In either case the value is always written as
+// a UTC RFC3339Nano string so that text ordering across SQLite and
+// Postgres is consistent — avoiding the lexicographic mismatch that
+// would occur if we left some rows with the DB default (which renders
+// as "YYYY-MM-DD HH:MM:SS" on SQLite) and others with RFC3339.
 func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *string, val string, cts, exp *time.Time) (*Label, error) {
 	var sqlStr string
 	var expStr *string
 	if exp != nil {
-		s := exp.Format(time.RFC3339)
+		s := exp.Format(time.RFC3339Nano)
 		expStr = &s
 	}
-	var ctsStr *string
-	if cts != nil {
-		s := cts.UTC().Format(time.RFC3339Nano)
-		ctsStr = &s
+	effectiveCts := cts
+	if effectiveCts == nil {
+		now := time.Now().UTC()
+		effectiveCts = &now
 	}
+	ctsStr := effectiveCts.UTC().Format(time.RFC3339Nano)
 
-	// Placeholder layout depends on whether cts is provided.
-	// When cts is nil, the column is omitted so the DB default applies.
-	if ctsStr != nil {
-		switch r.db.Dialect() {
-		case database.PostgreSQL:
-			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, cts, exp)
-				VALUES (%s, %s, %s, %s, %s, %s)
-				RETURNING id, src, uri, cid, val, neg, cts, exp`,
-				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-				r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
-		default:
-			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, cts, exp)
-				VALUES (%s, %s, %s, %s, %s, %s)`,
-				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-				r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
-		}
-	} else {
-		switch r.db.Dialect() {
-		case database.PostgreSQL:
-			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, exp)
-				VALUES (%s, %s, %s, %s, %s)
-				RETURNING id, src, uri, cid, val, neg, cts, exp`,
-				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-				r.db.Placeholder(4), r.db.Placeholder(5))
-		default:
-			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, exp)
-				VALUES (%s, %s, %s, %s, %s)`,
-				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-				r.db.Placeholder(4), r.db.Placeholder(5))
-		}
+	switch r.db.Dialect() {
+	case database.PostgreSQL:
+		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, cts, exp)
+			VALUES (%s, %s, %s, %s, %s, %s)
+			ON CONFLICT DO NOTHING
+			RETURNING id, src, uri, cid, val, neg, cts, exp`,
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
+			r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
+	default:
+		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, cts, exp)
+			VALUES (%s, %s, %s, %s, %s, %s)`,
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
+			r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
 	}
 
 	params := []database.Value{
@@ -97,11 +82,9 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 		database.Text(uri),
 		database.NullableText(cid),
 		database.Text(val),
+		database.Text(ctsStr),
+		database.NullableText(expStr),
 	}
-	if ctsStr != nil {
-		params = append(params, database.NullableText(ctsStr))
-	}
-	params = append(params, database.NullableText(expStr))
 
 	if r.db.Dialect() == database.PostgreSQL {
 		var label Label
@@ -114,12 +97,15 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 			return nil, err
 		}
 		label.Neg = neg != 0
-		label.Cts, _ = time.Parse(time.RFC3339, retCtsStr)
+		label.Cts, _ = time.Parse(time.RFC3339Nano, retCtsStr)
+		if label.Cts.IsZero() {
+			label.Cts, _ = time.Parse(time.RFC3339, retCtsStr)
+		}
 		if cidNull.Valid {
 			label.CID = &cidNull.String
 		}
 		if expNull.Valid {
-			t, _ := time.Parse(time.RFC3339, expNull.String)
+			t, _ := time.Parse(time.RFC3339Nano, expNull.String)
 			label.Exp = &t
 		}
 		return &label, nil
@@ -136,51 +122,36 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 
 // InsertNegation creates a negation (retraction) label.
 //
-// If cts is non-nil, it is stored as the negation's canonical timestamp
-// so that ordering preserves the labeler's perspective. Callers ingesting
-// from a remote labeler should pass the wire cts; callers creating local
-// negations via the admin API may pass nil to use the DB default.
+// Like Insert, cts is always persisted in UTC RFC3339Nano format so that
+// text ordering is consistent across dialects. If cts is nil the current
+// time is used.
 func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val string, cts *time.Time) (*Label, error) {
-	var ctsStr *string
-	if cts != nil {
-		s := cts.UTC().Format(time.RFC3339Nano)
-		ctsStr = &s
+	effectiveCts := cts
+	if effectiveCts == nil {
+		now := time.Now().UTC()
+		effectiveCts = &now
 	}
+	ctsStr := effectiveCts.UTC().Format(time.RFC3339Nano)
 
 	var sqlStr string
-	if ctsStr != nil {
-		switch r.db.Dialect() {
-		case database.PostgreSQL:
-			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
-				VALUES (%s, %s, %s, 1, %s)
-				RETURNING id, src, uri, cid, val, neg, cts, exp`,
-				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
-		default:
-			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
-				VALUES (%s, %s, %s, 1, %s)`,
-				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
-		}
-	} else {
-		switch r.db.Dialect() {
-		case database.PostgreSQL:
-			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg)
-				VALUES (%s, %s, %s, 1)
-				RETURNING id, src, uri, cid, val, neg, cts, exp`,
-				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
-		default:
-			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg)
-				VALUES (%s, %s, %s, 1)`,
-				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
-		}
+	switch r.db.Dialect() {
+	case database.PostgreSQL:
+		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
+			VALUES (%s, %s, %s, 1, %s)
+			ON CONFLICT DO NOTHING
+			RETURNING id, src, uri, cid, val, neg, cts, exp`,
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
+	default:
+		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
+			VALUES (%s, %s, %s, 1, %s)`,
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
 	}
 
 	params := []database.Value{
 		database.Text(src),
 		database.Text(uri),
 		database.Text(val),
-	}
-	if ctsStr != nil {
-		params = append(params, database.NullableText(ctsStr))
+		database.Text(ctsStr),
 	}
 
 	if r.db.Dialect() == database.PostgreSQL {
@@ -194,7 +165,10 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 			return nil, err
 		}
 		label.Neg = neg != 0
-		label.Cts, _ = time.Parse(time.RFC3339, retCtsStr)
+		label.Cts, _ = time.Parse(time.RFC3339Nano, retCtsStr)
+		if label.Cts.IsZero() {
+			label.Cts, _ = time.Parse(time.RFC3339, retCtsStr)
+		}
 		if cidNull.Valid {
 			label.CID = &cidNull.String
 		}
@@ -252,13 +226,17 @@ func (r *LabelsRepository) GetByURIs(ctx context.Context, uris []string) ([]Labe
 	}
 
 	placeholders := r.db.Placeholders(len(uris), 1)
-	// Get only labels that haven't been negated
+	// Get only labels that haven't been negated. The negation check uses
+	// cts (the labeler's canonical timestamp) rather than the local
+	// auto-increment id, so a backfilled negation with an earlier wire
+	// cts correctly retracts an already-streamed assertion.
 	sqlStr := fmt.Sprintf(`SELECT l.id, l.src, l.uri, l.cid, l.val, l.neg, l.cts, l.exp
 		FROM label l
 		WHERE l.uri IN (%s) AND l.neg = 0
 		AND NOT EXISTS (
-			SELECT 1 FROM label neg 
-			WHERE neg.uri = l.uri AND neg.val = l.val AND neg.neg = 1 AND neg.id > l.id
+			SELECT 1 FROM label neg
+			WHERE neg.uri = l.uri AND neg.src = l.src AND neg.val = l.val
+			  AND neg.neg = 1 AND neg.cts >= l.cts
 		)
 		ORDER BY l.cts DESC`, placeholders)
 
@@ -343,11 +321,12 @@ func (r *LabelsRepository) GetPaginated(ctx context.Context, uriFilter, valFilte
 
 // HasTakedown checks if a URI has an active takedown label.
 func (r *LabelsRepository) HasTakedown(ctx context.Context, uri string) (bool, error) {
-	sqlStr := fmt.Sprintf(`SELECT COUNT(*) FROM label 
+	sqlStr := fmt.Sprintf(`SELECT COUNT(*) FROM label
 		WHERE uri = %s AND val = '!takedown' AND neg = 0
 		AND NOT EXISTS (
-			SELECT 1 FROM label neg 
-			WHERE neg.uri = label.uri AND neg.val = '!takedown' AND neg.neg = 1 AND neg.id > label.id
+			SELECT 1 FROM label neg
+			WHERE neg.uri = label.uri AND neg.src = label.src AND neg.val = '!takedown'
+			  AND neg.neg = 1 AND neg.cts >= label.cts
 		)`, r.db.Placeholder(1))
 
 	var count int64
@@ -368,8 +347,9 @@ func (r *LabelsRepository) GetTakedownURIs(ctx context.Context, uris []string) (
 	sqlStr := fmt.Sprintf(`SELECT DISTINCT l.uri FROM label l
 		WHERE l.uri IN (%s) AND l.val = '!takedown' AND l.neg = 0
 		AND NOT EXISTS (
-			SELECT 1 FROM label neg 
-			WHERE neg.uri = l.uri AND neg.val = '!takedown' AND neg.neg = 1 AND neg.id > l.id
+			SELECT 1 FROM label neg
+			WHERE neg.uri = l.uri AND neg.src = l.src AND neg.val = '!takedown'
+			  AND neg.neg = 1 AND neg.cts >= l.cts
 		)`, placeholders)
 
 	params := make([]any, len(uris))
