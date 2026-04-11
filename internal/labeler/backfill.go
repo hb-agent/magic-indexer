@@ -131,12 +131,13 @@ func (b *BackfillClient) endpoint() (string, error) {
 		return "", fmt.Errorf("PDSHost is empty")
 	}
 	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
-		// Default to https for bare hosts.
-		if strings.HasPrefix(raw, "ws://") {
+		// Default to https for bare hosts; normalise ws(s) to http(s).
+		switch {
+		case strings.HasPrefix(raw, "ws://"):
 			raw = "http://" + strings.TrimPrefix(raw, "ws://")
-		} else if strings.HasPrefix(raw, "wss://") {
+		case strings.HasPrefix(raw, "wss://"):
 			raw = "https://" + strings.TrimPrefix(raw, "wss://")
-		} else {
+		default:
 			raw = "https://" + raw
 		}
 	}

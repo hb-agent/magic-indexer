@@ -67,7 +67,7 @@ func TestRecordsRepository_LabelFilter_Include(t *testing.T) {
 		ctx, "social.cert.hypercert", 10, "", "",
 		repositories.LabelFilter{
 			LabelerSrcs: []string{"did:plc:labelerz"},
-			Include:    []string{"high-quality"},
+			Include:     []string{"high-quality"},
 		},
 	)
 	if err != nil {
@@ -90,7 +90,7 @@ func TestRecordsRepository_LabelFilter_Exclude(t *testing.T) {
 		ctx, "social.cert.hypercert", 10, "", "",
 		repositories.LabelFilter{
 			LabelerSrcs: []string{"did:plc:labelerz"},
-			Exclude:    []string{"draft"},
+			Exclude:     []string{"draft"},
 		},
 	)
 	if err != nil {
@@ -144,7 +144,7 @@ func TestRecordsRepository_LabelFilter_HonorsNegation(t *testing.T) {
 		ctx, "social.cert.hypercert", 10, "", "",
 		repositories.LabelFilter{
 			LabelerSrcs: []string{"did:plc:labelerz"},
-			Include:    []string{"high-quality"},
+			Include:     []string{"high-quality"},
 		},
 	)
 	if err != nil {

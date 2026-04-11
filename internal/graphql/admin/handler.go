@@ -25,7 +25,7 @@ type Handler struct {
 // NewHandler creates a new admin GraphQL handler.
 // When adminAPIKey is non-empty, the X-User-DID header is trusted only if the
 // request also carries a matching Authorization: Bearer <key> header.
-func NewHandler(repos *Repositories, middleware *oauth.AuthMiddleware, configRepo *repositories.ConfigRepository, domainDID string, adminAPIKey string) (*Handler, error) {
+func NewHandler(repos *Repositories, middleware *oauth.AuthMiddleware, configRepo *repositories.ConfigRepository, domainDID, adminAPIKey string) (*Handler, error) {
 	resolver := NewResolver(repos, domainDID)
 
 	builder := NewSchemaBuilder(resolver)

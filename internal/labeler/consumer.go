@@ -758,4 +758,3 @@ func (c *Consumer) saveCursor(ctx context.Context, cursor int64) error {
 func (c *Consumer) clearCursor(ctx context.Context) error {
 	return c.cfgRepo.Delete(ctx, c.cursorKey())
 }
-

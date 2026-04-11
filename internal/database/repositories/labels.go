@@ -170,7 +170,7 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 // the given (src, uri, val, cid) tuple. Used to resolve the "row already
 // existed" branch of ON CONFLICT DO NOTHING so Insert always returns a
 // populated Label for callers.
-func (r *LabelsRepository) findExistingAssertion(ctx context.Context, src, uri string, val string, cid *string) (*Label, error) {
+func (r *LabelsRepository) findExistingAssertion(ctx context.Context, src, uri, val string, cid *string) (*Label, error) {
 	negFalse, _ := r.negLiterals()
 	var sqlStr string
 	var params []database.Value
