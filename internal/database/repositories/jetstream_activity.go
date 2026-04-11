@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/GainForest/hypergoat/internal/database"
@@ -58,6 +59,16 @@ func (r *JetstreamActivityRepository) LogActivityWithStatus(
 ) (int64, error) {
 	var sqlStr string
 	var timestampStr string
+
+	// event_json is a JSONB NOT NULL column on Postgres. The Jetstream
+	// consumer passes string(commit.Record) which is an empty string
+	// for delete operations (no record body). Postgres rejects empty
+	// strings as invalid JSONB; SQLite stores them silently as TEXT.
+	// Normalise here so both dialects accept the row: replace empty
+	// or whitespace-only payloads with the JSON literal `null`.
+	if strings.TrimSpace(eventJSON) == "" {
+		eventJSON = "null"
+	}
 
 	// Always store in UTC for consistency
 	utcTime := timestamp.UTC()
