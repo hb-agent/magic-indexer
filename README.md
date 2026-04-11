@@ -16,11 +16,17 @@ Hyperindex (hi) connects to the AT Protocol network, indexes records matching yo
 # Clone and run
 git clone https://github.com/GainForest/hypergoat.git
 cd hypergoat
-cp .env.example .env
+make setup          # creates .env with a freshly generated SECRET_KEY_BASE
 go run ./cmd/hypergoat
 ```
 
 Open http://localhost:8080/graphiql/admin to access the admin interface.
+
+`make setup` calls `scripts/setup-env.sh`, which refuses to overwrite
+an existing `.env` and fails fast if `openssl` isn't installed. For a
+production deployment, see [SECURITY.md](SECURITY.md) — it spells out
+the required environment variables, the rate-limiting expectations
+at the reverse proxy, and the HTTPS / HSTS / admin-auth contract.
 
 ## Usage
 
@@ -96,16 +102,25 @@ query {
 
 | Endpoint | Description |
 |----------|-------------|
-| `/graphql` | Public GraphQL API |
-| `/graphql/ws` | GraphQL subscriptions (WebSocket) |
-| `/admin/graphql` | Admin GraphQL API |
-| `/graphiql` | GraphQL playground (public API) |
-| `/graphiql/admin` | GraphQL playground (admin API) |
-| `/health` | Health check |
-| `/stats` | Server statistics |
+| `/graphql` | Public GraphQL API (POST body capped at 1 MiB, query depth ≤ 15) |
+| `/graphql/ws` | GraphQL subscriptions (WebSocket, max 64 subs/client) |
+| `/admin/graphql` | Admin GraphQL API (POST-only, bearer token or OAuth required) |
+| `/admin/labeler/reset?did=...` | Clear subscription + backfill cursors for one labeler (POST, bearer) |
+| `/admin/labeler/pause?did=...` | Stop a single labeler consumer without restart (POST, bearer) |
+| `/admin/label-chain?uri=...` | Diagnostic: every label on a URI (GET, bearer) |
+| `/graphiql` | GraphiQL playground (public API, CSP-restricted) |
+| `/graphiql/admin` | GraphiQL playground (admin API) |
+| `/health` | Health check (pings the DB, 503 on degraded) |
+| `/stats` | Server + consumer statistics |
+| `/metrics` | Prometheus text exposition format |
+| `/.well-known/oauth-protected-resource` | OAuth 2.0 protected-resource metadata |
 | `/.well-known/oauth-authorization-server` | OAuth 2.0 server metadata |
+| `/oauth-client-metadata.json` | OAuth 2.0 client metadata |
 | `/oauth/authorize` | OAuth authorization endpoint |
 | `/oauth/token` | OAuth token endpoint |
+| `/oauth/register` | OAuth client registration endpoint |
+| `/oauth/par` | OAuth Pushed Authorization Request endpoint |
+| `/oauth/dpop/nonce` | DPoP nonce rotation endpoint |
 | `/oauth/jwks` | JSON Web Key Set |
 
 ## Configuration
@@ -145,7 +160,70 @@ SECRET_KEY_BASE=your-secret-key-at-least-64-characters-long-generate-with-openss
 
 # Backfill
 BACKFILL_RELAY_URL=https://relay1.us-west.bsky.network
+
+# Labeler subscriptions (optional). Comma-separated DIDs.
+# The server connects to each labeler's subscribeLabels endpoint,
+# does a one-time queryLabels backfill on first start, then
+# streams live. Cursors are persisted per-labeler in the config
+# table so restarts resume cleanly. The first DID in this list
+# is the default used by label-filtered GraphQL queries; clients
+# can override with `labelerDids`.
+# LABELER_DIDS=did:plc:5rw6of6lry7ihmyhm323ycwn
+# LABELER_DRY_RUN=false
+# LABELER_CURSOR_FLUSH_INTERVAL=5
 ```
+
+## Labeler subscriptions
+
+When `LABELER_DIDS` is set, the server resolves each DID to its
+AtprotoLabeler service endpoint (via did:plc / did:web) and runs
+one `labeler.Consumer` per DID. Each consumer:
+
+1. Reads its persisted cursor from the `config` table.
+2. On first start (no cursor), runs a `queryLabels` backfill
+   paginated through the labeler's HTTP endpoint.
+3. Opens a `com.atproto.label.subscribeLabels` websocket and
+   streams labels into the `label` table.
+4. Flushes the cursor every 5 seconds (configurable via
+   `LABELER_CURSOR_FLUSH_INTERVAL`).
+5. Auto-creates `label_definition` rows for every new `(src, val)`
+   pair it sees, scoped by the per-labeler composite primary key
+   added in migration 009.
+6. On websocket drop, reconnects with exponential backoff.
+
+A labeler that emits an `#info` frame with name `OutdatedCursor`
+triggers a cursor clear + re-backfill on the next reconnect.
+
+Each per-labeler consumer is panic-recovered — a bad label from
+one labeler cannot take down the process.
+
+You can inspect a record's full label chain (including negations
+and expired labels) via:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_API_KEY" \
+  "http://localhost:8080/admin/label-chain?uri=at://did:plc:abc/app.bsky.feed.post/xyz"
+```
+
+And query records filtered by labels:
+
+```graphql
+query {
+  records(
+    collection: "app.bsky.feed.post",
+    labels: ["high-quality"],
+    excludeLabels: ["!takedown"],
+    labelerDids: ["did:plc:5rw6of6lry7ihmyhm323ycwn"]
+  ) {
+    edges { node { uri labels } }
+  }
+}
+```
+
+Note: **takedown enforcement is opt-in**. The indexer is intentionally
+labeler-neutral and does not automatically hide takedown-labeled
+records. Clients that want to honour takedowns must pass
+`excludeLabels: ["!takedown"]` explicitly.
 
 ## Docker
 
@@ -176,8 +254,18 @@ The admin API at `/admin/graphql` provides:
 - `backfillActor` - Backfill a specific user
 - `triggerBackfill` - Full network backfill
 - `populateActivity` - Populate activity from existing records
-- `updateSettings` - Update server settings
+- `updateSettings` - Update server settings (URLs validated as https, DIDs validated)
+- `createLabelDefinition` - Add a label definition (bounded: val ≤ 128, description ≤ 1024, src ≤ 512)
+- `createLabel` / `negateLabel` - Apply or retract labels via the admin UI
 - `resetAll` - Clear all data (requires confirmation)
+
+**Auth:**
+Every `/admin/graphql` request must present either a validated
+OAuth user (via Authorization: Bearer <token>) or a valid
+`ADMIN_API_KEY` bearer token together with a validated `X-User-DID`
+header. GET is rejected with 405; only POST is accepted to keep
+mutations out of access logs. Mutation logs redact variable
+**values** — only operation name and variable keys are logged.
 
 ## Architecture
 

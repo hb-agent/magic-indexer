@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GainForest/hypergoat/internal/database/repositories"
+	"github.com/GainForest/hypergoat/internal/metrics"
 	"github.com/GainForest/hypergoat/internal/oauth"
 )
 
@@ -412,6 +413,10 @@ func (c *Consumer) runBackfill(ctx context.Context) error {
 			s.LabelsPersisted += int64(len(labels) - rejected)
 			s.LabelsRejected += int64(rejected)
 		})
+		metrics.RecordLabelReceived(c.config.LabelerDID)
+		if rejected > 0 {
+			metrics.RecordLabelRejected(c.config.LabelerDID, "upsert")
+		}
 
 		if total-lastLogged >= BackfillProgressInterval {
 			slog.Info("Labeler backfill progress",
@@ -491,6 +496,10 @@ func (c *Consumer) handleLabelMessage(ctx context.Context, msg *LabelMessage) {
 		s.EventsReceived++
 		s.LastSeq = msg.Seq
 	})
+	metrics.RecordLabelReceived(c.config.LabelerDID)
+	if rejected > 0 {
+		metrics.RecordLabelRejected(c.config.LabelerDID, "upsert")
+	}
 
 	c.cursorMu.Lock()
 	prev := c.cursor

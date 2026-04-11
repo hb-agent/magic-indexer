@@ -10,6 +10,7 @@ import (
 
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/graphql/subscription"
+	"github.com/GainForest/hypergoat/internal/metrics"
 )
 
 // ConsumerConfig configures the Jetstream consumer.
@@ -298,12 +299,14 @@ func (c *Consumer) processEvents(ctx context.Context) {
 
 		// Process commit events
 		if event.IsCommit() {
+			metrics.RecordJetstreamEvent(event.Commit.Collection, string(event.Commit.Operation))
 			if err := c.handleCommit(ctx, event); err != nil {
 				slog.Warn("Failed to handle commit",
 					"error", err,
 					"did", event.DID,
 					"collection", event.Commit.Collection,
 				)
+				metrics.RecordJetstreamError()
 				c.statsMu.Lock()
 				c.stats.Errors++
 				c.statsMu.Unlock()
@@ -377,6 +380,7 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 			} else {
 				c.stats.RecordsUpdated++
 			}
+			metrics.RecordInserted(commit.Collection)
 		}
 		c.statsMu.Unlock()
 

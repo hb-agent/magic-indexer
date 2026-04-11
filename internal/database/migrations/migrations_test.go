@@ -79,6 +79,63 @@ func TestMigrations_RunIdempotent(t *testing.T) {
 	}
 }
 
+// TestMigrations_UpDownUpRoundTrip asserts that applying every
+// migration, rolling back the last one, and re-applying it leaves
+// the sqlite_master snapshot byte-identical to the original
+// all-applied state. Catches migrations whose DownSQL is lossy or
+// whose UpSQL is subtly non-idempotent.
+func TestMigrations_UpDownUpRoundTrip(t *testing.T) {
+	exec := newTestExecutor(t)
+	ctx := context.Background()
+
+	snapshot := func() map[string]string {
+		t.Helper()
+		rows, err := exec.DB().QueryContext(ctx,
+			"SELECT type, name, COALESCE(sql, '') FROM sqlite_master "+
+				"WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")
+		if err != nil {
+			t.Fatalf("snapshot query: %v", err)
+		}
+		defer rows.Close()
+		out := make(map[string]string)
+		for rows.Next() {
+			var kind, name, sqlStr string
+			if err := rows.Scan(&kind, &name, &sqlStr); err != nil {
+				t.Fatalf("snapshot scan: %v", err)
+			}
+			out[kind+":"+name] = sqlStr
+		}
+		return out
+	}
+
+	if err := migrations.Run(ctx, exec); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	before := snapshot()
+
+	if err := migrations.Rollback(ctx, exec); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if err := migrations.Run(ctx, exec); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	after := snapshot()
+
+	if len(before) != len(after) {
+		t.Errorf("object count changed: before=%d after=%d", len(before), len(after))
+	}
+	for k, v := range before {
+		if after[k] != v {
+			t.Errorf("object %q diverged after round trip\n  before: %s\n  after:  %s", k, v, after[k])
+		}
+	}
+	for k := range after {
+		if _, ok := before[k]; !ok {
+			t.Errorf("object %q appeared only after round trip: %s", k, after[k])
+		}
+	}
+}
+
 func TestMigrations_Rollback(t *testing.T) {
 	exec := newTestExecutor(t)
 	ctx := context.Background()

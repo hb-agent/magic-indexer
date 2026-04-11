@@ -38,6 +38,7 @@ import (
 	"github.com/GainForest/hypergoat/internal/jetstream"
 	"github.com/GainForest/hypergoat/internal/labeler"
 	"github.com/GainForest/hypergoat/internal/lexicon"
+	"github.com/GainForest/hypergoat/internal/metrics"
 	"github.com/GainForest/hypergoat/internal/oauth"
 	"github.com/GainForest/hypergoat/internal/server"
 	"github.com/GainForest/hypergoat/internal/workers"
@@ -308,6 +309,16 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 	// doesn't accidentally pin its own browser into HTTPS.
 	httpsOnly := strings.HasPrefix(cfg.ExternalBaseURL, "https://")
 	r.Use(server.SecurityHeadersMiddleware(httpsOnly))
+	// Prometheus HTTP metrics middleware. Installed after chi's
+	// RequestID / RealIP / Logger / Recoverer / Timeout so it sees
+	// the dispatched route template for labelling.
+	r.Use(metrics.Middleware)
+
+	// Prometheus metrics endpoint. Unauthenticated by design —
+	// metrics contain no PII and every series label is bounded.
+	// Operators that want to gate /metrics should do it at the
+	// reverse proxy (same place they'd gate it for any app).
+	r.Handle("/metrics", metrics.Handler())
 
 	// Health check. Must actually talk to the database so load
 	// balancers stop routing to a degraded instance. We use a 2s

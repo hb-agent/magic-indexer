@@ -162,17 +162,60 @@ internal/
     schema/             # Public schema builder (dynamic from lexicons)
     resolver/           # Public resolvers and context
     query/              # Connection types (Relay spec)
+    depth/              # Pre-execution GraphQL query depth guard
     subscription/       # WebSocket subscriptions (graphql-transport-ws)
     types/              # GraphQL type mapping from lexicons
-  integration/          # Integration tests
+  integration/          # Integration tests (build tag: integration)
   jetstream/            # Real-time AT Protocol event consumer
+  labeler/              # ATProto labeler subscribeLabels + queryLabels client
   lexicon/              # Lexicon parsing, registry, NSID utilities
-  oauth/                # OAuth 2.0 + DPoP + PKCE implementation
-  server/               # HTTP handlers (GraphiQL, OAuth endpoints)
-  workers/              # Background jobs (activity cleanup, backfill state)
+  metrics/              # Prometheus counters + /metrics HTTP handler
+  oauth/                # OAuth 2.0 + DPoP + PKCE + did:plc / did:web resolution
+  server/               # HTTP handlers (GraphiQL with CSP, OAuth endpoints,
+                        # security headers middleware, CORS middleware)
+  workers/              # Background jobs (activity cleanup + orphan janitor,
+                        # backfill state, OAuth cleanup)
 docs/                   # Implementation plan and documentation
+scripts/                # Deployment helpers (setup-env.sh)
 testdata/               # Test fixtures and sample lexicons
 ```
+
+## Labeler subsystem (internal/labeler/)
+
+Mirrors `internal/jetstream/` but speaks the ATProto labeler protocol:
+
+- `client.go` — websocket client for
+  `com.atproto.label.subscribeLabels`. Uses `fxamacker/cbor/v2`
+  for the two-CBOR-object frame format (`#labels`, `#info`,
+  `#error`). `SetReadLimit` bounds frame size. Non-normal close
+  codes are surfaced at Warn; empty-body `#labels` frames are
+  dropped explicitly; `#info` decode failures are elevated to
+  Warn so `OutdatedCursor` signals cannot be silently lost.
+- `backfill.go` — one-time `com.atproto.label.queryLabels`
+  paginated backfill via `hashicorp/go-retryablehttp`.
+- `consumer.go` — lifecycle: load cursor → backfill if needed →
+  connect → stream labels → flush cursor on a ticker. Exponential
+  backoff on reconnect. Panic-recovered at the goroutine boundary
+  in `cmd/hypergoat/main.go` so one labeler cannot take down the
+  process. Logs cursor gaps at Warn.
+
+Label definitions are auto-upserted via
+`INSERT ... ON CONFLICT DO NOTHING` keyed on the composite
+`(src, val)` PK added in migration 009, so concurrent labelers
+cannot race a new `(src, val)` pair.
+
+## Security headers middleware
+
+`internal/server/security_headers.go` emits
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+`Referrer-Policy: no-referrer`, and conditionally
+`Strict-Transport-Security` (only when `EXTERNAL_BASE_URL` is
+https). `/graphiql` sets its own `Content-Security-Policy`
+allowing the unpkg CDN for bootstrap assets; JSON API endpoints
+keep the tighter default.
+
+See [SECURITY.md](SECURITY.md) for the full operator contract
+(rate limiting, required env vars, admin auth shape).
 
 ## Landing the Plane (Session Completion)
 

@@ -1,8 +1,11 @@
-.PHONY: help build run test lint clean dev db-migrate db-rollback docker
+.PHONY: help setup build run test lint clean dev db-migrate db-rollback docker
 
 # Default target
 help:
 	@echo "Hypergoat - Makefile Commands"
+	@echo ""
+	@echo "First-time setup:"
+	@echo "  make setup        - Generate .env with a fresh SECRET_KEY_BASE"
 	@echo ""
 	@echo "Development:"
 	@echo "  make run          - Run the server"
@@ -22,10 +25,16 @@ help:
 	@echo "  make docker-run   - Run with Docker Compose"
 	@echo ""
 
+# First-time setup: create .env from .env.example with a real
+# random SECRET_KEY_BASE filled in. Refuses to overwrite an
+# existing .env.
+setup:
+	@./scripts/setup-env.sh
+
 # Build the binary
 build:
 	@echo "Building hypergoat..."
-	@go build -o bin/hypergoat ./cmd/hypergoat
+	@go build -trimpath -buildvcs=false -o bin/hypergoat ./cmd/hypergoat
 
 # Run the server
 run: build
