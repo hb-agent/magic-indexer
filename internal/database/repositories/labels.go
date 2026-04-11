@@ -40,6 +40,39 @@ func NewLabelsRepository(db database.Executor) *LabelsRepository {
 	return &LabelsRepository{db: db}
 }
 
+// negLiterals returns the dialect-correct string literals for the false
+// and true values of the `neg` column. SQLite stores neg as INTEGER so
+// "0"/"1" work, while Postgres defines it as BOOLEAN and requires
+// "false"/"true" (comparisons against integers raise a type error).
+func (r *LabelsRepository) negLiterals() (negFalse, negTrue string) {
+	if r.db.Dialect() == database.PostgreSQL {
+		return "false", "true"
+	}
+	return "0", "1"
+}
+
+// parseStoredTime parses a timestamp string that may have been written
+// by this code (UTC RFC3339Nano), by Postgres' TIMESTAMPTZ serializer
+// (RFC3339 with offset, no fractional seconds), or by SQLite's
+// datetime('now') default ("YYYY-MM-DD HH:MM:SS"). Returns the zero
+// time on unrecognized input; callers fall back to defaults via
+// time.IsZero() if needed.
+func parseStoredTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
+		return t
+	}
+	return time.Time{}
+}
+
 // Insert creates a new label.
 //
 // If cts is non-nil, it is stored as the label's canonical timestamp.
@@ -108,15 +141,12 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 			return nil, err
 		}
 		label.Neg = neg != 0
-		label.Cts, _ = time.Parse(time.RFC3339Nano, retCtsStr)
-		if label.Cts.IsZero() {
-			label.Cts, _ = time.Parse(time.RFC3339, retCtsStr)
-		}
+		label.Cts = parseStoredTime(retCtsStr)
 		if cidNull.Valid {
 			label.CID = &cidNull.String
 		}
 		if expNull.Valid {
-			t, _ := time.Parse(time.RFC3339Nano, expNull.String)
+			t := parseStoredTime(expNull.String)
 			label.Exp = &t
 		}
 		return &label, nil
@@ -141,19 +171,20 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 // existed" branch of ON CONFLICT DO NOTHING so Insert always returns a
 // populated Label for callers.
 func (r *LabelsRepository) findExistingAssertion(ctx context.Context, src, uri string, val string, cid *string) (*Label, error) {
+	negFalse, _ := r.negLiterals()
 	var sqlStr string
 	var params []database.Value
 	if cid == nil {
 		sqlStr = fmt.Sprintf(`SELECT id, src, uri, cid, val, neg, cts, exp FROM label
-			WHERE src = %s AND uri = %s AND val = %s AND cid IS NULL AND neg = 0
+			WHERE src = %s AND uri = %s AND val = %s AND cid IS NULL AND neg = %s
 			ORDER BY id DESC LIMIT 1`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), negFalse)
 		params = []database.Value{database.Text(src), database.Text(uri), database.Text(val)}
 	} else {
 		sqlStr = fmt.Sprintf(`SELECT id, src, uri, cid, val, neg, cts, exp FROM label
-			WHERE src = %s AND uri = %s AND val = %s AND cid = %s AND neg = 0
+			WHERE src = %s AND uri = %s AND val = %s AND cid = %s AND neg = %s
 			ORDER BY id DESC LIMIT 1`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), negFalse)
 		params = []database.Value{database.Text(src), database.Text(uri), database.Text(val), database.Text(*cid)}
 	}
 
@@ -166,21 +197,12 @@ func (r *LabelsRepository) findExistingAssertion(ctx context.Context, src, uri s
 		return nil, err
 	}
 	label.Neg = neg != 0
-	label.Cts, _ = time.Parse(time.RFC3339Nano, retCtsStr)
-	if label.Cts.IsZero() {
-		label.Cts, _ = time.Parse(time.RFC3339, retCtsStr)
-		if label.Cts.IsZero() {
-			label.Cts, _ = time.Parse("2006-01-02 15:04:05", retCtsStr)
-		}
-	}
+	label.Cts = parseStoredTime(retCtsStr)
 	if cidNull.Valid {
 		label.CID = &cidNull.String
 	}
 	if expNull.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, expNull.String)
-		if t.IsZero() {
-			t, _ = time.Parse(time.RFC3339, expNull.String)
-		}
+		t := parseStoredTime(expNull.String)
 		label.Exp = &t
 	}
 	return &label, nil
@@ -235,13 +257,11 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 			return nil, err
 		}
 		label.Neg = neg != 0
-		label.Cts, _ = time.Parse(time.RFC3339Nano, retCtsStr)
-		if label.Cts.IsZero() {
-			label.Cts, _ = time.Parse(time.RFC3339, retCtsStr)
-		}
+		label.Cts = parseStoredTime(retCtsStr)
 		if cidNull.Valid {
 			label.CID = &cidNull.String
 		}
+		_ = expNull // InsertNegation does not set exp
 		return &label, nil
 	}
 
@@ -261,10 +281,11 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 // (src, uri, val) tuple. Used to resolve the ON CONFLICT DO NOTHING
 // branch of InsertNegation.
 func (r *LabelsRepository) findExistingNegation(ctx context.Context, src, uri, val string) (*Label, error) {
+	_, negTrue := r.negLiterals()
 	sqlStr := fmt.Sprintf(`SELECT id, src, uri, cid, val, neg, cts, exp FROM label
-		WHERE src = %s AND uri = %s AND val = %s AND neg = 1
+		WHERE src = %s AND uri = %s AND val = %s AND neg = %s
 		ORDER BY id DESC LIMIT 1`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), negTrue)
 	params := []database.Value{database.Text(src), database.Text(uri), database.Text(val)}
 
 	var label Label
@@ -276,16 +297,11 @@ func (r *LabelsRepository) findExistingNegation(ctx context.Context, src, uri, v
 		return nil, err
 	}
 	label.Neg = neg != 0
-	label.Cts, _ = time.Parse(time.RFC3339Nano, retCtsStr)
-	if label.Cts.IsZero() {
-		label.Cts, _ = time.Parse(time.RFC3339, retCtsStr)
-		if label.Cts.IsZero() {
-			label.Cts, _ = time.Parse("2006-01-02 15:04:05", retCtsStr)
-		}
-	}
+	label.Cts = parseStoredTime(retCtsStr)
 	if cidNull.Valid {
 		label.CID = &cidNull.String
 	}
+	_ = expNull
 	return &label, nil
 }
 
@@ -306,18 +322,12 @@ func (r *LabelsRepository) GetByID(ctx context.Context, id int64) (*Label, error
 	}
 
 	label.Neg = neg != 0
-	label.Cts, _ = time.Parse(time.RFC3339, ctsStr)
-	if label.Cts.IsZero() {
-		label.Cts, _ = time.Parse("2006-01-02 15:04:05", ctsStr)
-	}
+	label.Cts = parseStoredTime(ctsStr)
 	if cidNull.Valid {
 		label.CID = &cidNull.String
 	}
 	if expNull.Valid {
-		t, _ := time.Parse(time.RFC3339, expNull.String)
-		if t.IsZero() {
-			t, _ = time.Parse("2006-01-02 15:04:05", expNull.String)
-		}
+		t := parseStoredTime(expNull.String)
 		label.Exp = &t
 	}
 
@@ -331,19 +341,20 @@ func (r *LabelsRepository) GetByURIs(ctx context.Context, uris []string) ([]Labe
 	}
 
 	placeholders := r.db.Placeholders(len(uris), 1)
+	negFalse, negTrue := r.negLiterals()
 	// Get only labels that haven't been negated. The negation check uses
 	// cts (the labeler's canonical timestamp) rather than the local
 	// auto-increment id, so a backfilled negation with an earlier wire
 	// cts correctly retracts an already-streamed assertion.
 	sqlStr := fmt.Sprintf(`SELECT l.id, l.src, l.uri, l.cid, l.val, l.neg, l.cts, l.exp
 		FROM label l
-		WHERE l.uri IN (%s) AND l.neg = 0
+		WHERE l.uri IN (%s) AND l.neg = %s
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg
 			WHERE neg.uri = l.uri AND neg.src = l.src AND neg.val = l.val
-			  AND neg.neg = 1 AND neg.cts >= l.cts
+			  AND neg.neg = %s AND neg.cts >= l.cts
 		)
-		ORDER BY l.cts DESC`, placeholders)
+		ORDER BY l.cts DESC`, placeholders, negFalse, negTrue)
 
 	params := make([]any, len(uris))
 	for i, uri := range uris {
@@ -426,13 +437,14 @@ func (r *LabelsRepository) GetPaginated(ctx context.Context, uriFilter, valFilte
 
 // HasTakedown checks if a URI has an active takedown label.
 func (r *LabelsRepository) HasTakedown(ctx context.Context, uri string) (bool, error) {
+	negFalse, negTrue := r.negLiterals()
 	sqlStr := fmt.Sprintf(`SELECT COUNT(*) FROM label
-		WHERE uri = %s AND val = '!takedown' AND neg = 0
+		WHERE uri = %s AND val = '!takedown' AND neg = %s
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg
 			WHERE neg.uri = label.uri AND neg.src = label.src AND neg.val = '!takedown'
-			  AND neg.neg = 1 AND neg.cts >= label.cts
-		)`, r.db.Placeholder(1))
+			  AND neg.neg = %s AND neg.cts >= label.cts
+		)`, r.db.Placeholder(1), negFalse, negTrue)
 
 	var count int64
 	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(uri)}, &count)
@@ -449,13 +461,14 @@ func (r *LabelsRepository) GetTakedownURIs(ctx context.Context, uris []string) (
 	}
 
 	placeholders := r.db.Placeholders(len(uris), 1)
+	negFalse, negTrue := r.negLiterals()
 	sqlStr := fmt.Sprintf(`SELECT DISTINCT l.uri FROM label l
-		WHERE l.uri IN (%s) AND l.val = '!takedown' AND l.neg = 0
+		WHERE l.uri IN (%s) AND l.val = '!takedown' AND l.neg = %s
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg
 			WHERE neg.uri = l.uri AND neg.src = l.src AND neg.val = '!takedown'
-			  AND neg.neg = 1 AND neg.cts >= l.cts
-		)`, placeholders)
+			  AND neg.neg = %s AND neg.cts >= l.cts
+		)`, placeholders, negFalse, negTrue)
 
 	params := make([]any, len(uris))
 	for i, uri := range uris {
@@ -505,18 +518,12 @@ func scanLabels(rows *sql.Rows) ([]Label, error) {
 		}
 
 		label.Neg = neg != 0
-		label.Cts, _ = time.Parse(time.RFC3339, ctsStr)
-		if label.Cts.IsZero() {
-			label.Cts, _ = time.Parse("2006-01-02 15:04:05", ctsStr)
-		}
+		label.Cts = parseStoredTime(ctsStr)
 		if cidNull.Valid {
 			label.CID = &cidNull.String
 		}
 		if expNull.Valid {
-			t, _ := time.Parse(time.RFC3339, expNull.String)
-			if t.IsZero() {
-				t, _ = time.Parse("2006-01-02 15:04:05", expNull.String)
-			}
+			t := parseStoredTime(expNull.String)
 			label.Exp = &t
 		}
 		labels = append(labels, label)

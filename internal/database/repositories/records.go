@@ -372,6 +372,12 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 		paramIdx++
 		return s
 	}
+	// Postgres stores neg as BOOLEAN; SQLite as INTEGER. Use
+	// dialect-correct literals so the query plans correctly on both.
+	negFalse, negTrue := "0", "1"
+	if r.db.Dialect() == database.PostgreSQL {
+		negFalse, negTrue = "false", "true"
+	}
 
 	// collection = ?
 	whereClauses = append(whereClauses, fmt.Sprintf("r.collection = %s", ph()))
@@ -401,17 +407,17 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 			SELECT 1 FROM label l
 			WHERE l.uri = r.uri
 			  AND l.src = %s
-			  AND l.neg = 0
+			  AND l.neg = %s
 			  AND l.val IN (%s)
 			  AND NOT EXISTS (
 			    SELECT 1 FROM label neg
 			    WHERE neg.uri = l.uri
 			      AND neg.src = l.src
 			      AND neg.val = l.val
-			      AND neg.neg = 1
+			      AND neg.neg = %s
 			      AND neg.cts >= l.cts
 			  )
-		)`, srcPh, strings.Join(valPhs, ", "))
+		)`, srcPh, negFalse, strings.Join(valPhs, ", "), negTrue)
 		whereClauses = append(whereClauses, sub)
 	}
 
@@ -429,17 +435,17 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 			SELECT 1 FROM label l
 			WHERE l.uri = r.uri
 			  AND l.src = %s
-			  AND l.neg = 0
+			  AND l.neg = %s
 			  AND l.val IN (%s)
 			  AND NOT EXISTS (
 			    SELECT 1 FROM label neg
 			    WHERE neg.uri = l.uri
 			      AND neg.src = l.src
 			      AND neg.val = l.val
-			      AND neg.neg = 1
+			      AND neg.neg = %s
 			      AND neg.cts >= l.cts
 			  )
-		)`, srcPh, strings.Join(valPhs, ", "))
+		)`, srcPh, negFalse, strings.Join(valPhs, ", "), negTrue)
 		whereClauses = append(whereClauses, sub)
 	}
 
