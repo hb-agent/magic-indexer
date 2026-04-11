@@ -58,6 +58,9 @@ type Config struct {
 
 	// PLC Directory
 	PLCDirectoryURL string // PLC directory URL for DID resolution
+
+	// Labelers
+	LabelerDIDs string // Comma-separated labeler DIDs to subscribe to (optional)
 }
 
 // Load reads configuration from environment variables.
@@ -110,6 +113,9 @@ func Load() (*Config, error) {
 
 		// PLC Directory
 		PLCDirectoryURL: getEnv("PLC_DIRECTORY_URL", ""),
+
+		// Labelers
+		LabelerDIDs: getEnv("LABELER_DIDS", ""),
 	}
 
 	// Generate SecretKeyBase if not provided
@@ -161,6 +167,7 @@ func (c *Config) LogConfig() {
 		"backfill_on_start", c.BackfillOnStart,
 		"trust_proxy_headers", c.TrustProxyHeaders,
 		"allowed_origins", c.AllowedOrigins,
+		"labeler_dids", c.LabelerDIDs,
 	)
 
 	if c.TrustProxyHeaders {

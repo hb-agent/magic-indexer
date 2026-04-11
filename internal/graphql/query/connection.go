@@ -29,7 +29,8 @@ var PageInfoType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
-// ConnectionArgs returns standard Relay connection arguments for forward pagination.
+// ConnectionArgs returns standard Relay connection arguments for forward pagination,
+// plus label-based filtering arguments used by record collection queries.
 func ConnectionArgs() graphql.FieldConfigArgument {
 	return graphql.FieldConfigArgument{
 		"first": &graphql.ArgumentConfig{
@@ -39,6 +40,18 @@ func ConnectionArgs() graphql.FieldConfigArgument {
 		"after": &graphql.ArgumentConfig{
 			Type:        graphql.String,
 			Description: "Cursor to start after (forward pagination)",
+		},
+		"labels": &graphql.ArgumentConfig{
+			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: "Filter to records that have at least one of these active labels from the configured labeler.",
+		},
+		"excludeLabels": &graphql.ArgumentConfig{
+			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: "Exclude records that have any of these active labels from the configured labeler.",
+		},
+		"labelerDid": &graphql.ArgumentConfig{
+			Type:        graphql.String,
+			Description: "DID of the labeler to filter by. Defaults to the server's configured labeler.",
 		},
 	}
 }

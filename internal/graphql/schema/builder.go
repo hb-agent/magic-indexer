@@ -2,6 +2,7 @@
 package schema
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -284,6 +285,10 @@ var genericRecordType = graphql.NewObject(graphql.ObjectConfig{
 			Type:        types.JSONScalar,
 			Description: "The record data as JSON",
 		},
+		"labels": &graphql.Field{
+			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: "Active label values on this record from the configured labeler.",
+		},
 	},
 })
 
@@ -392,7 +397,9 @@ func (b *Builder) buildQueryType() *graphql.Object {
 type nodeBuilder func(rec *repositories.Record, value map[string]interface{}) (interface{}, bool)
 
 // resolveRecordConnection is the shared implementation for paginated record queries.
-// It uses deterministic keyset pagination with a composite (indexed_at, uri) cursor.
+// It uses deterministic keyset pagination with a composite (indexed_at, uri) cursor,
+// and applies optional label-based filtering when the caller supplies `labels` or
+// `excludeLabels` arguments.
 func (b *Builder) resolveRecordConnection(
 	p graphql.ResolveParams,
 	collection string,
@@ -420,8 +427,13 @@ func (b *Builder) resolveRecordConnection(
 		}
 	}
 
+	// Label filter args
+	filter := parseLabelFilter(p.Args, repos.DefaultLabelerDID)
+
 	// Fetch first+1 to determine hasNextPage
-	records, err := repos.Records.GetByCollectionWithKeysetCursor(p.Context, collection, first+1, afterTimestamp, afterURI)
+	records, err := repos.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
+		p.Context, collection, first+1, afterTimestamp, afterURI, filter,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query records: %w", err)
 	}
@@ -431,6 +443,10 @@ func (b *Builder) resolveRecordConnection(
 	if hasNextPage {
 		records = records[:first]
 	}
+
+	// Batch-load active labels for all records on this page so we can
+	// attach a `labels` field to each node in one query instead of N.
+	labelsByURI := loadLabelsByURI(p.Context, repos, filter.LabelerSrc, records)
 
 	// Build edges
 	edges := make([]interface{}, 0, len(records))
@@ -445,6 +461,13 @@ func (b *Builder) resolveRecordConnection(
 		node, ok := buildNode(rec, value)
 		if !ok {
 			continue
+		}
+
+		// Attach the labels list. If the node is a map (both our
+		// collection and generic resolvers return map[string]interface{}),
+		// we can set `labels` directly; otherwise we skip it.
+		if nodeMap, ok := node.(map[string]interface{}); ok {
+			nodeMap["labels"] = labelsByURI[rec.URI]
 		}
 
 		cursor := encodeCursor(rec.IndexedAt.Format("2006-01-02T15:04:05Z"), rec.URI)
@@ -468,6 +491,75 @@ func (b *Builder) resolveRecordConnection(
 			"endCursor":       endCursor,
 		},
 	}, nil
+}
+
+// parseLabelFilter extracts the label-related arguments from a GraphQL
+// field resolver's args map and returns a LabelFilter. It respects the
+// labelerDid arg override, falling back to the server's default labeler.
+func parseLabelFilter(args map[string]interface{}, defaultLabeler string) repositories.LabelFilter {
+	var filter repositories.LabelFilter
+
+	filter.LabelerSrc = defaultLabeler
+	if did, ok := args["labelerDid"].(string); ok && did != "" {
+		filter.LabelerSrc = did
+	}
+
+	if raw, ok := args["labels"].([]interface{}); ok {
+		for _, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				filter.Include = append(filter.Include, s)
+			}
+		}
+	}
+	if raw, ok := args["excludeLabels"].([]interface{}); ok {
+		for _, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				filter.Exclude = append(filter.Exclude, s)
+			}
+		}
+	}
+
+	// If no labeler is configured, clear the filters — there's nothing
+	// meaningful to filter against and the repo method would reject them.
+	if filter.LabelerSrc == "" {
+		filter.Include = nil
+		filter.Exclude = nil
+	}
+	return filter
+}
+
+// loadLabelsByURI batch-loads active labels for a page of records and
+// groups them into a map of URI -> []val. If labelerSrc is non-empty,
+// only labels from that labeler are included. Failure is non-fatal and
+// yields an empty map so the main query still succeeds.
+func loadLabelsByURI(
+	ctx context.Context,
+	repos *resolver.Repositories,
+	labelerSrc string,
+	records []*repositories.Record,
+) map[string][]string {
+	result := make(map[string][]string)
+	if repos.Labels == nil || len(records) == 0 {
+		return result
+	}
+
+	uris := make([]string, 0, len(records))
+	for _, rec := range records {
+		uris = append(uris, rec.URI)
+	}
+
+	labels, err := repos.Labels.GetByURIs(ctx, uris)
+	if err != nil {
+		return result
+	}
+
+	for _, l := range labels {
+		if labelerSrc != "" && l.Src != labelerSrc {
+			continue
+		}
+		result[l.URI] = append(result[l.URI], l.Val)
+	}
+	return result
 }
 
 // createGenericRecordsResolver creates a resolver for the generic records query.
@@ -537,6 +629,10 @@ func (b *Builder) createSingleRecordResolver(lexiconID string) graphql.FieldReso
 		// Add standard record fields
 		data["uri"] = rec.URI
 		data["cid"] = rec.CID
+
+		// Attach labels from the configured labeler (best-effort).
+		labelsByURI := loadLabelsByURI(p.Context, repos, repos.DefaultLabelerDID, []*repositories.Record{rec})
+		data["labels"] = labelsByURI[rec.URI]
 
 		return data, nil
 	}

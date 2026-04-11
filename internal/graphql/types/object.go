@@ -100,6 +100,10 @@ func (b *ObjectBuilder) buildRecordFields(lexiconID string, def *lexicon.RecordD
 			Type:        graphql.NewNonNull(graphql.String),
 			Description: "CID of this record version",
 		},
+		"labels": &graphql.Field{
+			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: "Active label values on this record from the configured labeler.",
+		},
 	}
 
 	// Build required set for quick lookup

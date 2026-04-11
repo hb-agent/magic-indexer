@@ -20,6 +20,12 @@ type Repositories struct {
 	Records  *repositories.RecordsRepository
 	Actors   *repositories.ActorsRepository
 	Lexicons *repositories.LexiconsRepository
+	Labels   *repositories.LabelsRepository
+
+	// DefaultLabelerDID is the labeler whose labels are applied when a
+	// record query uses label filter args without specifying labelerDid.
+	// Empty disables label filtering defaults.
+	DefaultLabelerDID string
 }
 
 // NewRepositories creates a new Repositories from a database executor.
@@ -28,6 +34,7 @@ func NewRepositories(db database.Executor) *Repositories {
 		Records:  repositories.NewRecordsRepository(db),
 		Actors:   repositories.NewActorsRepository(db),
 		Lexicons: repositories.NewLexiconsRepository(db),
+		Labels:   repositories.NewLabelsRepository(db),
 	}
 }
 

@@ -327,6 +327,154 @@ func (r *RecordsRepository) GetByCollectionWithKeysetCursor(ctx context.Context,
 	return scanRecords(rows)
 }
 
+// LabelFilter narrows a record query by labels attached to each record.
+// Empty slices mean "no filter". Include and Exclude can be combined.
+type LabelFilter struct {
+	// LabelerSrc is the DID of the labeler whose labels are considered.
+	// Required when Include or Exclude is non-empty.
+	LabelerSrc string
+	// Include: only records that have at least one of these active labels.
+	Include []string
+	// Exclude: drop records that have any of these active labels.
+	Exclude []string
+}
+
+// IsEmpty reports whether the filter imposes no constraints.
+func (f LabelFilter) IsEmpty() bool {
+	return len(f.Include) == 0 && len(f.Exclude) == 0
+}
+
+// GetByCollectionWithLabelFilterAndKeysetCursor is the label-aware sibling of
+// GetByCollectionWithKeysetCursor. It applies Include/Exclude semantics from
+// the label table while preserving the same composite (indexed_at, uri) keyset
+// ordering. If filter.IsEmpty() it delegates to the existing method.
+func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
+	ctx context.Context,
+	collection string,
+	limit int,
+	afterTimestamp, afterURI string,
+	filter LabelFilter,
+) ([]*Record, error) {
+	if filter.IsEmpty() {
+		return r.GetByCollectionWithKeysetCursor(ctx, collection, limit, afterTimestamp, afterURI)
+	}
+	if filter.LabelerSrc == "" {
+		return nil, fmt.Errorf("LabelFilter requires LabelerSrc when Include or Exclude is set")
+	}
+
+	var (
+		whereClauses []string
+		args         []any
+	)
+	paramIdx := 1
+	ph := func() string {
+		s := r.db.Placeholder(paramIdx)
+		paramIdx++
+		return s
+	}
+
+	// collection = ?
+	whereClauses = append(whereClauses, fmt.Sprintf("r.collection = %s", ph()))
+	args = append(args, collection)
+
+	// keyset cursor
+	if afterTimestamp != "" || afterURI != "" {
+		p1 := ph()
+		p2 := ph()
+		p3 := ph()
+		whereClauses = append(whereClauses,
+			fmt.Sprintf("(r.indexed_at < %s OR (r.indexed_at = %s AND r.uri < %s))", p1, p2, p3))
+		args = append(args, afterTimestamp, afterTimestamp, afterURI)
+	}
+
+	// Include: EXISTS a non-negated label from our labeler with val in (...)
+	if len(filter.Include) > 0 {
+		srcPh := ph()
+		args = append(args, filter.LabelerSrc)
+
+		valPhs := make([]string, len(filter.Include))
+		for i, v := range filter.Include {
+			valPhs[i] = ph()
+			args = append(args, v)
+		}
+		sub := fmt.Sprintf(`EXISTS (
+			SELECT 1 FROM label l
+			WHERE l.uri = r.uri
+			  AND l.src = %s
+			  AND l.neg = 0
+			  AND l.val IN (%s)
+			  AND NOT EXISTS (
+			    SELECT 1 FROM label neg
+			    WHERE neg.uri = l.uri
+			      AND neg.src = l.src
+			      AND neg.val = l.val
+			      AND neg.neg = 1
+			      AND neg.id > l.id
+			  )
+		)`, srcPh, strings.Join(valPhs, ", "))
+		whereClauses = append(whereClauses, sub)
+	}
+
+	// Exclude: NOT EXISTS an active label from our labeler with val in (...)
+	if len(filter.Exclude) > 0 {
+		srcPh := ph()
+		args = append(args, filter.LabelerSrc)
+
+		valPhs := make([]string, len(filter.Exclude))
+		for i, v := range filter.Exclude {
+			valPhs[i] = ph()
+			args = append(args, v)
+		}
+		sub := fmt.Sprintf(`NOT EXISTS (
+			SELECT 1 FROM label l
+			WHERE l.uri = r.uri
+			  AND l.src = %s
+			  AND l.neg = 0
+			  AND l.val IN (%s)
+			  AND NOT EXISTS (
+			    SELECT 1 FROM label neg
+			    WHERE neg.uri = l.uri
+			      AND neg.src = l.src
+			      AND neg.val = l.val
+			      AND neg.neg = 1
+			      AND neg.id > l.id
+			  )
+		)`, srcPh, strings.Join(valPhs, ", "))
+		whereClauses = append(whereClauses, sub)
+	}
+
+	// Build columns with "r." prefix.
+	cols := r.recordColumns()
+	prefixed := make([]string, 0, 8)
+	for _, c := range strings.Split(cols, ", ") {
+		c = strings.TrimSpace(c)
+		// Handle "json::text" and "indexed_at::text" Postgres casts.
+		if idx := strings.Index(c, "::"); idx > 0 {
+			name := c[:idx]
+			cast := c[idx:]
+			prefixed = append(prefixed, "r."+name+cast)
+		} else {
+			prefixed = append(prefixed, "r."+c)
+		}
+	}
+	selectCols := strings.Join(prefixed, ", ")
+
+	sqlStr := fmt.Sprintf(
+		"SELECT %s FROM record r WHERE %s ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
+		selectCols,
+		strings.Join(whereClauses, " AND "),
+		limit,
+	)
+
+	rows, err := r.db.DB().QueryContext(ctx, sqlStr, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanRecords(rows)
+}
+
 // GetByDID retrieves all records for a specific DID.
 func (r *RecordsRepository) GetByDID(ctx context.Context, did string) ([]*Record, error) {
 	sqlStr := fmt.Sprintf("SELECT %s FROM record WHERE did = %s ORDER BY indexed_at DESC",

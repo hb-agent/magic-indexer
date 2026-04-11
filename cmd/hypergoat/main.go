@@ -34,6 +34,7 @@ import (
 	"github.com/GainForest/hypergoat/internal/graphql/resolver"
 	"github.com/GainForest/hypergoat/internal/graphql/subscription"
 	"github.com/GainForest/hypergoat/internal/jetstream"
+	"github.com/GainForest/hypergoat/internal/labeler"
 	"github.com/GainForest/hypergoat/internal/lexicon"
 	"github.com/GainForest/hypergoat/internal/oauth"
 	"github.com/GainForest/hypergoat/internal/server"
@@ -70,6 +71,8 @@ type backgroundServices struct {
 	workersCancel      context.CancelFunc
 	jsConsumer         *jetstream.Consumer
 	jsCancel           context.CancelFunc
+	labelerConsumers   []*labeler.Consumer
+	labelerCancel      context.CancelFunc
 }
 
 // Stop cleanly shuts down all background services.
@@ -85,6 +88,12 @@ func (bg *backgroundServices) Stop() {
 	}
 	if bg.jsCancel != nil {
 		bg.jsCancel()
+	}
+	for _, c := range bg.labelerConsumers {
+		c.Stop()
+	}
+	if bg.labelerCancel != nil {
+		bg.labelerCancel()
 	}
 }
 
@@ -136,6 +145,9 @@ func run() error {
 
 	// Start Jetstream consumer for real-time events
 	startJetstream(cfg, svc, pubsub, collections, adminHandler, bg)
+
+	// Start labeler subscriptions (if any DIDs configured)
+	startLabeler(cfg, svc, bg)
 
 	// Start backfill if configured
 	startBackfill(cfg, svc)
@@ -575,9 +587,11 @@ func setupGraphQL(r *chi.Mux, cfg *config.Config, svc *services, pubsub *subscri
 
 	// Create GraphQL handler
 	repos := &resolver.Repositories{
-		Records:  svc.records,
-		Actors:   svc.actors,
-		Lexicons: svc.lexicons,
+		Records:           svc.records,
+		Actors:            svc.actors,
+		Lexicons:          svc.lexicons,
+		Labels:            svc.labels,
+		DefaultLabelerDID: firstDID(cfg.LabelerDIDs),
 	}
 
 	graphqlHandler, err := hgraphql.NewHandler(registry, repos)
@@ -702,6 +716,47 @@ func startJetstream(
 	}
 }
 
+// startLabeler starts one labeler.Consumer per configured DID, resolving
+// each labeler's PDS via the OAuth DIDResolver (which respects the
+// PLC_DIRECTORY_URL override). Consumers are added to backgroundServices
+// for graceful shutdown.
+func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
+	dids := parseDIDs(cfg.LabelerDIDs)
+	if len(dids) == 0 {
+		slog.Info("Labeler subscriptions disabled (LABELER_DIDS is empty)")
+		return
+	}
+
+	var resolverOpts []oauth.DIDResolverOption
+	if cfg.PLCDirectoryURL != "" {
+		resolverOpts = append(resolverOpts, oauth.WithPLCDirectoryURL(cfg.PLCDirectoryURL))
+	}
+	didResolver := oauth.NewDIDResolver(resolverOpts...)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	bg.labelerCancel = cancel
+
+	for _, did := range dids {
+		consumer := labeler.NewConsumer(
+			labeler.ConsumerConfig{
+				LabelerDID: did,
+			},
+			svc.labels,
+			svc.labelDefinitions,
+			svc.config,
+			didResolver,
+		)
+		bg.labelerConsumers = append(bg.labelerConsumers, consumer)
+
+		go func(did string, c *labeler.Consumer) {
+			slog.Info("Starting labeler subscription", "did", did)
+			if err := c.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Error("Labeler subscription error", "did", did, "error", err)
+			}
+		}(did, consumer)
+	}
+}
+
 // startBackfill runs the initial backfill in the background if BACKFILL_ON_START is set.
 func startBackfill(cfg *config.Config, svc *services) {
 	if !cfg.BackfillOnStart {
@@ -789,6 +844,29 @@ func serve(r *chi.Mux, cfg *config.Config, bg *backgroundServices) error {
 
 	slog.Info("Server stopped gracefully")
 	return nil
+}
+
+// firstDID returns the first non-empty DID from a comma-separated list.
+func firstDID(commaSeparated string) string {
+	for _, s := range strings.Split(commaSeparated, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// parseDIDs splits a comma-separated list of DIDs and trims whitespace.
+func parseDIDs(commaSeparated string) []string {
+	var out []string
+	for _, s := range strings.Split(commaSeparated, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // loadLexiconsFromDir loads all lexicon JSON files from a directory tree.
