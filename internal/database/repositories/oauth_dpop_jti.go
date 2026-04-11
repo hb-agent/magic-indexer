@@ -21,6 +21,9 @@ func NewOAuthDPoPJTIRepository(db database.Executor) *OAuthDPoPJTIRepository {
 }
 
 // Insert creates a new DPoP JTI record (for replay protection).
+// Prefer InsertIfNew for race-safe replay detection — Insert will
+// return a raw unique-constraint error on a concurrent replay
+// attempt instead of the structured (bool, error) contract.
 func (r *OAuthDPoPJTIRepository) Insert(ctx context.Context, jti *oauth.DPoPJTI) error {
 	sqlStr := fmt.Sprintf(`INSERT INTO oauth_dpop_jti (jti, created_at) VALUES (%s, %s)`,
 		r.db.Placeholder(1), r.db.Placeholder(2))
@@ -32,6 +35,34 @@ func (r *OAuthDPoPJTIRepository) Insert(ctx context.Context, jti *oauth.DPoPJTI)
 
 	_, err := r.db.Exec(ctx, sqlStr, params)
 	return err
+}
+
+// InsertIfNew inserts a JTI row and reports whether it was newly
+// created. Two concurrent DPoP proofs with the same jti previously
+// both passed the Exists() pre-check and then collided on Insert —
+// one succeeded, the other got a raw unique-constraint error that
+// wasn't recognised as a replay. This method makes the insert
+// race-free: it relies on the jti primary key + ON CONFLICT to
+// either insert or no-op, and uses RowsAffected to tell the caller
+// which happened.
+func (r *OAuthDPoPJTIRepository) InsertIfNew(ctx context.Context, jti *oauth.DPoPJTI) (bool, error) {
+	sqlStr := fmt.Sprintf(
+		`INSERT INTO oauth_dpop_jti (jti, created_at) VALUES (%s, %s) ON CONFLICT (jti) DO NOTHING`,
+		r.db.Placeholder(1), r.db.Placeholder(2),
+	)
+	params := []database.Value{
+		database.Text(jti.JTI),
+		database.Int(jti.CreatedAt),
+	}
+	res, err := r.db.Exec(ctx, sqlStr, params)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // Get retrieves a DPoP JTI by JTI string.

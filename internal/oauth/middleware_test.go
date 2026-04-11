@@ -28,22 +28,18 @@ type mockJTIStore struct {
 	err  error
 }
 
-func (m *mockJTIStore) Exists(ctx context.Context, jti string) (bool, error) {
+func (m *mockJTIStore) InsertIfNew(ctx context.Context, jti *DPoPJTI) (bool, error) {
 	if m.err != nil {
 		return false, m.err
-	}
-	return m.jtis[jti], nil
-}
-
-func (m *mockJTIStore) Insert(ctx context.Context, jti *DPoPJTI) error {
-	if m.err != nil {
-		return m.err
 	}
 	if m.jtis == nil {
 		m.jtis = make(map[string]bool)
 	}
+	if m.jtis[jti.JTI] {
+		return false, nil
+	}
 	m.jtis[jti.JTI] = true
-	return nil
+	return true, nil
 }
 
 func TestAuthMiddleware_RequireAuth_NoHeader(t *testing.T) {

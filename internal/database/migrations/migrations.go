@@ -145,18 +145,36 @@ func Rollback(ctx context.Context, exec database.Executor) error {
 
 	slog.Info("Rolling back migration", "version", version, "name", migration.Name)
 
-	// Execute rollback SQL
-	if _, err := exec.DB().ExecContext(ctx, migration.DownSQL); err != nil {
+	// Roll back DownSQL and the schema_migrations delete in a
+	// single transaction so a crash in the middle cannot leave the
+	// two out of sync (matching the Run/applyMigrationTx path).
+	tx, err := exec.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin rollback tx for %s: %w", version, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.ExecContext(ctx, migration.DownSQL); err != nil {
 		return fmt.Errorf("failed to rollback migration %s: %w", version, err)
 	}
 
-	// Remove migration record
-	_, err = exec.Exec(ctx,
-		fmt.Sprintf("DELETE FROM schema_migrations WHERE version = %s", exec.Placeholder(1)),
-		[]database.Value{database.Text(version)})
-	if err != nil {
+	deleteSQL := fmt.Sprintf(
+		"DELETE FROM schema_migrations WHERE version = %s",
+		exec.Placeholder(1),
+	)
+	if _, err := tx.ExecContext(ctx, deleteSQL, version); err != nil {
 		return fmt.Errorf("failed to remove migration record: %w", err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit rollback of migration %s: %w", version, err)
+	}
+	committed = true
 
 	slog.Info("Migration rolled back successfully", "version", version)
 	return nil

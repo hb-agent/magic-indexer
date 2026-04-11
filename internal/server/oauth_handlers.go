@@ -952,22 +952,18 @@ func (h *OAuthHandlers) validateDPoP(ctx context.Context, r *http.Request, clien
 		return nil, err
 	}
 
-	// Check JTI for replay
-	used, err := h.dpopJTIs.Exists(ctx, result.JTI)
-	if err != nil {
-		return nil, err
-	}
-	if used {
-		return nil, oauth.ErrDPoPReplay
-	}
-
-	// Record JTI
+	// Race-safe replay check: atomically insert the JTI and bail
+	// out if the row already existed. See OAuthDPoPJTIRepository.
 	jti := &oauth.DPoPJTI{
 		JTI:       result.JTI,
 		CreatedAt: result.IAT,
 	}
-	if err := h.dpopJTIs.Insert(ctx, jti); err != nil {
+	inserted, err := h.dpopJTIs.InsertIfNew(ctx, jti)
+	if err != nil {
 		return nil, err
+	}
+	if !inserted {
+		return nil, oauth.ErrDPoPReplay
 	}
 
 	return &result.JKT, nil
