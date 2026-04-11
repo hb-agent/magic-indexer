@@ -3,10 +3,12 @@ package graphql
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/graphql-go/graphql"
 
+	"github.com/GainForest/hypergoat/internal/graphql/depth"
 	"github.com/GainForest/hypergoat/internal/graphql/resolver"
 	"github.com/GainForest/hypergoat/internal/graphql/schema"
 	"github.com/GainForest/hypergoat/internal/lexicon"
@@ -17,6 +19,12 @@ import (
 // persisted queries are shorter. Anything larger is almost certainly an
 // attempt to exhaust memory via the JSON decoder.
 const maxGraphQLBodyBytes = 1 << 20
+
+// maxGraphQLQueryDepth bounds the nested selection depth a client can
+// request. 15 is deeper than anything the lexicons produce in practice;
+// it exists to reject pathological nesting attempts that fit inside
+// the body cap.
+const maxGraphQLQueryDepth = 15
 
 // Handler handles GraphQL requests.
 type Handler struct {
@@ -57,6 +65,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
+	}
+
+	// Pre-execution depth guard: reject queries nested beyond
+	// maxGraphQLQueryDepth so an attacker cannot burn CPU on
+	// query planning within the body cap.
+	if err := depth.Check(params.Query, maxGraphQLQueryDepth); err != nil {
+		if errors.Is(err, depth.ErrTooDeep) {
+			http.Error(w, "query rejected: nested too deeply", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "query rejected", http.StatusBadRequest)
+		return
 	}
 
 	// Inject repositories into context

@@ -247,6 +247,16 @@ func (doc *DIDDocument) GetLabelerEndpoint() string {
 
 // GetHandle extracts the handle from a DID document's alsoKnownAs field.
 // Returns the first at:// URI stripped of the at:// prefix.
+//
+// SECURITY: the value returned here is *not* verified. A DID document
+// is signed by the DID subject, so the subject can claim any handle
+// they want in alsoKnownAs. Callers that rely on a handle for a
+// *trust* decision (access control, permissioning, impersonation
+// checks) must independently resolve the handle back to the DID via
+// com.atproto.identity.resolveHandle and assert the result matches.
+// Callers that only use the handle for display purposes (e.g.
+// persisting it on an actor row for UI rendering) can use this as-is.
+// The current call sites are display-only.
 func (doc *DIDDocument) GetHandle() string {
 	for _, aka := range doc.AlsoKnownAs {
 		if strings.HasPrefix(aka, "at://") {

@@ -3,6 +3,7 @@ package admin
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -10,8 +11,15 @@ import (
 	"github.com/graphql-go/graphql"
 
 	"github.com/GainForest/hypergoat/internal/database/repositories"
+	"github.com/GainForest/hypergoat/internal/graphql/depth"
 	"github.com/GainForest/hypergoat/internal/oauth"
 )
+
+// maxAdminQueryDepth is the nested selection depth cap for the
+// admin GraphQL surface. Admin queries tend to be slightly richer
+// than public ones so we allow a bit more headroom than the 15
+// applied to the public endpoint.
+const maxAdminQueryDepth = 20
 
 // variableKeys returns a sorted list of the top-level keys of a
 // GraphQL variables map, without any values. Used for logging so
@@ -82,6 +90,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Pre-execution depth guard. See depth.Check docs.
+	if err := depth.Check(params.Query, maxAdminQueryDepth); err != nil {
+		if errors.Is(err, depth.ErrTooDeep) {
+			http.Error(w, "query rejected: nested too deeply", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "query rejected", http.StatusBadRequest)
 		return
 	}
 

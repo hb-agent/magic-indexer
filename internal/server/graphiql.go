@@ -22,6 +22,27 @@ type GraphiQLConfig struct {
 	AdminAuth bool
 }
 
+// graphiqlCSP is the Content-Security-Policy applied to the GraphiQL
+// HTML page. It permits the unpkg CDN (which hosts React, ReactDOM,
+// and GraphiQL itself) plus same-origin connections for the GraphQL
+// endpoint and the subscription WebSocket. 'unsafe-inline' is
+// required by the embedded inline <script> + <style> block the
+// GraphiQL template writes; scoping that inline content to 'self'
+// is as tight as we can get without persisting the bootstrap
+// script to disk.
+//
+// If you host the admin UI behind a strict reverse-proxy CSP, layer
+// yours in front of this one — response-header order is last-write-wins.
+const graphiqlCSP = "default-src 'none'; " +
+	"script-src 'self' 'unsafe-inline' https://unpkg.com; " +
+	"style-src 'self' 'unsafe-inline' https://unpkg.com; " +
+	"img-src 'self' data: https://unpkg.com; " +
+	"font-src 'self' data: https://unpkg.com; " +
+	"connect-src 'self' ws: wss:; " +
+	"frame-ancestors 'none'; " +
+	"base-uri 'none'; " +
+	"form-action 'none'"
+
 // HandleGraphiQL creates an HTTP handler that serves the GraphiQL IDE.
 func HandleGraphiQL(cfg GraphiQLConfig) http.HandlerFunc {
 	// Use CDN-hosted GraphiQL
@@ -34,6 +55,7 @@ func HandleGraphiQL(cfg GraphiQLConfig) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Security-Policy", graphiqlCSP)
 		_, _ = w.Write([]byte(html))
 	}
 }

@@ -18,6 +18,30 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// DPoP validation sentinel errors. Callers can switch on these
+// with errors.Is to distinguish (for example) a missing proof
+// from a signature failure from a replay. Before this was
+// introduced the middleware string-matched on error messages
+// or collapsed everything into a generic "invalid_dpop_proof",
+// which made debugging unnecessarily painful.
+var (
+	ErrDPoPUnsupportedKey    = errors.New("dpop: only EC P-256 keys are supported")
+	ErrDPoPMissingPrivateKey = errors.New("dpop: private key required for proof generation")
+	ErrDPoPInvalidFormat     = errors.New("dpop: invalid JWT format")
+	ErrDPoPInvalidTyp        = errors.New("dpop: invalid typ, expected dpop+jwt")
+	ErrDPoPInvalidAlg        = errors.New("dpop: invalid alg, expected ES256")
+	ErrDPoPMissingJWK        = errors.New("dpop: missing jwk in header")
+	ErrDPoPInvalidJWK        = errors.New("dpop: invalid jwk, expected EC P-256")
+	ErrDPoPInvalidSignature  = errors.New("dpop: invalid proof signature")
+	ErrDPoPMethodMismatch    = errors.New("dpop: htm claim does not match request method")
+	ErrDPoPURLMismatch       = errors.New("dpop: htu claim does not match request URL")
+	ErrDPoPMissingJTI        = errors.New("dpop: missing jti claim")
+	ErrDPoPMissingIAT        = errors.New("dpop: missing iat claim")
+	ErrDPoPTooOld            = errors.New("dpop: proof is too old")
+	ErrDPoPInFuture          = errors.New("dpop: proof iat is in the future")
+	ErrDPoPATHMismatch       = errors.New("dpop: access token hash does not match")
+)
+
 // DPoPKeyPair represents an ES256 key pair for DPoP.
 type DPoPKeyPair struct {
 	PrivateKey *ecdsa.PrivateKey
@@ -106,7 +130,7 @@ func ParseDPoPKeyPair(jwkJSON string) (*DPoPKeyPair, error) {
 	}
 
 	if jwk.Kty != "EC" || jwk.Crv != "P-256" {
-		return nil, errors.New("only EC P-256 keys are supported")
+		return nil, ErrDPoPUnsupportedKey
 	}
 
 	xBytes, err := base64.RawURLEncoding.DecodeString(jwk.X)
@@ -169,7 +193,7 @@ func CalculateJKTFromJWK(jwk *JWK) string {
 //   - nonce: Server-provided nonce (optional)
 func (kp *DPoPKeyPair) GenerateDPoPProof(method, url, accessToken, nonce string) (string, error) {
 	if kp.PrivateKey == nil {
-		return "", errors.New("private key required for proof generation")
+		return "", ErrDPoPMissingPrivateKey
 	}
 
 	now := time.Now()
@@ -226,13 +250,13 @@ func VerifyDPoPProof(proof, method, url string, maxAgeSeconds int64) (*DPoPValid
 	// Parse the token without verification first to extract the JWK
 	parts := strings.Split(proof, ".")
 	if len(parts) != 3 {
-		return nil, errors.New("invalid JWT format")
+		return nil, ErrDPoPInvalidFormat
 	}
 
 	// Decode header
 	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode header: %w", err)
+		return nil, fmt.Errorf("%w: header decode: %w", ErrDPoPInvalidFormat, err)
 	}
 
 	var header struct {
@@ -241,21 +265,21 @@ func VerifyDPoPProof(proof, method, url string, maxAgeSeconds int64) (*DPoPValid
 		JWK *JWK   `json:"jwk"`
 	}
 	if err := json.Unmarshal(headerBytes, &header); err != nil {
-		return nil, fmt.Errorf("failed to parse header: %w", err)
+		return nil, fmt.Errorf("%w: header parse: %w", ErrDPoPInvalidFormat, err)
 	}
 
 	// Validate header
 	if header.Typ != "dpop+jwt" {
-		return nil, errors.New("invalid typ: expected dpop+jwt")
+		return nil, ErrDPoPInvalidTyp
 	}
 	if header.Alg != "ES256" {
-		return nil, errors.New("invalid alg: expected ES256")
+		return nil, ErrDPoPInvalidAlg
 	}
 	if header.JWK == nil {
-		return nil, errors.New("missing jwk in header")
+		return nil, ErrDPoPMissingJWK
 	}
 	if header.JWK.Kty != "EC" || header.JWK.Crv != "P-256" {
-		return nil, errors.New("invalid jwk: expected EC P-256")
+		return nil, ErrDPoPInvalidJWK
 	}
 
 	// Parse the public key from JWK
@@ -278,40 +302,40 @@ func VerifyDPoPProof(proof, method, url string, maxAgeSeconds int64) (*DPoPValid
 	var claims DPoPClaims
 	token, err := jwt.ParseWithClaims(proof, &claims, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodECDSA); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			return nil, ErrDPoPInvalidAlg
 		}
 		return publicKey, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to verify token: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrDPoPInvalidSignature, err)
 	}
 	if !token.Valid {
-		return nil, errors.New("invalid token")
+		return nil, ErrDPoPInvalidSignature
 	}
 
 	// Validate claims
 	if claims.HTM != method {
-		return nil, fmt.Errorf("method mismatch: expected %s, got %s", method, claims.HTM)
+		return nil, fmt.Errorf("%w: expected %s, got %s", ErrDPoPMethodMismatch, method, claims.HTM)
 	}
 	if claims.HTU != url {
-		return nil, fmt.Errorf("url mismatch: expected %s, got %s", url, claims.HTU)
+		return nil, fmt.Errorf("%w: expected %s, got %s", ErrDPoPURLMismatch, url, claims.HTU)
 	}
 	if claims.ID == "" {
-		return nil, errors.New("missing jti claim")
+		return nil, ErrDPoPMissingJTI
 	}
 	if claims.IssuedAt == nil {
-		return nil, errors.New("missing iat claim")
+		return nil, ErrDPoPMissingIAT
 	}
 
 	// Check age
 	iat := claims.IssuedAt.Unix()
 	now := time.Now().Unix()
 	if now-iat > maxAgeSeconds {
-		return nil, fmt.Errorf("proof too old: %d seconds", now-iat)
+		return nil, fmt.Errorf("%w: %d seconds old", ErrDPoPTooOld, now-iat)
 	}
 	// Also check for future-dated proofs (allow 60 second clock skew)
 	if iat > now+60 {
-		return nil, errors.New("proof issued in the future")
+		return nil, ErrDPoPInFuture
 	}
 
 	// Calculate JKT
@@ -341,7 +365,7 @@ func VerifyDPoPProofWithATH(proof, method, url, accessToken string, maxAgeSecond
 			expectedATH := sha256.Sum256([]byte(accessToken))
 			expectedATHStr := base64.RawURLEncoding.EncodeToString(expectedATH[:])
 			if claims.ATH != expectedATHStr {
-				return nil, errors.New("access token hash mismatch")
+				return nil, ErrDPoPATHMismatch
 			}
 		}
 	}
