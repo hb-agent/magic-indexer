@@ -16,8 +16,11 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o /hypergoat ./cmd/hypergoat
+# Build the binary. -trimpath strips /workspace/... paths from the
+# binary so builds are reproducible across machines; -buildvcs=false
+# avoids embedding git metadata that differs between CI and local
+# builds.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -o /hypergoat ./cmd/hypergoat
 
 # Runtime stage
 FROM alpine:3.19

@@ -210,12 +210,20 @@ func getEnv(key, defaultValue string) string {
 }
 
 func getEnvInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intVal, err := strconv.Atoi(value); err == nil {
-			return intVal
-		}
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
 	}
-	return defaultValue
+	intVal, err := strconv.Atoi(value)
+	if err != nil {
+		// A malformed int env var silently falling back to the
+		// default used to make "why is my config ignored?" hard
+		// to diagnose. Log at Warn so operators see it on boot.
+		slog.Warn("Malformed integer env var; using default",
+			"key", key, "value", value, "default", defaultValue, "error", err)
+		return defaultValue
+	}
+	return intVal
 }
 
 func getEnvBool(key string, defaultValue bool) bool {

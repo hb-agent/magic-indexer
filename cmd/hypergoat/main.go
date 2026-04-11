@@ -303,6 +303,11 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 		AllowedOrigins: allowedOrigins,
 		AdminAPIKeySet: cfg.AdminAPIKey != "",
 	}))
+	// Defensive response headers. HSTS is only emitted when
+	// EXTERNAL_BASE_URL is https so a dev instance on http://
+	// doesn't accidentally pin its own browser into HTTPS.
+	httpsOnly := strings.HasPrefix(cfg.ExternalBaseURL, "https://")
+	r.Use(server.SecurityHeadersMiddleware(httpsOnly))
 
 	// Health check. Must actually talk to the database so load
 	// balancers stop routing to a degraded instance. We use a 2s
