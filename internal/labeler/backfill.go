@@ -31,11 +31,18 @@ type BackfillClient struct {
 }
 
 // NewBackfillClient creates a backfill client for the given PDS host.
+// Redirects are explicitly rejected so that a malicious or compromised
+// labeler endpoint cannot 301 our requests to an attacker-controlled
+// host and exfiltrate headers or response bodies. queryLabels is
+// authoritative at its PDS URL and should never legitimately redirect.
 func NewBackfillClient(pdsHost string) *BackfillClient {
 	httpClient := retryablehttp.NewClient()
 	httpClient.Logger = nil
 	httpClient.RetryMax = 3
 	httpClient.HTTPClient.Timeout = 30 * time.Second
+	httpClient.HTTPClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	return &BackfillClient{
 		http:    httpClient,
 		pdsHost: pdsHost,

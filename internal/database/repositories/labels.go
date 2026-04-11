@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -62,17 +63,21 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 	}
 	ctsStr := effectiveCts.UTC().Format(time.RFC3339Nano)
 
+	// Partial unique indexes (see migration 007) make ON CONFLICT DO
+	// NOTHING actually fire on both dialects, so re-ingesting a label
+	// during a backfill/stream overlap is idempotent.
 	switch r.db.Dialect() {
 	case database.PostgreSQL:
 		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, cts, exp)
 			VALUES (%s, %s, %s, %s, %s, %s)
-			ON CONFLICT DO NOTHING
+			ON CONFLICT (src, uri, val, COALESCE(cid, '')) WHERE neg = false DO NOTHING
 			RETURNING id, src, uri, cid, val, neg, cts, exp`,
 			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
 			r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
 	default:
 		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, cts, exp)
-			VALUES (%s, %s, %s, %s, %s, %s)`,
+			VALUES (%s, %s, %s, %s, %s, %s)
+			ON CONFLICT DO NOTHING`,
 			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
 			r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
 	}
@@ -94,6 +99,12 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 		err := r.db.QueryRow(ctx, sqlStr, params,
 			&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull)
 		if err != nil {
+			// ON CONFLICT DO NOTHING → zero rows returned → sql.ErrNoRows.
+			// Treat as an idempotent success: look up the existing row so
+			// callers still receive a populated Label.
+			if errors.Is(err, sql.ErrNoRows) {
+				return r.findExistingAssertion(ctx, src, uri, val, cid)
+			}
 			return nil, err
 		}
 		label.Neg = neg != 0
@@ -116,8 +127,63 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 		return nil, err
 	}
 	id, _ := result.LastInsertId()
+	if id == 0 {
+		// SQLite returns LastInsertId == 0 when ON CONFLICT DO NOTHING
+		// suppressed the insert. Look up the existing row.
+		return r.findExistingAssertion(ctx, src, uri, val, cid)
+	}
 
 	return r.GetByID(ctx, id)
+}
+
+// findExistingAssertion returns the current active (non-negated) label for
+// the given (src, uri, val, cid) tuple. Used to resolve the "row already
+// existed" branch of ON CONFLICT DO NOTHING so Insert always returns a
+// populated Label for callers.
+func (r *LabelsRepository) findExistingAssertion(ctx context.Context, src, uri string, val string, cid *string) (*Label, error) {
+	var sqlStr string
+	var params []database.Value
+	if cid == nil {
+		sqlStr = fmt.Sprintf(`SELECT id, src, uri, cid, val, neg, cts, exp FROM label
+			WHERE src = %s AND uri = %s AND val = %s AND cid IS NULL AND neg = 0
+			ORDER BY id DESC LIMIT 1`,
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
+		params = []database.Value{database.Text(src), database.Text(uri), database.Text(val)}
+	} else {
+		sqlStr = fmt.Sprintf(`SELECT id, src, uri, cid, val, neg, cts, exp FROM label
+			WHERE src = %s AND uri = %s AND val = %s AND cid = %s AND neg = 0
+			ORDER BY id DESC LIMIT 1`,
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
+		params = []database.Value{database.Text(src), database.Text(uri), database.Text(val), database.Text(*cid)}
+	}
+
+	var label Label
+	var retCtsStr string
+	var cidNull, expNull sql.NullString
+	var neg int
+	if err := r.db.QueryRow(ctx, sqlStr, params,
+		&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull); err != nil {
+		return nil, err
+	}
+	label.Neg = neg != 0
+	label.Cts, _ = time.Parse(time.RFC3339Nano, retCtsStr)
+	if label.Cts.IsZero() {
+		label.Cts, _ = time.Parse(time.RFC3339, retCtsStr)
+		if label.Cts.IsZero() {
+			label.Cts, _ = time.Parse("2006-01-02 15:04:05", retCtsStr)
+		}
+	}
+	if cidNull.Valid {
+		label.CID = &cidNull.String
+	}
+	if expNull.Valid {
+		t, _ := time.Parse(time.RFC3339Nano, expNull.String)
+		if t.IsZero() {
+			t, _ = time.Parse(time.RFC3339, expNull.String)
+		}
+		label.Exp = &t
+	}
+	return &label, nil
 }
 
 // InsertNegation creates a negation (retraction) label.
@@ -138,12 +204,13 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 	case database.PostgreSQL:
 		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
 			VALUES (%s, %s, %s, 1, %s)
-			ON CONFLICT DO NOTHING
+			ON CONFLICT (src, uri, val) WHERE neg = true DO NOTHING
 			RETURNING id, src, uri, cid, val, neg, cts, exp`,
 			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
 	default:
 		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
-			VALUES (%s, %s, %s, 1, %s)`,
+			VALUES (%s, %s, %s, 1, %s)
+			ON CONFLICT DO NOTHING`,
 			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
 	}
 
@@ -162,6 +229,9 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 		err := r.db.QueryRow(ctx, sqlStr, params,
 			&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull)
 		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return r.findExistingNegation(ctx, src, uri, val)
+			}
 			return nil, err
 		}
 		label.Neg = neg != 0
@@ -180,8 +250,43 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 		return nil, err
 	}
 	id, _ := result.LastInsertId()
+	if id == 0 {
+		return r.findExistingNegation(ctx, src, uri, val)
+	}
 
 	return r.GetByID(ctx, id)
+}
+
+// findExistingNegation returns the current negation row for the given
+// (src, uri, val) tuple. Used to resolve the ON CONFLICT DO NOTHING
+// branch of InsertNegation.
+func (r *LabelsRepository) findExistingNegation(ctx context.Context, src, uri, val string) (*Label, error) {
+	sqlStr := fmt.Sprintf(`SELECT id, src, uri, cid, val, neg, cts, exp FROM label
+		WHERE src = %s AND uri = %s AND val = %s AND neg = 1
+		ORDER BY id DESC LIMIT 1`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
+	params := []database.Value{database.Text(src), database.Text(uri), database.Text(val)}
+
+	var label Label
+	var retCtsStr string
+	var cidNull, expNull sql.NullString
+	var neg int
+	if err := r.db.QueryRow(ctx, sqlStr, params,
+		&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull); err != nil {
+		return nil, err
+	}
+	label.Neg = neg != 0
+	label.Cts, _ = time.Parse(time.RFC3339Nano, retCtsStr)
+	if label.Cts.IsZero() {
+		label.Cts, _ = time.Parse(time.RFC3339, retCtsStr)
+		if label.Cts.IsZero() {
+			label.Cts, _ = time.Parse("2006-01-02 15:04:05", retCtsStr)
+		}
+	}
+	if cidNull.Valid {
+		label.CID = &cidNull.String
+	}
+	return &label, nil
 }
 
 // GetByID retrieves a label by ID.

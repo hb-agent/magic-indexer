@@ -476,9 +476,13 @@ func (b *Builder) resolveRecordConnection(
 
 		// Attach the labels list. If the node is a map (both our
 		// collection and generic resolvers return map[string]interface{}),
-		// we can set `labels` directly; otherwise we skip it.
+		// we set `labels` only when the key isn't already present — so
+		// a lexicon that happens to define its own `labels` property
+		// keeps control of that field.
 		if nodeMap, ok := node.(map[string]interface{}); ok {
-			nodeMap["labels"] = labelsByURI[rec.URI]
+			if _, collision := nodeMap["labels"]; !collision {
+				nodeMap["labels"] = labelsByURI[rec.URI]
+			}
 		}
 
 		cursor := encodeCursor(rec.IndexedAt.Format("2006-01-02T15:04:05Z"), rec.URI)
@@ -559,11 +563,11 @@ func parseLabelFilter(args map[string]interface{}, defaultLabeler string) (repos
 	}
 
 	// If the caller passed a filter but no labeler DID is configured
-	// (either as default or via labelerDid), return an explicit error
-	// instead of silently ignoring the filter. This prevents client
-	// code from thinking it filtered results when it didn't.
+	// (either as server default or via labelerDid), return an explicit
+	// error instead of silently ignoring the filter. This prevents
+	// client code from thinking it filtered results when it didn't.
 	if filter.LabelerSrc == "" && (len(filter.Include) > 0 || len(filter.Exclude) > 0) {
-		return filter, fmt.Errorf("label filter requested but no labeler configured: set LABELER_DIDS or pass labelerDid explicitly")
+		return filter, fmt.Errorf("label filter requested but no labeler is configured; pass labelerDid to select one")
 	}
 	return filter, nil
 }
@@ -642,9 +646,15 @@ func (b *Builder) createCollectionResolver(lexiconID string) graphql.FieldResolv
 	return func(p graphql.ResolveParams) (interface{}, error) {
 		return b.resolveRecordConnection(p, lexiconID,
 			func(rec *repositories.Record, data map[string]interface{}) (interface{}, bool) {
-				// Inject standard record fields into the flat data
-				data["uri"] = rec.URI
-				data["cid"] = rec.CID
+				// Inject standard record fields into the flat data,
+				// but only when the lexicon doesn't already claim the
+				// name — otherwise the lexicon field wins.
+				if _, collision := data["uri"]; !collision {
+					data["uri"] = rec.URI
+				}
+				if _, collision := data["cid"]; !collision {
+					data["cid"] = rec.CID
+				}
 				return data, true
 			})
 	}
@@ -679,13 +689,22 @@ func (b *Builder) createSingleRecordResolver(lexiconID string) graphql.FieldReso
 			return nil, fmt.Errorf("failed to parse record JSON: %w", err)
 		}
 
-		// Add standard record fields
-		data["uri"] = rec.URI
-		data["cid"] = rec.CID
+		// Add standard record fields, but respect any lexicon property
+		// of the same name (matches the collision avoidance in
+		// buildRecordFields and resolveRecordConnection).
+		if _, collision := data["uri"]; !collision {
+			data["uri"] = rec.URI
+		}
+		if _, collision := data["cid"]; !collision {
+			data["cid"] = rec.CID
+		}
 
-		// Attach labels from the configured labeler (best-effort).
-		labelsByURI := loadLabelsByURI(p.Context, repos, repos.DefaultLabelerDID, []*repositories.Record{rec})
-		data["labels"] = labelsByURI[rec.URI]
+		// Attach labels from the configured labeler (best-effort),
+		// again only if the lexicon hasn't claimed the `labels` name.
+		if _, collision := data["labels"]; !collision {
+			labelsByURI := loadLabelsByURI(p.Context, repos, repos.DefaultLabelerDID, []*repositories.Record{rec})
+			data["labels"] = labelsByURI[rec.URI]
+		}
 
 		return data, nil
 	}

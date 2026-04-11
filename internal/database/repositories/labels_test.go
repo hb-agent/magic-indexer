@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/testutil"
@@ -70,6 +71,64 @@ func TestLabelsRepository_InsertNegation(t *testing.T) {
 	}
 	if neg.Src != "did:plc:labeler" {
 		t.Errorf("Src = %q, want %q", neg.Src, "did:plc:labeler")
+	}
+}
+
+// TestLabelsRepository_NegationByCts verifies that negation ordering uses
+// the canonical cts timestamp rather than the local auto-increment id, so
+// a negation that was ingested AFTER an assertion but carries an EARLIER
+// wire cts is correctly treated as predating the assertion (and therefore
+// does NOT retract it). This is the backfill-then-stream out-of-order
+// scenario from the Round 2 review.
+func TestLabelsRepository_NegationByCts(t *testing.T) {
+	repo := setupLabelsTest(t)
+	ctx := context.Background()
+	uri := "at://did:plc:user/app.bsky.feed.post/ctsorder"
+	src := "did:plc:labeler"
+
+	earlier := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	later := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
+
+	// Assert the label with the LATER cts first (id = 1).
+	if _, err := repo.Insert(ctx, src, uri, nil, "spam", &later, nil); err != nil {
+		t.Fatalf("Insert() error = %v", err)
+	}
+	// Then ingest an out-of-order negation with the EARLIER cts (id = 2,
+	// but cts is before the assertion's cts). The old id-based logic
+	// would have considered this negation as retracting the assertion;
+	// the cts-based logic must NOT.
+	if _, err := repo.InsertNegation(ctx, src, uri, "spam", &earlier); err != nil {
+		t.Fatalf("InsertNegation() error = %v", err)
+	}
+
+	labels, err := repo.GetByURIs(ctx, []string{uri})
+	if err != nil {
+		t.Fatalf("GetByURIs() error = %v", err)
+	}
+	if len(labels) != 1 || labels[0].Val != "spam" {
+		t.Errorf("expected assertion to remain active (negation cts < assertion cts), got %d labels: %+v",
+			len(labels), labels)
+	}
+
+	// Now ingest a second negation with a cts AFTER the assertion.
+	evenLater := time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC)
+	if _, err := repo.InsertNegation(ctx, src, uri, "spam", &evenLater); err != nil {
+		// Round 3's partial UNIQUE index on negations only allows one
+		// negation row per (src, uri, val). The second call should be
+		// suppressed by ON CONFLICT DO NOTHING and returned as the
+		// pre-existing row — that's not a true DB error.
+		t.Fatalf("second InsertNegation() error = %v", err)
+	}
+	// The stored negation row still carries the earlier cts because
+	// ON CONFLICT DO NOTHING kept it. In practice the labeler's first
+	// negation is the canonical one; subsequent retransmissions with
+	// newer cts are ignored. This documents the current semantics.
+	labels, err = repo.GetByURIs(ctx, []string{uri})
+	if err != nil {
+		t.Fatalf("GetByURIs() error = %v", err)
+	}
+	if len(labels) != 1 {
+		t.Errorf("expected assertion still visible after idempotent re-negate, got %d labels", len(labels))
 	}
 }
 

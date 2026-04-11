@@ -135,7 +135,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 
 	// Resolve labeler host if not explicitly configured.
 	if c.config.PDSHost == "" {
-		host, err := c.resolveLabelerHost(c.ctx)
+		host, err := c.resolveLabelerHost()
 		if err != nil {
 			return fmt.Errorf("resolve labeler %s: %w", c.config.LabelerDID, err)
 		}
@@ -296,7 +296,7 @@ func (c *Consumer) LabelerDID() string {
 // spec, labelers advertise an AtprotoLabeler service entry; we prefer that
 // and fall back to AtprotoPersonalDataServer for moderation services that
 // co-locate labeler and PDS on the same host.
-func (c *Consumer) resolveLabelerHost(_ context.Context) (string, error) {
+func (c *Consumer) resolveLabelerHost() (string, error) {
 	doc, err := c.resolver.ResolveDID(c.config.LabelerDID)
 	if err != nil {
 		return "", err
@@ -406,9 +406,17 @@ func (c *Consumer) handleLabelMessage(ctx context.Context, msg *LabelMessage) {
 	c.cursorMu.Unlock()
 }
 
-// MaxLabelValLen bounds the length of a label val to avoid storing
-// arbitrarily large strings from an untrusted labeler.
-const MaxLabelValLen = 128
+// Length caps bound individual label fields so a malicious or misbehaving
+// labeler cannot bloat our DB with multi-megabyte strings. These values
+// are intentionally generous compared to typical ATProto data (DIDs are
+// ~32 bytes, AT-URIs typically under 100 bytes, CIDs ~60 bytes) while
+// still rejecting pathological inputs before they hit the DB.
+const (
+	MaxLabelValLen = 128
+	MaxLabelSrcLen = 512
+	MaxLabelURILen = 512
+	MaxLabelCIDLen = 256
+)
 
 // upsertLabels inserts every label in a batch, ensuring the label_definition
 // row exists first. Individual label failures are rolled up into a single
@@ -487,13 +495,31 @@ func (c *Consumer) upsertLabels(ctx context.Context, labels []ProtoLabel) (rejec
 // matches at:// URIs), so we reject them here with a debug log. If the
 // data model gains account-level label support in the future, this
 // check can be relaxed.
+//
+// Each stringy field also has a byte-length cap so a malicious labeler
+// can't bloat our DB with multi-megabyte values on any of src/uri/cid/val.
 func (c *Consumer) validateLabel(l *ProtoLabel) bool {
 	if l == nil || l.Src == "" || l.URI == "" || l.Val == "" {
+		return false
+	}
+	if len(l.Src) > MaxLabelSrcLen {
+		slog.Warn("Labeler: skipping label with oversized src",
+			"did", c.config.LabelerDID, "src_len", len(l.Src))
 		return false
 	}
 	if !strings.HasPrefix(l.URI, "at://") || len(l.URI) <= len("at://") {
 		slog.Debug("Labeler: skipping label with non-record URI",
 			"did", c.config.LabelerDID, "uri", l.URI)
+		return false
+	}
+	if len(l.URI) > MaxLabelURILen {
+		slog.Warn("Labeler: skipping label with oversized uri",
+			"did", c.config.LabelerDID, "uri_len", len(l.URI))
+		return false
+	}
+	if l.CID != "" && len(l.CID) > MaxLabelCIDLen {
+		slog.Warn("Labeler: skipping label with oversized cid",
+			"did", c.config.LabelerDID, "cid_len", len(l.CID))
 		return false
 	}
 	if len(l.Val) > MaxLabelValLen {
