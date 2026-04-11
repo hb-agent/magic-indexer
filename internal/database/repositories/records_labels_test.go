@@ -47,11 +47,11 @@ func seedLabeledRecords(t *testing.T) *testutil.TestDB {
 
 	labeler := "did:plc:labelerz"
 	// rec1 -> high-quality
-	if _, err := db.Labels.Insert(ctx, labeler, records[0].uri, nil, "high-quality", nil); err != nil {
+	if _, err := db.Labels.Insert(ctx, labeler, records[0].uri, nil, "high-quality", nil, nil); err != nil {
 		t.Fatalf("label rec1: %v", err)
 	}
 	// rec2 -> draft
-	if _, err := db.Labels.Insert(ctx, labeler, records[1].uri, nil, "draft", nil); err != nil {
+	if _, err := db.Labels.Insert(ctx, labeler, records[1].uri, nil, "draft", nil, nil); err != nil {
 		t.Fatalf("label rec2: %v", err)
 	}
 	// rec3 -> (unlabeled)
@@ -135,6 +135,7 @@ func TestRecordsRepository_LabelFilter_HonorsNegation(t *testing.T) {
 		ctx, "did:plc:labelerz",
 		"at://did:plc:alice/social.cert.hypercert/rec1",
 		"high-quality",
+		nil,
 	); err != nil {
 		t.Fatalf("negate: %v", err)
 	}

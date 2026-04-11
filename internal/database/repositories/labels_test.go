@@ -20,7 +20,7 @@ func TestLabelsRepository_Insert(t *testing.T) {
 	repo := setupLabelsTest(t)
 	ctx := context.Background()
 
-	label, err := repo.Insert(ctx, "did:plc:labeler", "at://did:plc:user/app.bsky.feed.post/abc", nil, "spam", nil)
+	label, err := repo.Insert(ctx, "did:plc:labeler", "at://did:plc:user/app.bsky.feed.post/abc", nil, "spam", nil, nil)
 	if err != nil {
 		t.Fatalf("Insert() error = %v", err)
 	}
@@ -52,13 +52,13 @@ func TestLabelsRepository_InsertNegation(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert original label first
-	_, err := repo.Insert(ctx, "did:plc:labeler", "at://did:plc:user/app.bsky.feed.post/abc", nil, "spam", nil)
+	_, err := repo.Insert(ctx, "did:plc:labeler", "at://did:plc:user/app.bsky.feed.post/abc", nil, "spam", nil, nil)
 	if err != nil {
 		t.Fatalf("Insert() error = %v", err)
 	}
 
 	// Insert negation
-	neg, err := repo.InsertNegation(ctx, "did:plc:labeler", "at://did:plc:user/app.bsky.feed.post/abc", "spam")
+	neg, err := repo.InsertNegation(ctx, "did:plc:labeler", "at://did:plc:user/app.bsky.feed.post/abc", "spam", nil)
 	if err != nil {
 		t.Fatalf("InsertNegation() error = %v", err)
 	}
@@ -78,7 +78,7 @@ func TestLabelsRepository_GetByID(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert a label
-	inserted, err := repo.Insert(ctx, "did:plc:labeler", "at://did:plc:user/app.bsky.feed.post/abc", nil, "spam", nil)
+	inserted, err := repo.Insert(ctx, "did:plc:labeler", "at://did:plc:user/app.bsky.feed.post/abc", nil, "spam", nil, nil)
 	if err != nil {
 		t.Fatalf("Insert() error = %v", err)
 	}
@@ -124,7 +124,7 @@ func TestLabelsRepository_GetByURIs(t *testing.T) {
 	t.Run("returns active labels", func(t *testing.T) {
 		uri := "at://did:plc:user/app.bsky.feed.post/abc"
 
-		_, err := repo.Insert(ctx, "did:plc:labeler", uri, nil, "spam", nil)
+		_, err := repo.Insert(ctx, "did:plc:labeler", uri, nil, "spam", nil, nil)
 		if err != nil {
 			t.Fatalf("Insert() error = %v", err)
 		}
@@ -144,13 +144,13 @@ func TestLabelsRepository_GetByURIs(t *testing.T) {
 	t.Run("negated labels excluded", func(t *testing.T) {
 		uri := "at://did:plc:user/app.bsky.feed.post/negtest"
 
-		_, err := repo.Insert(ctx, "did:plc:labeler", uri, nil, "porn", nil)
+		_, err := repo.Insert(ctx, "did:plc:labeler", uri, nil, "porn", nil, nil)
 		if err != nil {
 			t.Fatalf("Insert() error = %v", err)
 		}
 
 		// Negate the label (no sleep needed: queries now use id-based ordering)
-		_, err = repo.InsertNegation(ctx, "did:plc:labeler", uri, "porn")
+		_, err = repo.InsertNegation(ctx, "did:plc:labeler", uri, "porn", nil)
 		if err != nil {
 			t.Fatalf("InsertNegation() error = %v", err)
 		}
@@ -173,15 +173,15 @@ func TestLabelsRepository_GetPaginated(t *testing.T) {
 	uri2 := "at://did:plc:user/app.bsky.feed.post/def"
 
 	// Insert labels
-	_, err := repo.Insert(ctx, "did:plc:labeler", uri1, nil, "spam", nil)
+	_, err := repo.Insert(ctx, "did:plc:labeler", uri1, nil, "spam", nil, nil)
 	if err != nil {
 		t.Fatalf("Insert() error = %v", err)
 	}
-	_, err = repo.Insert(ctx, "did:plc:labeler", uri2, nil, "porn", nil)
+	_, err = repo.Insert(ctx, "did:plc:labeler", uri2, nil, "porn", nil, nil)
 	if err != nil {
 		t.Fatalf("Insert() error = %v", err)
 	}
-	_, err = repo.Insert(ctx, "did:plc:labeler", uri1, nil, "nudity", nil)
+	_, err = repo.Insert(ctx, "did:plc:labeler", uri1, nil, "nudity", nil, nil)
 	if err != nil {
 		t.Fatalf("Insert() error = %v", err)
 	}
@@ -255,7 +255,7 @@ func TestLabelsRepository_HasTakedown(t *testing.T) {
 	uri := "at://did:plc:user/app.bsky.feed.post/abc"
 
 	t.Run("true with active takedown", func(t *testing.T) {
-		_, err := repo.Insert(ctx, "did:plc:labeler", uri, nil, "!takedown", nil)
+		_, err := repo.Insert(ctx, "did:plc:labeler", uri, nil, "!takedown", nil, nil)
 		if err != nil {
 			t.Fatalf("Insert() error = %v", err)
 		}
@@ -270,7 +270,7 @@ func TestLabelsRepository_HasTakedown(t *testing.T) {
 	})
 
 	t.Run("false after negation", func(t *testing.T) {
-		_, err := repo.InsertNegation(ctx, "did:plc:labeler", uri, "!takedown")
+		_, err := repo.InsertNegation(ctx, "did:plc:labeler", uri, "!takedown", nil)
 		if err != nil {
 			t.Fatalf("InsertNegation() error = %v", err)
 		}
@@ -305,11 +305,11 @@ func TestLabelsRepository_GetTakedownURIs(t *testing.T) {
 		uri3 := "at://did:plc:user/app.bsky.feed.post/td3"
 
 		// Takedown on uri1 and uri2
-		_, err := repo.Insert(ctx, "did:plc:labeler", uri1, nil, "!takedown", nil)
+		_, err := repo.Insert(ctx, "did:plc:labeler", uri1, nil, "!takedown", nil, nil)
 		if err != nil {
 			t.Fatalf("Insert() error = %v", err)
 		}
-		_, err = repo.Insert(ctx, "did:plc:labeler", uri2, nil, "!takedown", nil)
+		_, err = repo.Insert(ctx, "did:plc:labeler", uri2, nil, "!takedown", nil, nil)
 		if err != nil {
 			t.Fatalf("Insert() error = %v", err)
 		}
@@ -329,11 +329,11 @@ func TestLabelsRepository_DeleteAll(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert labels
-	_, err := repo.Insert(ctx, "did:plc:labeler", "at://did:plc:user/app.bsky.feed.post/abc", nil, "spam", nil)
+	_, err := repo.Insert(ctx, "did:plc:labeler", "at://did:plc:user/app.bsky.feed.post/abc", nil, "spam", nil, nil)
 	if err != nil {
 		t.Fatalf("Insert() error = %v", err)
 	}
-	_, err = repo.Insert(ctx, "did:plc:labeler", "at://did:plc:user/app.bsky.feed.post/def", nil, "porn", nil)
+	_, err = repo.Insert(ctx, "did:plc:labeler", "at://did:plc:user/app.bsky.feed.post/def", nil, "porn", nil, nil)
 	if err != nil {
 		t.Fatalf("Insert() error = %v", err)
 	}

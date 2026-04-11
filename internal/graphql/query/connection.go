@@ -29,18 +29,12 @@ var PageInfoType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
-// ConnectionArgs returns standard Relay connection arguments for forward pagination,
-// plus label-based filtering arguments used by record collection queries.
-func ConnectionArgs() graphql.FieldConfigArgument {
+// LabelFilterArgs returns the label-based filtering arguments applied to
+// record connection queries. Exposed separately so the generic `records`
+// query (which defines its own `collection` argument) can compose them
+// alongside its existing args.
+func LabelFilterArgs() graphql.FieldConfigArgument {
 	return graphql.FieldConfigArgument{
-		"first": &graphql.ArgumentConfig{
-			Type:        graphql.Int,
-			Description: "Number of items to return (default 20)",
-		},
-		"after": &graphql.ArgumentConfig{
-			Type:        graphql.String,
-			Description: "Cursor to start after (forward pagination)",
-		},
 		"labels": &graphql.ArgumentConfig{
 			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
 			Description: "Filter to records that have at least one of these active labels from the configured labeler.",
@@ -54,6 +48,25 @@ func ConnectionArgs() graphql.FieldConfigArgument {
 			Description: "DID of the labeler to filter by. Defaults to the server's configured labeler.",
 		},
 	}
+}
+
+// ConnectionArgs returns standard Relay connection arguments for forward pagination,
+// plus label-based filtering arguments used by record collection queries.
+func ConnectionArgs() graphql.FieldConfigArgument {
+	args := graphql.FieldConfigArgument{
+		"first": &graphql.ArgumentConfig{
+			Type:        graphql.Int,
+			Description: "Number of items to return (default 20)",
+		},
+		"after": &graphql.ArgumentConfig{
+			Type:        graphql.String,
+			Description: "Cursor to start after (forward pagination)",
+		},
+	}
+	for k, v := range LabelFilterArgs() {
+		args[k] = v
+	}
+	return args
 }
 
 // BuildEdgeType creates an Edge type for a given node type.

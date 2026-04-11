@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/graphql-go/graphql"
@@ -314,26 +315,33 @@ var genericRecordConnectionType = graphql.NewObject(graphql.ObjectConfig{
 func (b *Builder) buildQueryType() *graphql.Object {
 	fields := graphql.Fields{}
 
-	// Add generic records query that works for any collection
+	// Add generic records query that works for any collection. The label
+	// filter args mirror the per-lexicon collection queries so the
+	// `records` endpoint supports the same feeds without client-side
+	// merging.
+	genericRecordsArgs := graphql.FieldConfigArgument{
+		"collection": &graphql.ArgumentConfig{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "Collection NSID (e.g., org.impactindexer.review.like)",
+		},
+		"first": &graphql.ArgumentConfig{
+			Type:         graphql.Int,
+			DefaultValue: 20,
+			Description:  "Number of records to return",
+		},
+		"after": &graphql.ArgumentConfig{
+			Type:        graphql.String,
+			Description: "Cursor for pagination",
+		},
+	}
+	for k, v := range query.LabelFilterArgs() {
+		genericRecordsArgs[k] = v
+	}
 	fields["records"] = &graphql.Field{
 		Type:        genericRecordConnectionType,
 		Description: "Query records from any collection (useful for collections without lexicon schemas)",
-		Args: graphql.FieldConfigArgument{
-			"collection": &graphql.ArgumentConfig{
-				Type:        graphql.NewNonNull(graphql.String),
-				Description: "Collection NSID (e.g., org.impactindexer.review.like)",
-			},
-			"first": &graphql.ArgumentConfig{
-				Type:         graphql.Int,
-				DefaultValue: 20,
-				Description:  "Number of records to return",
-			},
-			"after": &graphql.ArgumentConfig{
-				Type:        graphql.String,
-				Description: "Cursor for pagination",
-			},
-		},
-		Resolve: b.createGenericRecordsResolver(),
+		Args:        genericRecordsArgs,
+		Resolve:     b.createGenericRecordsResolver(),
 	}
 
 	// Add collectionStats query for efficient aggregate counts
@@ -493,9 +501,16 @@ func (b *Builder) resolveRecordConnection(
 	}, nil
 }
 
+// MaxLabelFilterValues bounds the number of label values that can be
+// passed in a single `labels` or `excludeLabels` GraphQL argument. This
+// protects the DB from unbounded `IN (?, ?, ...)` clauses and hitting
+// SQLite's 999-parameter limit.
+const MaxLabelFilterValues = 50
+
 // parseLabelFilter extracts the label-related arguments from a GraphQL
 // field resolver's args map and returns a LabelFilter. It respects the
 // labelerDid arg override, falling back to the server's default labeler.
+// Values beyond MaxLabelFilterValues are silently truncated.
 func parseLabelFilter(args map[string]interface{}, defaultLabeler string) repositories.LabelFilter {
 	var filter repositories.LabelFilter
 
@@ -506,6 +521,9 @@ func parseLabelFilter(args map[string]interface{}, defaultLabeler string) reposi
 
 	if raw, ok := args["labels"].([]interface{}); ok {
 		for _, v := range raw {
+			if len(filter.Include) >= MaxLabelFilterValues {
+				break
+			}
 			if s, ok := v.(string); ok && s != "" {
 				filter.Include = append(filter.Include, s)
 			}
@@ -513,6 +531,9 @@ func parseLabelFilter(args map[string]interface{}, defaultLabeler string) reposi
 	}
 	if raw, ok := args["excludeLabels"].([]interface{}); ok {
 		for _, v := range raw {
+			if len(filter.Exclude) >= MaxLabelFilterValues {
+				break
+			}
 			if s, ok := v.(string); ok && s != "" {
 				filter.Exclude = append(filter.Exclude, s)
 			}
@@ -531,7 +552,8 @@ func parseLabelFilter(args map[string]interface{}, defaultLabeler string) reposi
 // loadLabelsByURI batch-loads active labels for a page of records and
 // groups them into a map of URI -> []val. If labelerSrc is non-empty,
 // only labels from that labeler are included. Failure is non-fatal and
-// yields an empty map so the main query still succeeds.
+// yields an empty map so the main query still succeeds, but the error
+// is logged so operators can detect silent label disappearance.
 func loadLabelsByURI(
 	ctx context.Context,
 	repos *resolver.Repositories,
@@ -550,6 +572,10 @@ func loadLabelsByURI(
 
 	labels, err := repos.Labels.GetByURIs(ctx, uris)
 	if err != nil {
+		slog.Warn("GraphQL: failed to batch-load labels for page",
+			"uri_count", len(uris),
+			"labeler_src", labelerSrc,
+			"error", err)
 		return result
 	}
 

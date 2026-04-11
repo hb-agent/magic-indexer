@@ -16,6 +16,12 @@ const (
 	// the websocket reader and the consumer.
 	EventChannelBufferSize = 256
 
+	// MaxFrameSize bounds a single websocket binary frame from a labeler.
+	// ATProto label frames are small (a few KB at most); 1 MiB leaves
+	// ample headroom for legitimate batches while rejecting malicious
+	// oversized payloads before they exhaust memory.
+	MaxFrameSize = 1 << 20 // 1 MiB
+
 	defaultWriteTimeout = 10 * time.Second
 	defaultPongWait     = 60 * time.Second
 	defaultPingPeriod   = 50 * time.Second
@@ -77,6 +83,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dial labeler: %w", err)
 	}
+
+	// Bound per-frame memory to protect against malicious labelers.
+	conn.SetReadLimit(MaxFrameSize)
 
 	c.mu.Lock()
 	c.conn = conn
@@ -181,9 +190,16 @@ func (c *Client) Run(ctx context.Context) error {
 			case <-ctx.Done():
 				return ctx.Err()
 			}
+		case hdr.Op == 1 && hdr.T == "#info":
+			// Informational frame (e.g. OutdatedCursor). Log and continue;
+			// the server may follow up with regular labels frames. We do
+			// not special-case OutdatedCursor yet because the cursor reset
+			// strategy depends on operator preference.
+			slog.Info("Labeler info frame received")
 		case hdr.Op == -1:
 			if eb, err := DecodeErrorBody(body); err == nil {
-				slog.Warn("Labeler error frame", "error", eb.Error, "message", eb.Message)
+				slog.Warn("Labeler error frame",
+					"code", eb.Error, "message", eb.Message)
 				// The stream is effectively over after an error frame.
 				return fmt.Errorf("labeler error: %s: %s", eb.Error, eb.Message)
 			}

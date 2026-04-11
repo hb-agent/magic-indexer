@@ -13,6 +13,10 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 )
 
+// MaxBackfillBodyBytes bounds the size of a single queryLabels HTTP response
+// so a malicious or misbehaving labeler can't exhaust memory.
+const MaxBackfillBodyBytes = 10 << 20 // 10 MiB
+
 // queryLabelsResponse is the shape returned by com.atproto.label.queryLabels.
 type queryLabelsResponse struct {
 	Cursor string       `json:"cursor,omitempty"`
@@ -38,6 +42,12 @@ func NewBackfillClient(pdsHost string) *BackfillClient {
 	}
 }
 
+// MaxBackfillPages bounds the number of queryLabels pages we'll fetch in a
+// single Fetch call. At limit=250 per page this allows ~10M labels, which
+// far exceeds any realistic labeler backfill and prevents a runaway loop
+// if the server returns an unexpected cursor sequence.
+const MaxBackfillPages = 40_000
+
 // Fetch pages through queryLabels and invokes handle for every batch.
 // If sources is empty, the labeler returns labels from all sources it knows.
 // handle is called once per page; it may return an error to abort.
@@ -52,7 +62,12 @@ func (b *BackfillClient) Fetch(
 	}
 
 	var cursor string
+	pages := 0
 	for {
+		if pages >= MaxBackfillPages {
+			return fmt.Errorf("queryLabels exceeded %d pages without termination", MaxBackfillPages)
+		}
+		pages++
 		q := url.Values{}
 		q.Set("uriPatterns", "*")
 		q.Set("limit", "250")
@@ -75,10 +90,13 @@ func (b *BackfillClient) Fetch(
 			return fmt.Errorf("queryLabels request: %w", err)
 		}
 
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, MaxBackfillBodyBytes+1))
 		resp.Body.Close()
 		if err != nil {
 			return fmt.Errorf("read queryLabels response: %w", err)
+		}
+		if int64(len(body)) > MaxBackfillBodyBytes {
+			return fmt.Errorf("queryLabels response exceeded %d bytes", MaxBackfillBodyBytes)
 		}
 
 		if resp.StatusCode != http.StatusOK {

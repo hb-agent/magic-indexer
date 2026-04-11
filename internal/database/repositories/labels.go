@@ -40,26 +40,56 @@ func NewLabelsRepository(db database.Executor) *LabelsRepository {
 }
 
 // Insert creates a new label.
-func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *string, val string, exp *time.Time) (*Label, error) {
+//
+// If cts is non-nil, it is stored as the label's canonical timestamp.
+// If cts is nil (e.g. labels authored locally via the admin API) the
+// database default (datetime('now') / NOW()) is used. Callers ingesting
+// labels from a remote labeler should pass the original cts from the
+// wire so that ordering and audit semantics match the labeler's
+// perspective, not the AppView's local clock.
+func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *string, val string, cts, exp *time.Time) (*Label, error) {
 	var sqlStr string
 	var expStr *string
 	if exp != nil {
 		s := exp.Format(time.RFC3339)
 		expStr = &s
 	}
+	var ctsStr *string
+	if cts != nil {
+		s := cts.UTC().Format(time.RFC3339Nano)
+		ctsStr = &s
+	}
 
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, exp)
-			VALUES (%s, %s, %s, %s, %s)
-			RETURNING id, src, uri, cid, val, neg, cts, exp`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-			r.db.Placeholder(4), r.db.Placeholder(5))
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, exp)
-			VALUES (%s, %s, %s, %s, %s)`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-			r.db.Placeholder(4), r.db.Placeholder(5))
+	// Placeholder layout depends on whether cts is provided.
+	// When cts is nil, the column is omitted so the DB default applies.
+	if ctsStr != nil {
+		switch r.db.Dialect() {
+		case database.PostgreSQL:
+			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, cts, exp)
+				VALUES (%s, %s, %s, %s, %s, %s)
+				RETURNING id, src, uri, cid, val, neg, cts, exp`,
+				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
+				r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
+		default:
+			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, cts, exp)
+				VALUES (%s, %s, %s, %s, %s, %s)`,
+				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
+				r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
+		}
+	} else {
+		switch r.db.Dialect() {
+		case database.PostgreSQL:
+			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, exp)
+				VALUES (%s, %s, %s, %s, %s)
+				RETURNING id, src, uri, cid, val, neg, cts, exp`,
+				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
+				r.db.Placeholder(4), r.db.Placeholder(5))
+		default:
+			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, exp)
+				VALUES (%s, %s, %s, %s, %s)`,
+				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
+				r.db.Placeholder(4), r.db.Placeholder(5))
+		}
 	}
 
 	params := []database.Value{
@@ -67,21 +97,24 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 		database.Text(uri),
 		database.NullableText(cid),
 		database.Text(val),
-		database.NullableText(expStr),
 	}
+	if ctsStr != nil {
+		params = append(params, database.NullableText(ctsStr))
+	}
+	params = append(params, database.NullableText(expStr))
 
 	if r.db.Dialect() == database.PostgreSQL {
 		var label Label
-		var ctsStr string
+		var retCtsStr string
 		var cidNull, expNull sql.NullString
 		var neg int
 		err := r.db.QueryRow(ctx, sqlStr, params,
-			&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &ctsStr, &expNull)
+			&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull)
 		if err != nil {
 			return nil, err
 		}
 		label.Neg = neg != 0
-		label.Cts, _ = time.Parse(time.RFC3339, ctsStr)
+		label.Cts, _ = time.Parse(time.RFC3339, retCtsStr)
 		if cidNull.Valid {
 			label.CID = &cidNull.String
 		}
@@ -102,18 +135,43 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 }
 
 // InsertNegation creates a negation (retraction) label.
-func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val string) (*Label, error) {
+//
+// If cts is non-nil, it is stored as the negation's canonical timestamp
+// so that ordering preserves the labeler's perspective. Callers ingesting
+// from a remote labeler should pass the wire cts; callers creating local
+// negations via the admin API may pass nil to use the DB default.
+func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val string, cts *time.Time) (*Label, error) {
+	var ctsStr *string
+	if cts != nil {
+		s := cts.UTC().Format(time.RFC3339Nano)
+		ctsStr = &s
+	}
+
 	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg)
-			VALUES (%s, %s, %s, 1)
-			RETURNING id, src, uri, cid, val, neg, cts, exp`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg)
-			VALUES (%s, %s, %s, 1)`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
+	if ctsStr != nil {
+		switch r.db.Dialect() {
+		case database.PostgreSQL:
+			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
+				VALUES (%s, %s, %s, 1, %s)
+				RETURNING id, src, uri, cid, val, neg, cts, exp`,
+				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
+		default:
+			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
+				VALUES (%s, %s, %s, 1, %s)`,
+				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
+		}
+	} else {
+		switch r.db.Dialect() {
+		case database.PostgreSQL:
+			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg)
+				VALUES (%s, %s, %s, 1)
+				RETURNING id, src, uri, cid, val, neg, cts, exp`,
+				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
+		default:
+			sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg)
+				VALUES (%s, %s, %s, 1)`,
+				r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
+		}
 	}
 
 	params := []database.Value{
@@ -121,19 +179,22 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 		database.Text(uri),
 		database.Text(val),
 	}
+	if ctsStr != nil {
+		params = append(params, database.NullableText(ctsStr))
+	}
 
 	if r.db.Dialect() == database.PostgreSQL {
 		var label Label
-		var ctsStr string
+		var retCtsStr string
 		var cidNull, expNull sql.NullString
 		var neg int
 		err := r.db.QueryRow(ctx, sqlStr, params,
-			&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &ctsStr, &expNull)
+			&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull)
 		if err != nil {
 			return nil, err
 		}
 		label.Neg = neg != 0
-		label.Cts, _ = time.Parse(time.RFC3339, ctsStr)
+		label.Cts, _ = time.Parse(time.RFC3339, retCtsStr)
 		if cidNull.Valid {
 			label.CID = &cidNull.String
 		}

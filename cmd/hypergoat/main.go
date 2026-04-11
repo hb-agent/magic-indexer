@@ -717,13 +717,28 @@ func startJetstream(
 }
 
 // startLabeler starts one labeler.Consumer per configured DID, resolving
-// each labeler's PDS via the OAuth DIDResolver (which respects the
-// PLC_DIRECTORY_URL override). Consumers are added to backgroundServices
-// for graceful shutdown.
+// each labeler's endpoint via the OAuth DIDResolver (which respects the
+// PLC_DIRECTORY_URL override). Invalid DIDs are skipped with a warning.
+// Consumers are added to backgroundServices for graceful shutdown.
 func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
-	dids := parseDIDs(cfg.LabelerDIDs)
-	if len(dids) == 0 {
+	raw := parseDIDs(cfg.LabelerDIDs)
+	if len(raw) == 0 {
 		slog.Info("Labeler subscriptions disabled (LABELER_DIDS is empty)")
+		return
+	}
+
+	var dids []string
+	for _, d := range raw {
+		if !oauth.IsValidDID(d) {
+			slog.Warn("Ignoring invalid labeler DID",
+				"did", d,
+				"hint", "expected did:plc: or did:web:")
+			continue
+		}
+		dids = append(dids, d)
+	}
+	if len(dids) == 0 {
+		slog.Warn("LABELER_DIDS set but all entries are invalid; no labeler consumers will run")
 		return
 	}
 
