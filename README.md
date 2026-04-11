@@ -6,7 +6,7 @@
 
 **A Go AT Protocol AppView server that indexes records and exposes them via GraphQL**
 
-*This repository is the `hb-agent/magic-index` fork of the
+*This repository is the `hb-agent/magic-indexer` fork of the
 `hypercerts-org/hyperindex` project. The product is branded
 **Magic Indexer**; the compiled binary is still named `hypergoat`
 as a historical artefact from when the project was originally
@@ -20,8 +20,8 @@ Magic Indexer connects to the AT Protocol network, indexes records matching your
 
 ```bash
 # Clone and run
-git clone https://github.com/hb-agent/magic-index.git
-cd magic-index
+git clone https://github.com/hb-agent/magic-indexer.git
+cd magic-indexer
 make setup          # creates .env with a freshly generated SECRET_KEY_BASE
 go run ./cmd/hypergoat
 ```
@@ -321,7 +321,7 @@ Migrations run automatically on startup.
 
 ## History
 
-The original project was incubated and created by [GainForest](https://gainforest.earth) and [Claude Opus 4.5](https://www.anthropic.com/claude) (Anthropic), originally under the name *Hypergoat*, later renamed to *Hyperindex* under [hypercerts-org](https://github.com/hypercerts-org) for community maintenance. This `hb-agent/magic-index` fork rebrands the product as **Magic Indexer** and carries the per-labeler label-definition work plus the production hardening landed during the overnight review process (see `docs/` / commit history for details). The binary is still called `hypergoat` inside the container to avoid a noisy module rename.
+The original project was incubated and created by [GainForest](https://gainforest.earth) and [Claude Opus 4.5](https://www.anthropic.com/claude) (Anthropic), originally under the name *Hypergoat*, later renamed to *Hyperindex* under [hypercerts-org](https://github.com/hypercerts-org) for community maintenance. This `hb-agent/magic-indexer` fork rebrands the product as **Magic Indexer** and carries the per-labeler label-definition work plus the production hardening landed during the overnight review process (see `docs/` / commit history for details). The binary is still called `hypergoat` inside the container to avoid a noisy module rename.
 
 ## License
 
