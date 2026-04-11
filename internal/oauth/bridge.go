@@ -122,6 +122,19 @@ func NewBridge(cfg BridgeConfig) *Bridge {
 	}
 }
 
+// maxBridgeResponseBytes caps every response body the bridge reads
+// from remote OAuth / PDS endpoints. 1 MiB is orders of magnitude
+// larger than any real metadata or token response and prevents a
+// hostile upstream from exhausting memory with a giant body.
+const maxBridgeResponseBytes = 1 << 20
+
+// limitBody wraps resp.Body so ReadAll / json.NewDecoder cannot pull
+// more than maxBridgeResponseBytes. Callers must still Close the
+// underlying response body.
+func limitBody(body io.Reader) io.Reader {
+	return io.LimitReader(body, maxBridgeResponseBytes)
+}
+
 // requireHTTPSEndpoint validates that an endpoint URL discovered in a
 // DID document parses cleanly and uses https. A hostile DID document
 // could otherwise point us at http:// (downgrade) or file:/ftp:/ etc.
@@ -165,7 +178,7 @@ func (b *Bridge) FetchProtectedResourceMetadata(ctx context.Context, pdsEndpoint
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(limitBody(resp.Body))
 		return nil, &BridgeError{
 			Type:    ErrTypeMetadataFetch,
 			Message: fmt.Sprintf("metadata request failed with status %d: %s", resp.StatusCode, string(body)),
@@ -173,7 +186,7 @@ func (b *Bridge) FetchProtectedResourceMetadata(ctx context.Context, pdsEndpoint
 	}
 
 	var metadata ProtectedResourceMetadata
-	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+	if err := json.NewDecoder(limitBody(resp.Body)).Decode(&metadata); err != nil {
 		return nil, &BridgeError{Type: ErrTypeInvalidResponse, Message: "failed to parse protected resource metadata", Cause: err}
 	}
 
@@ -200,7 +213,7 @@ func (b *Bridge) FetchAuthorizationServerMetadata(ctx context.Context, authServe
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(limitBody(resp.Body))
 		return nil, &BridgeError{
 			Type:    ErrTypeMetadataFetch,
 			Message: fmt.Sprintf("metadata request failed with status %d: %s", resp.StatusCode, string(body)),
@@ -208,7 +221,7 @@ func (b *Bridge) FetchAuthorizationServerMetadata(ctx context.Context, authServe
 	}
 
 	var metadata AuthorizationServerMetadata
-	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+	if err := json.NewDecoder(limitBody(resp.Body)).Decode(&metadata); err != nil {
 		return nil, &BridgeError{Type: ErrTypeInvalidResponse, Message: "failed to parse authorization server metadata", Cause: err}
 	}
 
@@ -336,7 +349,7 @@ func (b *Bridge) fetchTokens(ctx context.Context, tokenURL string, body url.Valu
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(limitBody(resp.Body))
 	if err != nil {
 		return nil, &BridgeError{Type: ErrTypeHTTP, Message: "failed to read response", Cause: err}
 	}
@@ -431,7 +444,7 @@ func (b *Bridge) PushAuthorizationRequest(ctx context.Context, parEndpoint strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(limitBody(resp.Body))
 		return nil, &BridgeError{
 			Type:    ErrTypePAR,
 			Message: fmt.Sprintf("PAR request failed with status %d: %s", resp.StatusCode, string(body)),
@@ -439,7 +452,7 @@ func (b *Bridge) PushAuthorizationRequest(ctx context.Context, parEndpoint strin
 	}
 
 	var parResp PARResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parResp); err != nil {
+	if err := json.NewDecoder(limitBody(resp.Body)).Decode(&parResp); err != nil {
 		return nil, &BridgeError{Type: ErrTypeInvalidResponse, Message: "failed to parse PAR response", Cause: err}
 	}
 

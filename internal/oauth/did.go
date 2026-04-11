@@ -54,18 +54,53 @@ func WithHTTPClient(client *http.Client) DIDResolverOption {
 	}
 }
 
+// maxDIDDocumentBytes is the largest DID document or handle-resolution
+// response we will accept. Real DID docs are a few KB; the cap guards
+// against a hostile PLC or did:web returning multi-GB JSON and
+// exhausting memory in io.ReadAll.
+const maxDIDDocumentBytes = 256 * 1024
+
 // NewDIDResolver creates a new DID resolver.
 func NewDIDResolver(opts ...DIDResolverOption) *DIDResolver {
 	r := &DIDResolver{
 		plcDirectoryURL: DefaultPLCDirectoryURL,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
+			// Reject redirects that would land on a private /
+			// loopback / link-local address. This closes the
+			// SSRF hole where a hostile PLC directory redirects
+			// a lookup to 127.0.0.1 or 169.254.169.254 after the
+			// initial hostname check has already passed.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return fmt.Errorf("stopped after 10 redirects")
+				}
+				if err := rejectPrivateHost(req.URL.Host); err != nil {
+					return fmt.Errorf("redirect blocked: %w", err)
+				}
+				return nil
+			},
 		},
 	}
 	for _, opt := range opts {
 		opt(r)
 	}
 	return r
+}
+
+// readBounded reads at most maxDIDDocumentBytes from r and returns an
+// error if the stream is larger. Replaces io.ReadAll on DID-adjacent
+// HTTP responses.
+func readBounded(r io.Reader) ([]byte, error) {
+	limited := io.LimitReader(r, maxDIDDocumentBytes+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxDIDDocumentBytes {
+		return nil, fmt.Errorf("response body exceeds %d bytes", maxDIDDocumentBytes)
+	}
+	return body, nil
 }
 
 // ResolveDID resolves a DID to its document.
@@ -98,7 +133,7 @@ func (r *DIDResolver) resolvePLCDID(did string) (*DIDDocument, error) {
 		return nil, fmt.Errorf("PLC resolution failed with status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -144,7 +179,7 @@ func (r *DIDResolver) resolveWebDID(did string) (*DIDDocument, error) {
 		return nil, fmt.Errorf("web DID resolution failed with status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -167,7 +202,7 @@ func (r *DIDResolver) ResolveHandleToDID(handle string) (string, error) {
 		return "", fmt.Errorf("handle resolution failed with status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBounded(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}

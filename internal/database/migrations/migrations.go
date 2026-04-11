@@ -48,7 +48,15 @@ func Run(ctx context.Context, exec database.Executor) error {
 		return fmt.Errorf("failed to load migrations: %w", err)
 	}
 
-	// Apply pending migrations
+	// Apply pending migrations. Each migration runs inside a single
+	// transaction with its schema_migrations row write so we can
+	// never persist partial DDL or end up with an applied schema
+	// change that the tracking table disagrees about. Both SQLite
+	// and Postgres support transactional DDL for the operations we
+	// actually run (CREATE/ALTER/DROP TABLE, CREATE INDEX). If a
+	// future migration ever needs a non-transactional operation
+	// (e.g., Postgres `CREATE INDEX CONCURRENTLY`) it should be
+	// flagged and handled outside this loop.
 	for _, m := range migrations {
 		if applied[m.Version] {
 			slog.Debug("Migration already applied", "version", m.Version, "name", m.Name)
@@ -57,19 +65,47 @@ func Run(ctx context.Context, exec database.Executor) error {
 
 		slog.Info("Applying migration", "version", m.Version, "name", m.Name)
 
-		// Execute migration SQL
-		if _, err := exec.DB().ExecContext(ctx, m.UpSQL); err != nil {
-			return fmt.Errorf("failed to apply migration %s: %w", m.Version, err)
-		}
-
-		// Record migration
-		if err := recordMigration(ctx, exec, m.Version); err != nil {
-			return fmt.Errorf("failed to record migration %s: %w", m.Version, err)
+		if err := applyMigrationTx(ctx, exec, m); err != nil {
+			return err
 		}
 
 		slog.Info("Migration applied successfully", "version", m.Version)
 	}
 
+	return nil
+}
+
+// applyMigrationTx applies a single migration's UpSQL and records its
+// row in schema_migrations inside one transaction.
+func applyMigrationTx(ctx context.Context, exec database.Executor, m Migration) error {
+	tx, err := exec.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin tx for migration %s: %w", m.Version, err)
+	}
+	// Guard against panics and error returns leaving a stray tx.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.ExecContext(ctx, m.UpSQL); err != nil {
+		return fmt.Errorf("failed to apply migration %s: %w", m.Version, err)
+	}
+
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO schema_migrations (version) VALUES (%s)",
+		exec.Placeholder(1),
+	)
+	if _, err := tx.ExecContext(ctx, insertSQL, m.Version); err != nil {
+		return fmt.Errorf("failed to record migration %s: %w", m.Version, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit migration %s: %w", m.Version, err)
+	}
+	committed = true
 	return nil
 }
 
@@ -163,13 +199,6 @@ func getAppliedMigrations(ctx context.Context, exec database.Executor) (map[stri
 	}
 
 	return applied, rows.Err()
-}
-
-func recordMigration(ctx context.Context, exec database.Executor, version string) error {
-	_, err := exec.Exec(ctx,
-		fmt.Sprintf("INSERT INTO schema_migrations (version) VALUES (%s)", exec.Placeholder(1)),
-		[]database.Value{database.Text(version)})
-	return err
 }
 
 func loadMigrations(dialect database.Dialect) ([]Migration, error) {

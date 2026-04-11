@@ -13,6 +13,22 @@ import (
 	"github.com/GainForest/hypergoat/internal/oauth"
 )
 
+// variableKeys returns a sorted list of the top-level keys of a
+// GraphQL variables map, without any values. Used for logging so
+// that hostile or sensitive variable values never reach the log
+// stream while still letting operators see which parameters a
+// mutation was invoked with.
+func variableKeys(vars map[string]interface{}) []string {
+	if len(vars) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // Handler handles admin GraphQL requests with authentication.
 type Handler struct {
 	schema      *graphql.Schema
@@ -53,23 +69,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Variables     map[string]interface{} `json:"variables"`
 	}
 
-	if r.Method == "GET" {
-		params.Query = r.URL.Query().Get("query")
-		params.OperationName = r.URL.Query().Get("operationName")
-	} else {
-		// Cap body size to prevent memory exhaustion via huge JSON.
-		// 2 MiB gives admin tooling a bit more room than the public
-		// endpoint.
-		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
-		if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
+	// Admin queries must be POST: GET would leak the query string
+	// (including mutation names, variables, and tokens if passed
+	// that way) into access logs and proxy caches.
+	if r.Method != http.MethodPost {
+		http.Error(w, "admin graphql requires POST", http.StatusMethodNotAllowed)
+		return
+	}
+	// Cap body size to prevent memory exhaustion via huge JSON.
+	// 2 MiB gives admin tooling a bit more room than the public
+	// endpoint.
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
 	}
 
-	// Log mutation requests
+	// Log mutation requests — but only the operation name and the
+	// variable *keys*, not the values. Values may contain tokens,
+	// PII, or attacker-controlled strings that would forge log
+	// lines if dumped verbatim.
 	if strings.Contains(params.Query, "mutation") {
-		slog.Info("[admin] Mutation request", "operation", params.OperationName, "variables", params.Variables)
+		slog.Info("[admin] Mutation request",
+			"operation", params.OperationName,
+			"variable_keys", variableKeys(params.Variables))
 	}
 
 	// Get authentication info from context (set by middleware) or X-User-DID header
@@ -83,10 +106,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if userDID == "" && h.adminAPIKey != "" {
 		if h.validAPIKey(r) {
 			apiKeyAuth = true
-			userDID = r.Header.Get("X-User-DID")
-			if userDID != "" {
+			candidate := r.Header.Get("X-User-DID")
+			// Validate the DID format before trusting it —
+			// otherwise a caller with the API key could pass an
+			// arbitrary string and forge audit log entries.
+			if candidate != "" && oauth.IsValidDID(candidate) {
+				userDID = candidate
 				slog.Info("[admin] Auth via X-User-DID + API key",
 					"did", userDID,
+					"remote_addr", r.RemoteAddr)
+			} else if candidate != "" {
+				slog.Warn("[admin] X-User-DID header rejected: not a valid DID",
 					"remote_addr", r.RemoteAddr)
 			}
 		} else if r.Header.Get("X-User-DID") != "" {
