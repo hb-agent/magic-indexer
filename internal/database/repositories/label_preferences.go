@@ -9,9 +9,13 @@ import (
 	"github.com/GainForest/hypergoat/internal/database"
 )
 
-// LabelPreference represents a user's preference for a specific label.
+// LabelPreference represents a user's preference for a specific
+// (labeler, label value) combination. A user can now choose to
+// hide a label from labeler A while ignoring the same value from
+// labeler B.
 type LabelPreference struct {
 	DID        string
+	Src        string // Labeler DID the preference applies to
 	LabelVal   string
 	Visibility LabelVisibility
 	CreatedAt  time.Time
@@ -27,12 +31,13 @@ func NewLabelPreferencesRepository(db database.Executor) *LabelPreferencesReposi
 	return &LabelPreferencesRepository{db: db}
 }
 
-// GetByDID retrieves all label preferences for a user.
+// GetByDID retrieves all label preferences for a user, across every
+// labeler.
 func (r *LabelPreferencesRepository) GetByDID(ctx context.Context, did string) ([]LabelPreference, error) {
-	sqlStr := fmt.Sprintf(`SELECT did, label_val, visibility, created_at 
-		FROM actor_label_preference 
-		WHERE did = %s 
-		ORDER BY label_val`, r.db.Placeholder(1))
+	sqlStr := fmt.Sprintf(`SELECT did, src, label_val, visibility, created_at
+		FROM actor_label_preference
+		WHERE did = %s
+		ORDER BY src, label_val`, r.db.Placeholder(1))
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, did)
 	if err != nil {
@@ -43,52 +48,50 @@ func (r *LabelPreferencesRepository) GetByDID(ctx context.Context, did string) (
 	return scanLabelPreferences(rows)
 }
 
-// Get retrieves a specific label preference for a user.
-func (r *LabelPreferencesRepository) Get(ctx context.Context, did, labelVal string) (*LabelPreference, error) {
-	sqlStr := fmt.Sprintf(`SELECT did, label_val, visibility, created_at 
-		FROM actor_label_preference 
-		WHERE did = %s AND label_val = %s`,
-		r.db.Placeholder(1), r.db.Placeholder(2))
+// Get retrieves a specific (did, src, labelVal) preference.
+func (r *LabelPreferencesRepository) Get(ctx context.Context, did, src, labelVal string) (*LabelPreference, error) {
+	sqlStr := fmt.Sprintf(`SELECT did, src, label_val, visibility, created_at
+		FROM actor_label_preference
+		WHERE did = %s AND src = %s AND label_val = %s`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
 
 	var pref LabelPreference
 	var createdAtStr string
 
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(did), database.Text(labelVal)},
-		&pref.DID, &pref.LabelVal, &pref.Visibility, &createdAtStr)
+	err := r.db.QueryRow(ctx, sqlStr,
+		[]database.Value{database.Text(did), database.Text(src), database.Text(labelVal)},
+		&pref.DID, &pref.Src, &pref.LabelVal, &pref.Visibility, &createdAtStr)
 	if err != nil {
 		return nil, err
 	}
 
-	pref.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-	if pref.CreatedAt.IsZero() {
-		pref.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAtStr)
-	}
-
+	pref.CreatedAt = parseStoredTime(createdAtStr)
 	return &pref, nil
 }
 
-// Set creates or updates a label preference.
-func (r *LabelPreferencesRepository) Set(ctx context.Context, did, labelVal string, visibility LabelVisibility) (*LabelPreference, error) {
+// Set creates or updates a label preference scoped to a specific labeler.
+func (r *LabelPreferencesRepository) Set(ctx context.Context, did, src, labelVal string, visibility LabelVisibility) (*LabelPreference, error) {
 	var sqlStr string
 	switch r.db.Dialect() {
 	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO actor_label_preference (did, label_val, visibility)
-			VALUES (%s, %s, %s)
-			ON CONFLICT (did, label_val) DO UPDATE SET
+		sqlStr = fmt.Sprintf(`INSERT INTO actor_label_preference (did, src, label_val, visibility)
+			VALUES (%s, %s, %s, %s)
+			ON CONFLICT (did, src, label_val) DO UPDATE SET
 				visibility = EXCLUDED.visibility,
 				created_at = NOW()`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
 	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO actor_label_preference (did, label_val, visibility)
-			VALUES (%s, %s, %s)
-			ON CONFLICT (did, label_val) DO UPDATE SET
+		sqlStr = fmt.Sprintf(`INSERT INTO actor_label_preference (did, src, label_val, visibility)
+			VALUES (%s, %s, %s, %s)
+			ON CONFLICT (did, src, label_val) DO UPDATE SET
 				visibility = excluded.visibility,
 				created_at = datetime('now')`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
 	}
 
 	params := []database.Value{
 		database.Text(did),
+		database.Text(src),
 		database.Text(labelVal),
 		database.Text(string(visibility)),
 	}
@@ -98,17 +101,19 @@ func (r *LabelPreferencesRepository) Set(ctx context.Context, did, labelVal stri
 		return nil, err
 	}
 
-	return r.Get(ctx, did, labelVal)
+	return r.Get(ctx, did, src, labelVal)
 }
 
-// Delete removes a label preference (resets to default).
-func (r *LabelPreferencesRepository) Delete(ctx context.Context, did, labelVal string) error {
-	sqlStr := fmt.Sprintf(`DELETE FROM actor_label_preference 
-		WHERE did = %s AND label_val = %s`,
-		r.db.Placeholder(1), r.db.Placeholder(2))
+// Delete removes a single preference (resetting it to the default
+// visibility for that labeler).
+func (r *LabelPreferencesRepository) Delete(ctx context.Context, did, src, labelVal string) error {
+	sqlStr := fmt.Sprintf(`DELETE FROM actor_label_preference
+		WHERE did = %s AND src = %s AND label_val = %s`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
 
 	params := []database.Value{
 		database.Text(did),
+		database.Text(src),
 		database.Text(labelVal),
 	}
 
@@ -130,14 +135,11 @@ func scanLabelPreferences(rows *sql.Rows) ([]LabelPreference, error) {
 		var pref LabelPreference
 		var createdAtStr string
 
-		if err := rows.Scan(&pref.DID, &pref.LabelVal, &pref.Visibility, &createdAtStr); err != nil {
+		if err := rows.Scan(&pref.DID, &pref.Src, &pref.LabelVal, &pref.Visibility, &createdAtStr); err != nil {
 			return nil, err
 		}
 
-		pref.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-		if pref.CreatedAt.IsZero() {
-			pref.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAtStr)
-		}
+		pref.CreatedAt = parseStoredTime(createdAtStr)
 		preferences = append(preferences, pref)
 	}
 

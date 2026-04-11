@@ -10,6 +10,12 @@ import (
 	"github.com/GainForest/hypergoat/internal/database"
 )
 
+// SystemLabelerSrc is the sentinel DID under which the pre-seeded
+// Bluesky label definitions (!takedown, !warn, porn, etc.) live.
+// Treat it as an instance-owned labeler whose semantics are defined
+// by the operator rather than any external ATProto labeler.
+const SystemLabelerSrc = "did:web:system"
+
 // LabelSeverity represents the severity level of a label.
 type LabelSeverity string
 
@@ -29,8 +35,12 @@ const (
 	VisibilityHide   LabelVisibility = "hide"
 )
 
-// LabelDefinition represents a label type definition.
+// LabelDefinition represents a label type definition owned by a
+// specific labeler (identified by Src). Two labelers may publish the
+// same Val with different descriptions, severities, and default
+// visibilities — each gets its own row keyed by (Src, Val).
 type LabelDefinition struct {
+	Src               string // Labeler DID that owns this definition
 	Val               string
 	Description       string
 	Severity          LabelSeverity
@@ -48,9 +58,9 @@ func NewLabelDefinitionsRepository(db database.Executor) *LabelDefinitionsReposi
 	return &LabelDefinitionsRepository{db: db}
 }
 
-// GetAll retrieves all label definitions.
+// GetAll retrieves every label definition, ordered by (src, val).
 func (r *LabelDefinitionsRepository) GetAll(ctx context.Context) ([]LabelDefinition, error) {
-	sqlStr := "SELECT val, description, severity, default_visibility, created_at FROM label_definition ORDER BY val"
+	sqlStr := "SELECT src, val, description, severity, default_visibility, created_at FROM label_definition ORDER BY src, val"
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr)
 	if err != nil {
@@ -61,48 +71,69 @@ func (r *LabelDefinitionsRepository) GetAll(ctx context.Context) ([]LabelDefinit
 	return scanLabelDefinitions(rows)
 }
 
-// GetNonSystem retrieves all non-system label definitions (excludes labels starting with !).
-func (r *LabelDefinitionsRepository) GetNonSystem(ctx context.Context) ([]LabelDefinition, error) {
-	sqlStr := "SELECT val, description, severity, default_visibility, created_at FROM label_definition WHERE val NOT LIKE '!%' ORDER BY val"
-
-	rows, err := r.db.DB().QueryContext(ctx, sqlStr)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	return scanLabelDefinitions(rows)
-}
-
-// Get retrieves a label definition by value.
-func (r *LabelDefinitionsRepository) Get(ctx context.Context, val string) (*LabelDefinition, error) {
-	sqlStr := fmt.Sprintf("SELECT val, description, severity, default_visibility, created_at FROM label_definition WHERE val = %s",
+// GetBySrc retrieves every label definition owned by the given
+// labeler. Pass SystemLabelerSrc to fetch only the pre-seeded Bluesky
+// defaults.
+func (r *LabelDefinitionsRepository) GetBySrc(ctx context.Context, src string) ([]LabelDefinition, error) {
+	sqlStr := fmt.Sprintf("SELECT src, val, description, severity, default_visibility, created_at FROM label_definition WHERE src = %s ORDER BY val",
 		r.db.Placeholder(1))
+
+	rows, err := r.db.DB().QueryContext(ctx, sqlStr, src)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanLabelDefinitions(rows)
+}
+
+// GetNonSystem retrieves all non-system label definitions — rows not
+// owned by SystemLabelerSrc AND whose val does not start with `!`.
+// Used by the admin UI to list user-manageable labels.
+func (r *LabelDefinitionsRepository) GetNonSystem(ctx context.Context) ([]LabelDefinition, error) {
+	sqlStr := fmt.Sprintf(`SELECT src, val, description, severity, default_visibility, created_at
+		FROM label_definition
+		WHERE src <> %s AND val NOT LIKE '!%%'
+		ORDER BY src, val`, r.db.Placeholder(1))
+
+	rows, err := r.db.DB().QueryContext(ctx, sqlStr, SystemLabelerSrc)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanLabelDefinitions(rows)
+}
+
+// Get retrieves a single label definition for a specific (src, val).
+func (r *LabelDefinitionsRepository) Get(ctx context.Context, src, val string) (*LabelDefinition, error) {
+	sqlStr := fmt.Sprintf(`SELECT src, val, description, severity, default_visibility, created_at
+		FROM label_definition WHERE src = %s AND val = %s`,
+		r.db.Placeholder(1), r.db.Placeholder(2))
 
 	var def LabelDefinition
 	var createdAtStr string
 
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(val)},
-		&def.Val, &def.Description, &def.Severity, &def.DefaultVisibility, &createdAtStr)
+	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(src), database.Text(val)},
+		&def.Src, &def.Val, &def.Description, &def.Severity, &def.DefaultVisibility, &createdAtStr)
 	if err != nil {
 		return nil, err
 	}
 
-	def.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-	if def.CreatedAt.IsZero() {
-		def.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAtStr)
-	}
+	def.CreatedAt = parseStoredTime(createdAtStr)
 
 	return &def, nil
 }
 
-// Insert creates a new label definition.
-func (r *LabelDefinitionsRepository) Insert(ctx context.Context, val, description string, severity LabelSeverity, defaultVisibility LabelVisibility) error {
-	sqlStr := fmt.Sprintf(`INSERT INTO label_definition (val, description, severity, default_visibility)
-		VALUES (%s, %s, %s, %s)`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
+// Insert creates a new label definition for the given labeler. Fails
+// on conflict — use Upsert if you want idempotent behaviour.
+func (r *LabelDefinitionsRepository) Insert(ctx context.Context, src, val, description string, severity LabelSeverity, defaultVisibility LabelVisibility) error {
+	sqlStr := fmt.Sprintf(`INSERT INTO label_definition (src, val, description, severity, default_visibility)
+		VALUES (%s, %s, %s, %s, %s)`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), r.db.Placeholder(5))
 
 	params := []database.Value{
+		database.Text(src),
 		database.Text(val),
 		database.Text(description),
 		database.Text(string(severity)),
@@ -113,12 +144,14 @@ func (r *LabelDefinitionsRepository) Insert(ctx context.Context, val, descriptio
 	return err
 }
 
-// Exists checks if a label definition exists.
-func (r *LabelDefinitionsRepository) Exists(ctx context.Context, val string) (bool, error) {
-	sqlStr := fmt.Sprintf("SELECT COUNT(*) FROM label_definition WHERE val = %s", r.db.Placeholder(1))
+// Exists checks whether a label definition exists for a specific
+// (src, val) combination.
+func (r *LabelDefinitionsRepository) Exists(ctx context.Context, src, val string) (bool, error) {
+	sqlStr := fmt.Sprintf("SELECT COUNT(*) FROM label_definition WHERE src = %s AND val = %s",
+		r.db.Placeholder(1), r.db.Placeholder(2))
 
 	var count int64
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(val)}, &count)
+	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(src), database.Text(val)}, &count)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
@@ -165,14 +198,11 @@ func scanLabelDefinitions(rows *sql.Rows) ([]LabelDefinition, error) {
 		var def LabelDefinition
 		var createdAtStr string
 
-		if err := rows.Scan(&def.Val, &def.Description, &def.Severity, &def.DefaultVisibility, &createdAtStr); err != nil {
+		if err := rows.Scan(&def.Src, &def.Val, &def.Description, &def.Severity, &def.DefaultVisibility, &createdAtStr); err != nil {
 			return nil, err
 		}
 
-		def.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-		if def.CreatedAt.IsZero() {
-			def.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAtStr)
-		}
+		def.CreatedAt = parseStoredTime(createdAtStr)
 		definitions = append(definitions, def)
 	}
 
