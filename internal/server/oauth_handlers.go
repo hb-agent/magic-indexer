@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -254,21 +255,28 @@ func (h *OAuthHandlers) HandleAuthorize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Resolve login_hint to DID if it's a handle
+	// Resolve login_hint to DID if it's a handle. We log the
+	// underlying error server-side but surface only a generic
+	// message to the client so DNS / auth-server topology isn't
+	// leaked back through error_description.
 	did := loginHint
 	if !strings.HasPrefix(loginHint, "did:") {
 		resolvedDID, err := h.didResolver.ResolveHandleToDID(loginHint)
 		if err != nil {
-			h.redirectWithError(w, redirectURI, "invalid_request", "Failed to resolve handle: "+err.Error(), state)
+			slog.Warn("handle resolution failed", "handle", loginHint, "error", err)
+			h.redirectWithError(w, redirectURI, "invalid_request", "Failed to resolve handle", state)
 			return
 		}
 		did = resolvedDID
 	}
 
-	// Resolve DID to get PDS endpoint and auth server metadata
+	// Resolve DID to get PDS endpoint and auth server metadata.
+	// Same log-internal / surface-generic treatment: a PDS reachability
+	// failure shouldn't expose infrastructure to the browser.
 	authServer, _, err := h.bridge.ResolveAuthServer(ctx, did)
 	if err != nil {
-		h.redirectWithError(w, redirectURI, "server_error", "Failed to resolve authorization server: "+err.Error(), state)
+		slog.Warn("auth server resolution failed", "did", did, "error", err)
+		h.redirectWithError(w, redirectURI, "server_error", "Failed to resolve authorization server", state)
 		return
 	}
 
@@ -784,11 +792,15 @@ func (h *OAuthHandlers) handleRefreshTokenGrant(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Revoke old refresh token
-	if err := h.refreshTokens.Revoke(ctx, refreshTokenStr); err != nil {
-		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Database error")
-		return
-	}
+	// Rotate order: generate + store the new tokens FIRST, and
+	// only revoke the old refresh token after both new tokens
+	// are safely in the database. If we revoked first and then
+	// failed to persist the new tokens, the caller's session was
+	// dead with nothing valid to replace it. This ordering is
+	// not a full transaction — a crash between Insert(new
+	// access) and Revoke(old) leaves the old refresh token
+	// usable for one more call — but that's strictly safer than
+	// leaving the user with no valid tokens at all.
 
 	// Generate new tokens
 	newAccessTokenStr, err := oauth.GenerateAccessToken()
@@ -849,6 +861,13 @@ func (h *OAuthHandlers) handleRefreshTokenGrant(w http.ResponseWriter, r *http.R
 	}
 	if err := h.refreshTokens.Insert(ctx, newRefreshToken); err != nil {
 		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store refresh token")
+		return
+	}
+
+	// Only after both new tokens are persisted is it safe to
+	// revoke the old refresh token. See comment above.
+	if err := h.refreshTokens.Revoke(ctx, refreshTokenStr); err != nil {
+		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Database error")
 		return
 	}
 
