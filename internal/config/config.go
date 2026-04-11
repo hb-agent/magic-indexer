@@ -141,10 +141,23 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+// devSecretKeyBase is the literal placeholder value shipped in
+// docker-compose.yml and the example env file. Any deployment that
+// boots with this exact string is misconfigured — session tokens
+// would be forged-able by anyone who's read the repo. Validate()
+// refuses to start in that state.
+const devSecretKeyBase = "development-secret-key-change-in-production-64chars"
+
 // Validate checks that all required configuration is present and valid.
 func (c *Config) Validate() error {
 	if len(c.SecretKeyBase) < 64 {
 		return fmt.Errorf("SECRET_KEY_BASE must be at least 64 characters")
+	}
+	if c.SecretKeyBase == devSecretKeyBase {
+		return fmt.Errorf(
+			"SECRET_KEY_BASE is set to the docker-compose development placeholder; " +
+				"set it to a real random value (e.g. openssl rand -base64 64)",
+		)
 	}
 
 	if c.Port < 1 || c.Port > 65535 {

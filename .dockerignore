@@ -1,0 +1,50 @@
+# Exclude files that should never end up in the build context /
+# runtime image. This keeps layer sizes small, avoids leaking local
+# dev state into the image, and makes builds more reproducible.
+
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Editor / IDE
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+
+# Build artifacts + coverage
+dist/
+bin/
+*.out
+*.prof
+coverage*
+
+# Docs and meta
+docs/
+AGENTS.md
+REVIEW*.md
+LICENSE
+
+# CI / GitHub metadata
+.github/
+.golangci.yml
+
+# Test fixtures
+testdata/
+
+# Docker meta (not needed inside the image)
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+
+# Env files (never copy secrets into layers)
+.env
+.env.*
+!.env.example
+
+# Node / client bits if the UI lives alongside
+client/node_modules/
+client/.next/
+client/dist/
