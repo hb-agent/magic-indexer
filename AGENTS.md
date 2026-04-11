@@ -121,6 +121,88 @@ touches state.
 
 ---
 
+## Browser automation in this dev container
+
+This dev container has a working **agent-browser** install that
+controls a real headless Chromium. Use it when you need to verify
+something behaves correctly *in a real browser* — not just in
+SSR HTML, not just in a curl probe. Examples: client-side
+hydration errors, CORS rejections, React error boundaries,
+post-hydration data fetches, or "does the user actually see X
+on the page".
+
+The two pieces that had to come together for this to work:
+
+- **`agent-browser` CLI** (npm package, native Rust): installed
+  globally via `npm install -g agent-browser`. Version `0.25.3`
+  or later.
+- **Chromium binary**: this dev container is Linux ARM64.
+  Chrome for Testing has no ARM64 builds, so we use the
+  Chromium that ships with Playwright instead. Install with
+  `npx --yes playwright@latest install chromium --with-deps`.
+  Lands at `~/.cache/ms-playwright/chromium-1217/chrome-linux/chrome`.
+- **Wrapper script** at `~/.local/bin/ab` that always passes
+  `--executable-path` pointing at the Playwright Chromium so
+  you never have to remember it. **Use `ab` instead of
+  `agent-browser` for everything in this repo.**
+
+If `ab --version` doesn't work in a fresh session, both the
+npm install and the Playwright Chromium download will need to
+be re-run, then drop the wrapper back in:
+
+```bash
+npm install -g agent-browser
+npx --yes playwright@latest install chromium --with-deps
+mkdir -p ~/.local/bin
+cat > ~/.local/bin/ab <<'EOF'
+#!/usr/bin/env bash
+exec agent-browser --executable-path "$HOME/.cache/ms-playwright/chromium-1217/chrome-linux/chrome" "$@"
+EOF
+chmod +x ~/.local/bin/ab
+```
+
+The chromium directory name (`chromium-1217`) is the Playwright
+revision number and may differ on a fresh install. Update the
+wrapper if needed.
+
+### Common usage
+
+```bash
+ab open https://magic-indexer-dev.up.railway.app/graphiql
+ab snapshot                       # accessibility tree with refs (best for AI)
+ab screenshot /tmp/page.png       # raster image
+ab eval '<javascript>'            # run JS in the page context
+ab click @e10                     # click element by ref from snapshot
+ab fill @e3 "search term"         # fill an input
+ab close                          # close session
+```
+
+### What it caught last session
+
+The integration test of `certs-social → magic-indexer` produced
+the right SSR HTML, the right Vercel build, the right TypeScript,
+and a passing `npm run build` — but the live page in a real
+browser showed `Something went wrong / Failed to fetch` because
+the magic-indexer CORS allowlist didn't include the Vercel
+preview URL. Caught only because `ab open` + `ab snapshot`
+exposed the post-hydration error state. None of the static
+checks would have found it.
+
+### What it can't do
+
+`ab` controls a headless browser. It can't:
+
+- Watch you click around interactively (use your own browser).
+- Step through React DevTools.
+- Show you the same console output you'd see in Chrome DevTools
+  in detail (use `ab eval 'console errors are evaluated as JS'`
+  workarounds, or open the page in your own browser for
+  interactive debugging).
+
+For deep interactive debugging, your local browser is still
+the right tool. `ab` is for "verify the live deployment renders
+correctly without me having to open a browser tab."
+
 ## Self-test for a fresh session
 
 After you've read this file, test your understanding by

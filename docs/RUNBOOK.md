@@ -392,6 +392,26 @@ railway logs --service magic-indexer --deployment --lines 200
 railway logs --service magic-indexer --build --lines 200
 ```
 
+### Verifying the live deployment in a real browser
+
+The dev container has `agent-browser` installed (with Playwright's
+ARM64 Chromium) and a wrapper at `~/.local/bin/ab`. Use it to
+catch hydration / CORS / runtime errors that SSR HTML and curl
+probes will miss:
+
+```bash
+ab open https://magic-indexer-dev.up.railway.app/graphiql
+ab snapshot                       # accessibility tree with refs
+ab screenshot /tmp/page.png
+ab eval 'fetch("/health").then(r => r.status)'
+ab close
+```
+
+This is how the certs-social integration found a CORS bug that
+all static checks (TypeScript, Next.js build, lint) missed.
+See AGENTS.md for the install instructions if `ab` isn't there
+in a fresh session.
+
 ### "Why is this record hidden?"
 
 If a record is missing from a `records(excludeLabels: [...])`
