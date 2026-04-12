@@ -4,8 +4,9 @@ package query
 import (
 	"fmt"
 
-	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/graphql-go/graphql"
+
+	"github.com/GainForest/hypergoat/internal/database/repositories"
 )
 
 const (
