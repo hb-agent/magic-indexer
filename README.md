@@ -42,6 +42,7 @@ on Railway, backed by managed Postgres. Endpoints:
 - Health — https://magic-indexer-dev.up.railway.app/health
 - Stats — https://magic-indexer-dev.up.railway.app/stats
 - Prometheus metrics — https://magic-indexer-dev.up.railway.app/metrics
+- Admin UI — https://magic-indexer-admin.vercel.app (Next.js admin client with confidential ATProto OAuth)
 
 For the full operations playbook — first-time deploy, routine
 deploys, lexicon upload, labeler enable / disable, secrets
@@ -107,7 +108,7 @@ query {
 
 # With typed queries (when lexicon schemas are loaded)
 query {
-  appBskyFeedPost(first: 10, where: { did: { eq: "did:plc:..." } }) {
+  orgHypercertsClaimActivity(first: 10, authors: ["did:plc:..."]) {
     edges {
       node {
         uri
@@ -172,6 +173,7 @@ SECRET_KEY_BASE=your-secret-key-at-least-64-characters-long-generate-with-openss
 
 # WebSocket origins — comma-separated allowed origins for subscriptions.
 # Empty = same-origin only. Set to "*" for development.
+# Supports wildcard patterns: https://certs-social-*.vercel.app
 # ALLOWED_ORIGINS=https://your-frontend.vercel.app
 
 # Jetstream (real-time indexing)

@@ -111,7 +111,7 @@ railway variables --service magic-indexer \
   --set "SECRET_KEY_BASE=$SECRET_KEY_BASE" \
   --set "ADMIN_API_KEY=$ADMIN_API_KEY" \
   --set "ADMIN_DIDS=did:plc:<your-did-here>" \
-  --set "ALLOWED_ORIGINS=https://certs.social" \
+  --set "ALLOWED_ORIGINS=https://certs.social,https://certs-social-*.vercel.app" \
   --skip-deploys
 
 # 7. Push the build
@@ -499,11 +499,46 @@ If your token has been exposed:
   `LogActivity` and `UpdateStatus`, an `activity` row is left in
   `pending` state. The activity cleanup worker (in
   `internal/workers/`) flips these to `orphaned` after 10 min.
+- **CORS wildcards**: `ALLOWED_ORIGINS` supports glob-style
+  wildcard patterns (e.g. `https://certs-social-*.vercel.app`)
+  to cover Vercel preview deployments without listing each one.
 - **Takedown is opt-in**: a record with an active `!takedown`
   label is *not* hidden by default. Clients have to pass
   `excludeLabels: ["!takedown"]` explicitly. This is a deliberate
   product decision (the indexer is labeler-neutral). See the
   closed-but-deferred [issue #13](https://github.com/hb-agent/magic-indexer/issues/13).
+
+---
+
+## Admin client
+
+A Next.js admin UI is deployed at https://magic-indexer-admin.vercel.app.
+It uses confidential ATProto OAuth — sign in with any DID listed in
+`ADMIN_DIDS`. The client talks to the same `/admin/graphql` endpoint
+documented above; no separate API key is needed when using OAuth.
+
+---
+
+## `authors` filter
+
+Typed collection queries accept `authors: [String!]` to scope results
+to specific author DIDs. Usage:
+
+```graphql
+{ orgHypercertsClaimActivity(first: 10, authors: ["did:plc:..."]) { edges { node { uri } } } }
+```
+
+- Cap: 500 DIDs per query (returns an error if exceeded).
+- Empty list (`authors: []`) = no filter, returns all authors.
+
+---
+
+## Endorsement lexicon
+
+The `app.certified.temp.graph.endorsement` lexicon has been uploaded
+and is ingested by Jetstream. It is used by the certs-social frontend
+for the trusted-evaluator feed filter feature
+(see [`docs/architecture/0001-trusted-evaluator-feed-filter.md`](architecture/0001-trusted-evaluator-feed-filter.md)).
 
 ---
 

@@ -54,11 +54,14 @@ deployments, and conversation is **Magic Indexer**.
 | GitHub repo              | `https://github.com/hb-agent/magic-indexer`                             |
 | Active branch            | `per-labeler-definitions`                                               |
 | Backing database         | Postgres 18, Railway-managed, in the same project                       |
-| Currently ingesting from | Jetstream (23 lexicon-derived collections, no labelers)                 |
+| Admin UI                 | `https://magic-indexer-admin.vercel.app` (Next.js, confidential ATProto OAuth) |
+| Currently ingesting from | Jetstream (24 lexicon-derived collections, including `app.certified.temp.graph.endorsement`) |
 
-The 23 collections currently being ingested all start with one
+The 24 collections currently being ingested all start with one
 of three NSID prefixes: `org.hypercerts.*`, `app.certified.*`,
-`org.hyperboards.*`. Lexicons are uploaded via the admin API
+`org.hyperboards.*`. The `app.certified.temp.graph.endorsement`
+lexicon supports the trusted-evaluator feed filter
+(see [`docs/architecture/0001-trusted-evaluator-feed-filter.md`](docs/architecture/0001-trusted-evaluator-feed-filter.md)). Lexicons are uploaded via the admin API
 from the npm package `@hypercerts-org/lexicon` (see Operations
 below).
 
@@ -416,6 +419,12 @@ testdata/               # Test fixtures and sample lexicons
 ---
 
 ## Subsystem highlights (the things that bit us in review)
+
+### Public GraphQL `authors` filter
+Typed collection queries accept an `authors: [String!]` argument
+to filter by author DID. Cap: 500 DIDs per query. An empty list
+means "no filter" (returns all authors). Example:
+`orgHypercertsClaimActivity(first: 10, authors: ["did:plc:..."])`.
 
 ### Labeler subsystem (`internal/labeler/`)
 Mirrors `internal/jetstream/` but speaks the ATProto labeler
