@@ -53,7 +53,7 @@ one index and sorts, which is worse.
 
 Add a composite index matching the query shape.
 
-**File**: `internal/database/migrations/postgres/010_add_record_collection_did_keyset.up.sql`
+**File**: `internal/database/migrations/postgres/010_add_record_collection_did_keyset_index.up.sql`
 
 ```sql
 CREATE INDEX IF NOT EXISTS idx_record_collection_did_keyset
@@ -61,13 +61,13 @@ CREATE INDEX IF NOT EXISTS idx_record_collection_did_keyset
 ANALYZE record;
 ```
 
-**File**: `internal/database/migrations/postgres/010_add_record_collection_did_keyset.down.sql`
+**File**: `internal/database/migrations/postgres/010_add_record_collection_did_keyset_index.down.sql`
 
 ```sql
 DROP INDEX IF EXISTS idx_record_collection_did_keyset;
 ```
 
-**File**: `internal/database/migrations/sqlite/010_add_record_collection_did_keyset.up.sql`
+**File**: `internal/database/migrations/sqlite/010_add_record_collection_did_keyset_index.up.sql`
 
 ```sql
 CREATE INDEX IF NOT EXISTS idx_record_collection_did_keyset
@@ -75,7 +75,7 @@ CREATE INDEX IF NOT EXISTS idx_record_collection_did_keyset
 ANALYZE;
 ```
 
-**File**: `internal/database/migrations/sqlite/010_add_record_collection_did_keyset.down.sql`
+**File**: `internal/database/migrations/sqlite/010_add_record_collection_did_keyset_index.down.sql`
 
 ```sql
 DROP INDEX IF EXISTS idx_record_collection_did_keyset;
