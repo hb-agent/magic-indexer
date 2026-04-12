@@ -31,11 +31,6 @@ func (r *OAuthAuthorizationCodesRepository) Insert(ctx context.Context, code *oa
 		r.db.Placeholder(9), r.db.Placeholder(10), r.db.Placeholder(11), r.db.Placeholder(12),
 		r.db.Placeholder(13))
 
-	used := 0
-	if code.Used {
-		used = 1
-	}
-
 	params := []database.Value{
 		database.Text(code.Code),
 		database.Text(code.ClientID),
@@ -49,7 +44,7 @@ func (r *OAuthAuthorizationCodesRepository) Insert(ctx context.Context, code *oa
 		database.NullableText(code.Nonce),
 		database.Int(code.CreatedAt),
 		database.Int(code.ExpiresAt),
-		database.Int(int64(used)),
+		database.Bool(code.Used),
 	}
 
 	_, err := r.db.Exec(ctx, sqlStr, params)
@@ -70,7 +65,7 @@ func (r *OAuthAuthorizationCodesRepository) Get(ctx context.Context, codeStr str
 		codeChallenge       sql.NullString
 		codeChallengeMethod sql.NullString
 		nonce               sql.NullString
-		used                int
+		used                bool
 	)
 
 	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(codeStr)},
@@ -101,14 +96,14 @@ func (r *OAuthAuthorizationCodesRepository) Get(ctx context.Context, codeStr str
 	if nonce.Valid {
 		code.Nonce = &nonce.String
 	}
-	code.Used = used == 1
+	code.Used = used
 
 	return &code, nil
 }
 
 // MarkUsed marks an authorization code as used.
 func (r *OAuthAuthorizationCodesRepository) MarkUsed(ctx context.Context, codeStr string) error {
-	sqlStr := fmt.Sprintf("UPDATE oauth_authorization_code SET used = 1 WHERE code = %s", r.db.Placeholder(1))
+	sqlStr := fmt.Sprintf("UPDATE oauth_authorization_code SET used = true WHERE code = %s", r.db.Placeholder(1))
 	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(codeStr)})
 	return err
 }

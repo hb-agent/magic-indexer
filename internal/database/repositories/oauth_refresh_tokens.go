@@ -30,11 +30,6 @@ func (r *OAuthRefreshTokensRepository) Insert(ctx context.Context, token *oauth.
 		r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7), r.db.Placeholder(8),
 		r.db.Placeholder(9), r.db.Placeholder(10))
 
-	revoked := 0
-	if token.Revoked {
-		revoked = 1
-	}
-
 	params := []database.Value{
 		database.Text(token.Token),
 		database.Text(token.AccessToken),
@@ -45,7 +40,7 @@ func (r *OAuthRefreshTokensRepository) Insert(ctx context.Context, token *oauth.
 		database.NullableText(token.Scope),
 		database.Int(token.CreatedAt),
 		database.NullableInt(token.ExpiresAt),
-		database.Int(int64(revoked)),
+		database.Bool(token.Revoked),
 	}
 
 	_, err := r.db.Exec(ctx, sqlStr, params)
@@ -64,7 +59,7 @@ func (r *OAuthRefreshTokensRepository) Get(ctx context.Context, tokenStr string)
 		sessionIteration sql.NullInt64
 		scope            sql.NullString
 		expiresAt        sql.NullInt64
-		revoked          int
+		revoked          bool
 	)
 
 	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(tokenStr)},
@@ -89,7 +84,7 @@ func (r *OAuthRefreshTokensRepository) Get(ctx context.Context, tokenStr string)
 	if expiresAt.Valid {
 		token.ExpiresAt = &expiresAt.Int64
 	}
-	token.Revoked = revoked == 1
+	token.Revoked = revoked
 
 	return &token, nil
 }
@@ -106,7 +101,7 @@ func (r *OAuthRefreshTokensRepository) GetByAccessToken(ctx context.Context, acc
 		sessionIteration sql.NullInt64
 		scope            sql.NullString
 		expiresAt        sql.NullInt64
-		revoked          int
+		revoked          bool
 	)
 
 	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(accessToken)},
@@ -131,7 +126,7 @@ func (r *OAuthRefreshTokensRepository) GetByAccessToken(ctx context.Context, acc
 	if expiresAt.Valid {
 		token.ExpiresAt = &expiresAt.Int64
 	}
-	token.Revoked = revoked == 1
+	token.Revoked = revoked
 
 	return &token, nil
 }
@@ -162,14 +157,14 @@ func (r *OAuthRefreshTokensRepository) GetByUserID(ctx context.Context, userID s
 
 // Revoke marks a refresh token as revoked.
 func (r *OAuthRefreshTokensRepository) Revoke(ctx context.Context, tokenStr string) error {
-	sqlStr := fmt.Sprintf("UPDATE oauth_refresh_token SET revoked = 1 WHERE token = %s", r.db.Placeholder(1))
+	sqlStr := fmt.Sprintf("UPDATE oauth_refresh_token SET revoked = true WHERE token = %s", r.db.Placeholder(1))
 	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(tokenStr)})
 	return err
 }
 
 // RevokeByUserID revokes all refresh tokens for a user.
 func (r *OAuthRefreshTokensRepository) RevokeByUserID(ctx context.Context, userID string) error {
-	sqlStr := fmt.Sprintf("UPDATE oauth_refresh_token SET revoked = 1 WHERE user_id = %s", r.db.Placeholder(1))
+	sqlStr := fmt.Sprintf("UPDATE oauth_refresh_token SET revoked = true WHERE user_id = %s", r.db.Placeholder(1))
 	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(userID)})
 	return err
 }
@@ -196,7 +191,7 @@ func scanRefreshToken(rows *sql.Rows) (*oauth.RefreshToken, error) {
 		sessionIteration sql.NullInt64
 		scope            sql.NullString
 		expiresAt        sql.NullInt64
-		revoked          int
+		revoked          bool
 	)
 
 	err := rows.Scan(
@@ -218,7 +213,7 @@ func scanRefreshToken(rows *sql.Rows) (*oauth.RefreshToken, error) {
 	if expiresAt.Valid {
 		token.ExpiresAt = &expiresAt.Int64
 	}
-	token.Revoked = revoked == 1
+	token.Revoked = revoked
 
 	return &token, nil
 }

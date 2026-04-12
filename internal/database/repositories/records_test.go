@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/testutil"
 )
+
+// jsonEqual is defined in lexicons_test.go (same package).
 
 type recordsTestEnv struct {
 	repo *repositories.RecordsRepository
@@ -123,7 +126,7 @@ func TestRecordsRepository_Insert(t *testing.T) {
 				if rec.CID != tt.cid {
 					t.Errorf("CID after update = %q, want %q", rec.CID, tt.cid)
 				}
-				if rec.JSON != tt.json {
+				if !jsonEqual(rec.JSON, tt.json) {
 					t.Errorf("JSON after update = %q, want %q", rec.JSON, tt.json)
 				}
 			}
@@ -230,7 +233,7 @@ func TestRecordsRepository_GetByURI(t *testing.T) {
 				if rec.Collection != "app.bsky.feed.post" {
 					t.Errorf("Collection = %q", rec.Collection)
 				}
-				if rec.JSON != `{"text":"found me","createdAt":"2026-01-15T10:00:00Z"}` {
+				if !jsonEqual(rec.JSON, `{"text":"found me","createdAt":"2026-01-15T10:00:00Z"}`) {
 					t.Errorf("JSON = %q", rec.JSON)
 				}
 			},
@@ -725,8 +728,9 @@ func TestRecordsRepository_GetCollectionTimeSeries(t *testing.T) {
 	}
 
 	// First date: 2026-01-15 with 2 records
-	if ts.Data[0].Date != "2026-01-15" {
-		t.Errorf("Data[0].Date = %q, want 2026-01-15", ts.Data[0].Date)
+	// Postgres returns "2026-01-15T00:00:00Z", SQLite returns "2026-01-15"
+	if !strings.HasPrefix(ts.Data[0].Date, "2026-01-15") {
+		t.Errorf("Data[0].Date = %q, want prefix 2026-01-15", ts.Data[0].Date)
 	}
 	if ts.Data[0].Count != 2 {
 		t.Errorf("Data[0].Count = %d, want 2", ts.Data[0].Count)
@@ -736,8 +740,8 @@ func TestRecordsRepository_GetCollectionTimeSeries(t *testing.T) {
 	}
 
 	// Second date: 2026-01-16 with 1 record, cumulative 3
-	if ts.Data[1].Date != "2026-01-16" {
-		t.Errorf("Data[1].Date = %q, want 2026-01-16", ts.Data[1].Date)
+	if !strings.HasPrefix(ts.Data[1].Date, "2026-01-16") {
+		t.Errorf("Data[1].Date = %q, want prefix 2026-01-16", ts.Data[1].Date)
 	}
 	if ts.Data[1].Count != 1 {
 		t.Errorf("Data[1].Count = %d, want 1", ts.Data[1].Count)

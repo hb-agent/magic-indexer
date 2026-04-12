@@ -30,11 +30,6 @@ func (r *OAuthAccessTokensRepository) Insert(ctx context.Context, token *oauth.A
 		r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7), r.db.Placeholder(8),
 		r.db.Placeholder(9), r.db.Placeholder(10), r.db.Placeholder(11))
 
-	revoked := 0
-	if token.Revoked {
-		revoked = 1
-	}
-
 	params := []database.Value{
 		database.Text(token.Token),
 		database.Text(string(token.TokenType)),
@@ -45,7 +40,7 @@ func (r *OAuthAccessTokensRepository) Insert(ctx context.Context, token *oauth.A
 		database.NullableText(token.Scope),
 		database.Int(token.CreatedAt),
 		database.Int(token.ExpiresAt),
-		database.Int(int64(revoked)),
+		database.Bool(token.Revoked),
 		database.NullableText(token.DPoPJKT),
 	}
 
@@ -66,7 +61,7 @@ func (r *OAuthAccessTokensRepository) Get(ctx context.Context, tokenStr string) 
 		sessionID        sql.NullString
 		sessionIteration sql.NullInt64
 		scope            sql.NullString
-		revoked          int
+		revoked          bool
 		dpopJKT          sql.NullString
 	)
 
@@ -93,7 +88,7 @@ func (r *OAuthAccessTokensRepository) Get(ctx context.Context, tokenStr string) 
 	if scope.Valid {
 		token.Scope = &scope.String
 	}
-	token.Revoked = revoked == 1
+	token.Revoked = revoked
 	if dpopJKT.Valid {
 		token.DPoPJKT = &dpopJKT.String
 	}
@@ -151,14 +146,14 @@ func (r *OAuthAccessTokensRepository) GetByDPoPJKT(ctx context.Context, jkt stri
 
 // Revoke marks an access token as revoked.
 func (r *OAuthAccessTokensRepository) Revoke(ctx context.Context, tokenStr string) error {
-	sqlStr := fmt.Sprintf("UPDATE oauth_access_token SET revoked = 1 WHERE token = %s", r.db.Placeholder(1))
+	sqlStr := fmt.Sprintf("UPDATE oauth_access_token SET revoked = true WHERE token = %s", r.db.Placeholder(1))
 	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(tokenStr)})
 	return err
 }
 
 // RevokeByUserID revokes all access tokens for a user.
 func (r *OAuthAccessTokensRepository) RevokeByUserID(ctx context.Context, userID string) error {
-	sqlStr := fmt.Sprintf("UPDATE oauth_access_token SET revoked = 1 WHERE user_id = %s", r.db.Placeholder(1))
+	sqlStr := fmt.Sprintf("UPDATE oauth_access_token SET revoked = true WHERE user_id = %s", r.db.Placeholder(1))
 	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(userID)})
 	return err
 }
@@ -186,7 +181,7 @@ func scanAccessToken(rows *sql.Rows) (*oauth.AccessToken, error) {
 		sessionID        sql.NullString
 		sessionIteration sql.NullInt64
 		scope            sql.NullString
-		revoked          int
+		revoked          bool
 		dpopJKT          sql.NullString
 	)
 
@@ -210,7 +205,7 @@ func scanAccessToken(rows *sql.Rows) (*oauth.AccessToken, error) {
 	if scope.Valid {
 		token.Scope = &scope.String
 	}
-	token.Revoked = revoked == 1
+	token.Revoked = revoked
 	if dpopJKT.Valid {
 		token.DPoPJKT = &dpopJKT.String
 	}
