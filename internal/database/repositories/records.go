@@ -864,13 +864,6 @@ func (r *RecordsRepository) GetExistingCIDs(ctx context.Context, cids []string) 
 
 // Helper functions
 
-func (r *RecordsRepository) getCIDByURI(ctx context.Context, uri string) (string, error) {
-	var cid string
-	err := r.db.QueryRow(ctx, fmt.Sprintf("SELECT cid FROM record WHERE uri = %s", r.db.Placeholder(1)),
-		[]database.Value{database.Text(uri)}, &cid)
-	return cid, err
-}
-
 func scanRecords(rows *sql.Rows) ([]*Record, error) {
 	var records []*Record
 	for rows.Next() {

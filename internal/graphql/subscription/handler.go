@@ -156,8 +156,8 @@ type wsClient struct {
 	subscriptions map[string]context.CancelFunc
 	mu            sync.Mutex
 	initialized   bool
-	done     chan struct{}
-	closeOnce sync.Once
+	done          chan struct{}
+	closeOnce     sync.Once
 }
 
 // run handles the WebSocket connection lifecycle.

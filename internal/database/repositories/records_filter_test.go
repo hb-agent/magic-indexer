@@ -2,6 +2,7 @@ package repositories_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -128,7 +129,7 @@ func TestGetByCollectionFiltered_AuthorsExceedsCap(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected ErrAuthorsFilterTooLarge, got nil")
 	}
-	if err != repositories.ErrAuthorsFilterTooLarge {
+	if !errors.Is(err, repositories.ErrAuthorsFilterTooLarge) {
 		t.Errorf("expected ErrAuthorsFilterTooLarge, got: %v", err)
 	}
 }

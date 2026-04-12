@@ -1104,7 +1104,7 @@ func (h *OAuthHandlers) StartCleanupWorker(ctx context.Context, interval time.Du
 					{"atp_requests", h.atpRequests.DeleteExpired(ctx, now)},
 					{"auth_codes", h.authCodes.DeleteExpired(ctx, now)},
 					{"access_tokens", h.accessTokens.DeleteExpired(ctx, now)},
-					{"dpop_jtis", h.dpopJTIs.DeleteOlderThan(ctx, now - 3600)},
+					{"dpop_jtis", h.dpopJTIs.DeleteOlderThan(ctx, now-3600)},
 				} {
 					if task.err != nil {
 						slog.Warn("OAuth cleanup failed", "table", task.name, "error", task.err)

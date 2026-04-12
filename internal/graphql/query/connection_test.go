@@ -9,11 +9,11 @@ import (
 
 func TestParseAuthorsFilter(t *testing.T) {
 	tests := []struct {
-		name     string
-		args     map[string]interface{}
-		wantNil  bool   // result pointer is nil
-		wantLen  int    // length of slice when non-nil
-		wantErr  bool
+		name      string
+		args      map[string]interface{}
+		wantNil   bool // result pointer is nil
+		wantLen   int  // length of slice when non-nil
+		wantErr   bool
 		errSubstr string
 	}{
 		{
