@@ -13,10 +13,21 @@ export async function POST(request: NextRequest) {
     const session = await getSession();
     const body = await request.json();
 
-    // Build headers for Hypergoat
+    // Build headers for Hypergoat. The backend's admin handler trusts
+    // X-User-DID only when the request is accompanied by a valid
+    // Authorization: Bearer <ADMIN_API_KEY> header (constant-time
+    // compared on the backend side). The operator's OAuth session
+    // gives us the DID; the shared ADMIN_API_KEY tells the backend
+    // that this server-side proxy is the trusted intermediary. The
+    // final authorization check — "is this DID in admin_dids?" —
+    // still happens on the backend.
     const headers: HeadersInit = {
       "Content-Type": "application/json",
     };
+
+    if (env.ADMIN_API_KEY) {
+      headers["Authorization"] = `Bearer ${env.ADMIN_API_KEY}`;
+    }
 
     // If user is authenticated, pass their DID
     if (session.did) {

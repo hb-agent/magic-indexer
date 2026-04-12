@@ -27,4 +27,14 @@ export const env = {
   
   // Hypergoat backend URL
   HYPERGOAT_URL: getEnv("HYPERGOAT_URL", "http://127.0.0.1:8080"),
+
+  // Admin API key (backend-issued shared secret). Required when the
+  // backend has ADMIN_API_KEY set: the backend only trusts the
+  // X-User-DID header forwarded by this proxy if the request also
+  // carries a matching Authorization: Bearer <key> header. The actual
+  // authorization decision still happens on the backend — we verify
+  // the session DID via iron-session, then the backend verifies that
+  // DID is in admin_dids. This proxy is the "trusted intermediary"
+  // between OAuth sign-in and the shared-secret admin API.
+  ADMIN_API_KEY: getEnv("ADMIN_API_KEY", ""),
 };
