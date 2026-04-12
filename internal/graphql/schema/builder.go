@@ -19,6 +19,7 @@ import (
 	"github.com/GainForest/hypergoat/internal/graphql/subscription"
 	"github.com/GainForest/hypergoat/internal/graphql/types"
 	"github.com/GainForest/hypergoat/internal/lexicon"
+	"github.com/GainForest/hypergoat/internal/metrics"
 )
 
 // Builder builds a GraphQL schema from lexicon definitions.
@@ -479,10 +480,31 @@ func (b *Builder) resolveRecordConnection(
 
 	// Label filter args. The indexer is neutral about labeler choice:
 	// an empty LabelerSrcs list means "match any labeler".
-	filter := parseLabelFilter(p.Args)
+	labelFilter := parseLabelFilter(p.Args)
+
+	// Author filter args. A nil return means "no filter" (omitted);
+	// a non-nil empty slice means "match nothing" (explicit empty list).
+	authorsFilter, err := query.ParseAuthorsFilter(p.Args)
+	if err != nil {
+		if errors.Is(err, repositories.ErrAuthorsFilterTooLarge) ||
+			strings.Contains(err.Error(), "exceeds maximum") {
+			metrics.RecordAuthorsFilterTooLarge()
+		}
+		return nil, fmt.Errorf("invalid authors argument: %w", err)
+	}
+
+	filter := repositories.RecordFilter{Labels: labelFilter}
+	if authorsFilter != nil {
+		filter.Authors = *authorsFilter
+		if len(*authorsFilter) == 0 {
+			metrics.RecordAuthorsFilterEmptyBlocked()
+		} else {
+			metrics.RecordAuthorsFilterApplied(collection, len(*authorsFilter))
+		}
+	}
 
 	// Fetch first+1 to determine hasNextPage
-	records, err := repos.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
+	records, err := repos.Records.GetByCollectionFiltered(
 		p.Context, collection, first+1, afterTimestamp, afterURI, filter,
 	)
 	if err != nil {
@@ -499,7 +521,7 @@ func (b *Builder) resolveRecordConnection(
 	// attach a `labels` field to each node in one query instead of N.
 	// When the filter scopes labelers, we honor that in the returned
 	// labels field too so the list the client sees matches the filter.
-	labelsByURI := loadLabelsByURI(p.Context, repos, filter.LabelerSrcs, records)
+	labelsByURI := loadLabelsByURI(p.Context, repos, labelFilter.LabelerSrcs, records)
 
 	// Build edges
 	edges := make([]interface{}, 0, len(records))

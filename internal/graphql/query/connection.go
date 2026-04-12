@@ -2,6 +2,9 @@
 package query
 
 import (
+	"fmt"
+
+	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/graphql-go/graphql"
 )
 
@@ -81,7 +84,7 @@ func LabelFilterArgs() graphql.FieldConfigArgument {
 }
 
 // ConnectionArgs returns standard Relay connection arguments for forward pagination,
-// plus label-based filtering arguments used by record collection queries.
+// plus label-based and author-based filtering arguments used by record collection queries.
 func ConnectionArgs() graphql.FieldConfigArgument {
 	args := graphql.FieldConfigArgument{
 		"first": &graphql.ArgumentConfig{
@@ -92,11 +95,56 @@ func ConnectionArgs() graphql.FieldConfigArgument {
 			Type:        graphql.String,
 			Description: "Cursor to start after (forward pagination)",
 		},
+		"authors": &graphql.ArgumentConfig{
+			Type: graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: fmt.Sprintf(
+				"Filter to records authored by (published under) any of these DIDs. "+
+					"Passing an empty list returns zero results; passing null or omitting "+
+					"the arg applies no filter. Maximum %d DIDs per query. "+
+					"Duplicates are deduplicated server-side; order is not significant. "+
+					"DIDs are case-sensitive per the ATProto spec.",
+				repositories.MaxAuthorsFilterSize,
+			),
+		},
 	}
 	for k, v := range LabelFilterArgs() {
 		args[k] = v
 	}
 	return args
+}
+
+// ParseAuthorsFilter extracts the "authors" argument from GraphQL resolver args.
+// Returns:
+//
+//	(nil,  nil) — argument omitted or explicitly null → no author filter
+//	(&[],  nil) — empty list → explicit "match nothing" signal
+//	(&[…], nil) — non-empty list → filter by these DIDs
+//	(nil,  err) — malformed (e.g. non-string elements, or exceeds cap)
+//
+// The pointer-to-slice return type is load-bearing: the nil/empty distinction
+// is the primary semantic difference and cannot be represented with a plain
+// slice return.
+func ParseAuthorsFilter(args map[string]interface{}) (*[]string, error) {
+	raw, present := args["authors"]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	list, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("authors argument must be a list")
+	}
+	dids := make([]string, 0, len(list))
+	for _, e := range list {
+		s, ok := e.(string)
+		if !ok {
+			return nil, fmt.Errorf("authors elements must be strings")
+		}
+		dids = append(dids, s)
+	}
+	if len(dids) > repositories.MaxAuthorsFilterSize {
+		return nil, fmt.Errorf("authors filter exceeds maximum of %d DIDs", repositories.MaxAuthorsFilterSize)
+	}
+	return &dids, nil
 }
 
 // BuildEdgeType creates an Edge type for a given node type.

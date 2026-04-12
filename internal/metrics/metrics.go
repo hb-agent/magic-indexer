@@ -89,6 +89,36 @@ var (
 		},
 		[]string{"collection"},
 	)
+
+	recordsAuthorsFilterAppliedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hypergoat_records_authors_filter_applied_total",
+			Help: "Number of record queries where an authors filter was applied, labelled by collection.",
+		},
+		[]string{"collection"},
+	)
+
+	recordsAuthorsFilterSize = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "hypergoat_records_authors_filter_size",
+			Help:    "Number of DIDs in the authors filter per query.",
+			Buckets: []float64{1, 5, 10, 25, 50, 100, 250, 500},
+		},
+	)
+
+	recordsAuthorsFilterEmptyBlockedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "hypergoat_records_authors_filter_empty_blocked_total",
+			Help: "Number of record queries blocked because authors was an explicit empty list.",
+		},
+	)
+
+	recordsAuthorsFilterTooLargeTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "hypergoat_records_authors_filter_too_large_total",
+			Help: "Number of record queries rejected because authors exceeded the maximum size.",
+		},
+	)
 )
 
 func init() {
@@ -100,6 +130,10 @@ func init() {
 		labelerLabelsReceived,
 		labelerLabelsRejected,
 		recordsInsertedTotal,
+		recordsAuthorsFilterAppliedTotal,
+		recordsAuthorsFilterSize,
+		recordsAuthorsFilterEmptyBlockedTotal,
+		recordsAuthorsFilterTooLargeTotal,
 	)
 }
 
@@ -149,6 +183,25 @@ func RecordLabelRejected(src, reason string) {
 // the Jetstream consumer.
 func RecordInserted(collection string) {
 	recordsInsertedTotal.WithLabelValues(collection).Inc()
+}
+
+// RecordAuthorsFilterApplied is incremented when a record query uses an
+// authors filter. `size` is the number of DIDs in the filter.
+func RecordAuthorsFilterApplied(collection string, size int) {
+	recordsAuthorsFilterAppliedTotal.WithLabelValues(collection).Inc()
+	recordsAuthorsFilterSize.Observe(float64(size))
+}
+
+// RecordAuthorsFilterEmptyBlocked is incremented when a record query is
+// short-circuited because the authors list was explicitly empty.
+func RecordAuthorsFilterEmptyBlocked() {
+	recordsAuthorsFilterEmptyBlockedTotal.Inc()
+}
+
+// RecordAuthorsFilterTooLarge is incremented when a record query is
+// rejected because the authors list exceeded MaxAuthorsFilterSize.
+func RecordAuthorsFilterTooLarge() {
+	recordsAuthorsFilterTooLargeTotal.Inc()
 }
 
 // httpStatusString converts an int status code into a stable
