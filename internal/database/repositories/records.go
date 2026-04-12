@@ -89,24 +89,16 @@ func (r *RecordsRepository) recordColumns() string {
 }
 
 // Insert inserts or updates a record in the database.
-// Skips if the CID already exists (content unchanged).
+// Skips the update if the CID is unchanged (content identical).
 func (r *RecordsRepository) Insert(ctx context.Context, uri, cid, did, collection, jsonData string) (InsertResult, error) {
-	// Check if URI exists with same CID
-	existingCID, err := r.getCIDByURI(ctx, uri)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return Skipped, err
-	}
-
-	if existingCID == cid {
-		return Skipped, nil // Content unchanged
-	}
-
 	p1 := r.db.Placeholder(1)
 	p2 := r.db.Placeholder(2)
 	p3 := r.db.Placeholder(3)
 	p4 := r.db.Placeholder(4)
 	p5 := r.db.Placeholder(5)
 
+	// ON CONFLICT … WHERE filters out same-CID re-inserts so that
+	// RowsAffected == 0 when content is unchanged.
 	var sqlStr string
 	switch r.db.Dialect() {
 	case database.PostgreSQL:
@@ -115,17 +107,19 @@ func (r *RecordsRepository) Insert(ctx context.Context, uri, cid, did, collectio
 			ON CONFLICT(uri) DO UPDATE SET
 				cid = EXCLUDED.cid,
 				json = EXCLUDED.json,
-				indexed_at = NOW()`, p1, p2, p3, p4, p5)
+				indexed_at = NOW()
+			WHERE record.cid IS DISTINCT FROM EXCLUDED.cid`, p1, p2, p3, p4, p5)
 	default:
 		sqlStr = fmt.Sprintf(`INSERT INTO record (uri, cid, did, collection, json)
 			VALUES (%s, %s, %s, %s, %s)
 			ON CONFLICT(uri) DO UPDATE SET
 				cid = excluded.cid,
 				json = excluded.json,
-				indexed_at = datetime('now')`, p1, p2, p3, p4, p5)
+				indexed_at = datetime('now')
+			WHERE record.cid != excluded.cid`, p1, p2, p3, p4, p5)
 	}
 
-	_, err = r.db.Exec(ctx, sqlStr, []database.Value{
+	res, err := r.db.Exec(ctx, sqlStr, []database.Value{
 		database.Text(uri),
 		database.Text(cid),
 		database.Text(did),
@@ -136,6 +130,10 @@ func (r *RecordsRepository) Insert(ctx context.Context, uri, cid, did, collectio
 		return Skipped, err
 	}
 
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return Skipped, nil
+	}
 	return Inserted, nil
 }
 
@@ -212,14 +210,16 @@ func (r *RecordsRepository) insertBatchTx(ctx context.Context, tx *sql.Tx, recor
 			ON CONFLICT(uri) DO UPDATE SET
 				cid = EXCLUDED.cid,
 				json = EXCLUDED.json,
-				indexed_at = NOW()`, strings.Join(valueSets, ", "))
+				indexed_at = NOW()
+			WHERE record.cid IS DISTINCT FROM EXCLUDED.cid`, strings.Join(valueSets, ", "))
 	default:
 		sqlStr = fmt.Sprintf(`INSERT INTO record (uri, cid, did, collection, json)
 			VALUES %s
 			ON CONFLICT(uri) DO UPDATE SET
 				cid = excluded.cid,
 				json = excluded.json,
-				indexed_at = datetime('now')`, strings.Join(valueSets, ", "))
+				indexed_at = datetime('now')
+			WHERE record.cid != excluded.cid`, strings.Join(valueSets, ", "))
 	}
 
 	_, err := tx.ExecContext(ctx, sqlStr, args...)
@@ -598,9 +598,9 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 		RecordFilter{Labels: filter})
 }
 
-// GetByDID retrieves all records for a specific DID.
+// GetByDID retrieves records for a specific DID (up to 10 000).
 func (r *RecordsRepository) GetByDID(ctx context.Context, did string) ([]*Record, error) {
-	sqlStr := fmt.Sprintf("SELECT %s FROM record WHERE did = %s ORDER BY indexed_at DESC",
+	sqlStr := fmt.Sprintf("SELECT %s FROM record WHERE did = %s ORDER BY indexed_at DESC LIMIT 10000",
 		r.recordColumns(), r.db.Placeholder(1))
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, did)
@@ -863,13 +863,6 @@ func (r *RecordsRepository) GetExistingCIDs(ctx context.Context, cids []string) 
 }
 
 // Helper functions
-
-func (r *RecordsRepository) getCIDByURI(ctx context.Context, uri string) (string, error) {
-	var cid string
-	err := r.db.QueryRow(ctx, fmt.Sprintf("SELECT cid FROM record WHERE uri = %s", r.db.Placeholder(1)),
-		[]database.Value{database.Text(uri)}, &cid)
-	return cid, err
-}
 
 func scanRecords(rows *sql.Rows) ([]*Record, error) {
 	var records []*Record

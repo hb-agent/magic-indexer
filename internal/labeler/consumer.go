@@ -165,6 +165,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 	attempt := 0
 
 	for {
+		connStart := time.Now()
 		err := c.runOnce(c.ctx)
 
 		select {
@@ -172,6 +173,11 @@ func (c *Consumer) Start(ctx context.Context) error {
 			c.finalFlush()
 			return c.ctx.Err()
 		default:
+		}
+
+		// Reset backoff if the connection was stable for a while.
+		if time.Since(connStart) > 30*time.Second {
+			backoff = time.Second
 		}
 
 		// OutdatedCursor recovery: the labeler has garbage-collected
@@ -451,11 +457,10 @@ func (c *Consumer) runBackfill(ctx context.Context) error {
 	// live stream.
 	c.clearBackfillCursor(ctx)
 	if total > 0 && !c.config.DisableCursor {
-		// Use a sentinel (1) so loadCursor returns non-zero and we
-		// won't re-run backfill on restart. The subscription starts
-		// from "live" because the labeler's real seq numbers are
-		// much larger.
-		if err := c.saveCursor(ctx, 1); err != nil {
+		// Use -1 as a sentinel: loadCursor returns non-zero (skips
+		// re-backfill), but cursor <= 0 means the client omits the
+		// cursor param and starts from the live stream.
+		if err := c.saveCursor(ctx, -1); err != nil {
 			slog.Warn("Failed to persist backfill sentinel",
 				"did", c.config.LabelerDID, "error", err)
 		}
@@ -501,9 +506,13 @@ func (c *Consumer) handleLabelMessage(ctx context.Context, msg *LabelMessage) {
 		metrics.RecordLabelRejected(c.config.LabelerDID, "upsert")
 	}
 
+	// Only advance cursor if at least some labels were persisted or
+	// the batch was empty (pure metadata frame). If ALL labels were
+	// rejected (e.g. transient DB failure), do NOT advance so that
+	// the frame can be re-processed after reconnection.
 	c.cursorMu.Lock()
 	prev := c.cursor
-	if msg.Seq > c.cursor {
+	if msg.Seq > c.cursor && (rejected == 0 || rejected < len(msg.Labels)) {
 		c.cursor = msg.Seq
 	}
 	c.cursorMu.Unlock()

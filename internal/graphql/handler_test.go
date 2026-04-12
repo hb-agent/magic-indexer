@@ -203,9 +203,9 @@ func TestHandler_ServeHTTP_GraphQLError(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	// GraphQL errors should return 400
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	// GraphQL errors are conveyed in the response body per spec; HTTP status is 200.
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
 	var result map[string]interface{}

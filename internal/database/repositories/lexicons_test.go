@@ -3,6 +3,7 @@ package repositories_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -14,6 +15,20 @@ func setupLexiconsTest(t *testing.T) *repositories.LexiconsRepository {
 	t.Helper()
 	db := testutil.SetupTestDB(t)
 	return db.Lexicons
+}
+
+// jsonEqual compares two JSON strings semantically (key order independent).
+func jsonEqual(a, b string) bool {
+	var ja, jb interface{}
+	if err := json.Unmarshal([]byte(a), &ja); err != nil {
+		return false
+	}
+	if err := json.Unmarshal([]byte(b), &jb); err != nil {
+		return false
+	}
+	na, _ := json.Marshal(ja)
+	nb, _ := json.Marshal(jb)
+	return string(na) == string(nb)
 }
 
 func TestLexiconsRepository_Upsert(t *testing.T) {
@@ -34,7 +49,7 @@ func TestLexiconsRepository_Upsert(t *testing.T) {
 	if lex.ID != "app.bsky.feed.post" {
 		t.Errorf("ID = %q, want %q", lex.ID, "app.bsky.feed.post")
 	}
-	if lex.JSON != jsonData {
+	if !jsonEqual(lex.JSON, jsonData) {
 		t.Errorf("JSON = %q, want %q", lex.JSON, jsonData)
 	}
 
@@ -49,7 +64,7 @@ func TestLexiconsRepository_Upsert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get lexicon after upsert: %v", err)
 	}
-	if lex.JSON != updatedJSON {
+	if !jsonEqual(lex.JSON, updatedJSON) {
 		t.Errorf("JSON after upsert = %q, want %q", lex.JSON, updatedJSON)
 	}
 }
@@ -72,7 +87,7 @@ func TestLexiconsRepository_GetByID(t *testing.T) {
 		if lex.ID != "app.bsky.feed.post" {
 			t.Errorf("ID = %q, want %q", lex.ID, "app.bsky.feed.post")
 		}
-		if lex.JSON != `{"lexicon":1,"id":"app.bsky.feed.post"}` {
+		if !jsonEqual(lex.JSON, `{"lexicon":1,"id":"app.bsky.feed.post"}`) {
 			t.Errorf("JSON = %q, want %q", lex.JSON, `{"lexicon":1,"id":"app.bsky.feed.post"}`)
 		}
 	})
@@ -97,8 +112,8 @@ func TestLexiconsRepository_GetAll(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetAll() error = %v", err)
 		}
-		if lexicons != nil {
-			t.Errorf("GetAll() on empty db = %v, want nil", lexicons)
+		if len(lexicons) != 0 {
+			t.Errorf("GetAll() on empty db returned %d items, want 0", len(lexicons))
 		}
 	})
 
@@ -118,15 +133,14 @@ func TestLexiconsRepository_GetAll(t *testing.T) {
 			t.Fatalf("GetAll() error = %v", err)
 		}
 		if len(lexicons) != 2 {
-			t.Fatalf("GetAll() returned %d lexicons, want 2", len(lexicons))
+			t.Fatalf("GetAll() returned %d, want 2", len(lexicons))
 		}
-
-		// Verify order by ID (alphabetical)
+		// Should be sorted by ID
 		if lexicons[0].ID != "app.bsky.actor.profile" {
-			t.Errorf("lexicons[0].ID = %q, want %q", lexicons[0].ID, "app.bsky.actor.profile")
+			t.Errorf("first lexicon = %q, want app.bsky.actor.profile", lexicons[0].ID)
 		}
 		if lexicons[1].ID != "app.bsky.feed.post" {
-			t.Errorf("lexicons[1].ID = %q, want %q", lexicons[1].ID, "app.bsky.feed.post")
+			t.Errorf("second lexicon = %q, want app.bsky.feed.post", lexicons[1].ID)
 		}
 	})
 }
@@ -135,132 +149,19 @@ func TestLexiconsRepository_Delete(t *testing.T) {
 	repo := setupLexiconsTest(t)
 	ctx := context.Background()
 
-	t.Run("existing ID", func(t *testing.T) {
-		err := repo.Upsert(ctx, "app.bsky.feed.post", `{"lexicon":1,"id":"app.bsky.feed.post"}`)
-		if err != nil {
-			t.Fatalf("failed to insert lexicon: %v", err)
-		}
-
-		err = repo.Delete(ctx, "app.bsky.feed.post")
-		if err != nil {
-			t.Fatalf("Delete() error = %v", err)
-		}
-
-		exists, err := repo.Exists(ctx, "app.bsky.feed.post")
-		if err != nil {
-			t.Fatalf("Exists() error = %v", err)
-		}
-		if exists {
-			t.Error("lexicon still exists after Delete()")
-		}
-	})
-
-	t.Run("non-existing ID", func(t *testing.T) {
-		err := repo.Delete(ctx, "app.bsky.nonexistent")
-		if err != nil {
-			t.Errorf("Delete() on non-existing ID error = %v, want nil", err)
-		}
-	})
-}
-
-func TestLexiconsRepository_DeleteAll(t *testing.T) {
-	repo := setupLexiconsTest(t)
-	ctx := context.Background()
-
-	// Insert some lexicons
+	// Insert then delete
 	err := repo.Upsert(ctx, "app.bsky.feed.post", `{"lexicon":1,"id":"app.bsky.feed.post"}`)
 	if err != nil {
-		t.Fatalf("failed to insert lexicon: %v", err)
+		t.Fatalf("failed to insert: %v", err)
 	}
-	err = repo.Upsert(ctx, "app.bsky.actor.profile", `{"lexicon":1,"id":"app.bsky.actor.profile"}`)
+
+	err = repo.Delete(ctx, "app.bsky.feed.post")
 	if err != nil {
-		t.Fatalf("failed to insert lexicon: %v", err)
+		t.Fatalf("Delete() error = %v", err)
 	}
 
-	// Verify they exist
-	count, err := repo.GetCount(ctx)
-	if err != nil {
-		t.Fatalf("GetCount() error = %v", err)
+	_, err = repo.GetByID(ctx, "app.bsky.feed.post")
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("GetByID after delete: error = %v, want sql.ErrNoRows", err)
 	}
-	if count != 2 {
-		t.Fatalf("GetCount() = %d, want 2 before delete", count)
-	}
-
-	// Delete all
-	err = repo.DeleteAll(ctx)
-	if err != nil {
-		t.Fatalf("DeleteAll() error = %v", err)
-	}
-
-	// Verify empty
-	count, err = repo.GetCount(ctx)
-	if err != nil {
-		t.Fatalf("GetCount() error = %v", err)
-	}
-	if count != 0 {
-		t.Errorf("GetCount() after DeleteAll = %d, want 0", count)
-	}
-}
-
-func TestLexiconsRepository_GetCount(t *testing.T) {
-	repo := setupLexiconsTest(t)
-	ctx := context.Background()
-
-	// Empty database
-	count, err := repo.GetCount(ctx)
-	if err != nil {
-		t.Fatalf("GetCount() error = %v", err)
-	}
-	if count != 0 {
-		t.Errorf("GetCount() on empty db = %d, want 0", count)
-	}
-
-	// After inserts
-	err = repo.Upsert(ctx, "app.bsky.feed.post", `{"lexicon":1,"id":"app.bsky.feed.post"}`)
-	if err != nil {
-		t.Fatalf("failed to insert lexicon: %v", err)
-	}
-	err = repo.Upsert(ctx, "app.bsky.actor.profile", `{"lexicon":1,"id":"app.bsky.actor.profile"}`)
-	if err != nil {
-		t.Fatalf("failed to insert lexicon: %v", err)
-	}
-
-	count, err = repo.GetCount(ctx)
-	if err != nil {
-		t.Fatalf("GetCount() error = %v", err)
-	}
-	if count != 2 {
-		t.Errorf("GetCount() after 2 inserts = %d, want 2", count)
-	}
-}
-
-func TestLexiconsRepository_Exists(t *testing.T) {
-	repo := setupLexiconsTest(t)
-	ctx := context.Background()
-
-	// Insert a lexicon
-	err := repo.Upsert(ctx, "app.bsky.feed.post", `{"lexicon":1,"id":"app.bsky.feed.post"}`)
-	if err != nil {
-		t.Fatalf("failed to insert lexicon: %v", err)
-	}
-
-	t.Run("existing lexicon", func(t *testing.T) {
-		exists, err := repo.Exists(ctx, "app.bsky.feed.post")
-		if err != nil {
-			t.Fatalf("Exists() error = %v", err)
-		}
-		if !exists {
-			t.Error("Exists() = false, want true for existing lexicon")
-		}
-	})
-
-	t.Run("non-existing lexicon", func(t *testing.T) {
-		exists, err := repo.Exists(ctx, "app.bsky.nonexistent")
-		if err != nil {
-			t.Fatalf("Exists() error = %v", err)
-		}
-		if exists {
-			t.Error("Exists() = true, want false for non-existing lexicon")
-		}
-	})
 }

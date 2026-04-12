@@ -169,11 +169,15 @@ type ListReposByCollectionResponse struct {
 }
 
 // ListReposByCollection fetches all repos that have records for a collection.
+// maxBackfillPages caps pagination to prevent infinite loops from a
+// misbehaving relay that always returns a non-empty cursor.
+const maxBackfillPages = 10_000
+
 func (c *Client) ListReposByCollection(ctx context.Context, collection string) ([]string, error) {
 	var allRepos []string
 	var cursor string
 
-	for {
+	for page := 0; page < maxBackfillPages; page++ {
 		repos, nextCursor, err := c.listReposByCollectionPage(ctx, collection, cursor)
 		if err != nil {
 			return nil, err
@@ -216,12 +220,12 @@ func (c *Client) listReposByCollectionPage(ctx context.Context, collection, curs
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, "", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result ListReposByCollectionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize)).Decode(&result); err != nil {
 		return nil, "", fmt.Errorf("failed to decode response: %w", err)
 	}
 
@@ -232,6 +236,9 @@ func (c *Client) listReposByCollectionPage(ctx context.Context, collection, curs
 
 	return repos, result.Cursor, nil
 }
+
+// maxResponseSize bounds response bodies from external PDS/relay servers.
+const maxResponseSize = 64 << 20 // 64 MiB
 
 // AtprotoData contains resolved DID information.
 type AtprotoData struct {
@@ -256,12 +263,12 @@ func (c *Client) ResolveDID(ctx context.Context, did string) (*AtprotoData, erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var doc PLCDocument
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize)).Decode(&doc); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
@@ -370,12 +377,12 @@ func (c *Client) listRecordsPage(ctx context.Context, pdsURL, repoDID, collectio
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, "", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result ListRecordsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize)).Decode(&result); err != nil {
 		return nil, "", fmt.Errorf("failed to decode response: %w", err)
 	}
 
@@ -420,7 +427,7 @@ func (c *Client) GetRepo(ctx context.Context, pdsURL, did string, collections []
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 

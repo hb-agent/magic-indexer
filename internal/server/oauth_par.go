@@ -80,6 +80,19 @@ func (h *OAuthPARHandler) HandlePAR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate redirect_uri against client's registered redirect URIs (exact match only).
+	validURI := false
+	for _, registered := range client.RedirectURIs {
+		if redirectURI == registered {
+			validURI = true
+			break
+		}
+	}
+	if !validURI {
+		writePARError(w, http.StatusBadRequest, "invalid_request", "redirect_uri does not match registered URIs")
+		return
+	}
+
 	// Build authorization request JSON
 	authRequest := map[string]interface{}{
 		"response_type": responseType,

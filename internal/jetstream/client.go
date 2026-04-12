@@ -197,19 +197,24 @@ func (c *Client) pingLoop(ctx context.Context) {
 		case <-ticker.C:
 			c.mu.Lock()
 			conn := c.conn
+			if conn == nil {
+				c.mu.Unlock()
+				return
+			}
+
+			err1 := conn.SetWriteDeadline(time.Now().Add(defaultWriteTimeout))
+			var err2 error
+			if err1 == nil {
+				err2 = conn.WriteMessage(websocket.PingMessage, nil)
+			}
 			c.mu.Unlock()
 
-			if conn == nil {
+			if err1 != nil {
+				slog.Warn("Failed to set write deadline", "error", err1)
 				return
 			}
-
-			if err := conn.SetWriteDeadline(time.Now().Add(defaultWriteTimeout)); err != nil {
-				slog.Warn("Failed to set write deadline", "error", err)
-				return
-			}
-
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				slog.Warn("Failed to send ping", "error", err)
+			if err2 != nil {
+				slog.Warn("Failed to send ping", "error", err2)
 				return
 			}
 		}
@@ -224,8 +229,6 @@ func (c *Client) Stop() {
 		c.mu.Lock()
 		conn := c.conn
 		c.conn = nil
-		c.mu.Unlock()
-
 		if conn != nil {
 			_ = conn.WriteMessage(
 				websocket.CloseMessage,
@@ -233,6 +236,7 @@ func (c *Client) Stop() {
 			)
 			_ = conn.Close()
 		}
+		c.mu.Unlock()
 
 		close(c.events)
 	})

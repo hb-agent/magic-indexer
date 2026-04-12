@@ -112,6 +112,11 @@ func (ps *PubSub) Publish(event *RecordEvent) {
 
 // PublishRecord is a convenience method to publish a record event.
 func (ps *PubSub) PublishRecord(eventType EventType, uri, cid, did, collection string, recordJSON []byte) {
+	// Skip work entirely when nobody is listening.
+	if ps.SubscriberCount() == 0 {
+		return
+	}
+
 	var record map[string]interface{}
 	if len(recordJSON) > 0 && eventType != EventDelete {
 		_ = json.Unmarshal(recordJSON, &record)

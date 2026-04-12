@@ -276,19 +276,27 @@ func (b *Builder) buildSubscriptionType() *graphql.Object {
 				if event.Collection != collection {
 					return nil, nil
 				}
+				// Clone the record map to avoid concurrent map writes
+				// when multiple subscribers receive the same event.
+				var record map[string]interface{}
+				if event.Record != nil {
+					record = make(map[string]interface{}, len(event.Record)+1)
+					for k, v := range event.Record {
+						record[k] = v
+					}
+				}
+
 				// Best-effort label attachment. We synthesize a minimal
 				// Record so loadLabelsByURI can batch-load; the helper
 				// tolerates DB failures and returns empty slices on
 				// error so subscription delivery is never blocked.
 				repos := resolver.GetRepositories(p.Context)
-				if repos != nil && event.Record != nil {
-					if _, collision := event.Record["labels"]; !collision {
-						rec := &repositories.Record{URI: event.URI}
-						labelsByURI := loadLabelsByURI(p.Context, repos, nil, []*repositories.Record{rec})
-						event.Record["labels"] = labelsByURI[event.URI]
-					}
+				if repos != nil && record != nil {
+					rec := &repositories.Record{URI: event.URI}
+					labelsByURI := loadLabelsByURI(p.Context, repos, nil, []*repositories.Record{rec})
+					record["labels"] = labelsByURI[event.URI]
 				}
-				return event.Record, nil
+				return record, nil
 			},
 		}
 	}

@@ -471,7 +471,8 @@ func (h *OAuthHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		DPoPKey:       dpopKey,
 	})
 	if err != nil {
-		h.redirectWithError(w, authReq.RedirectURI, "server_error", "Token exchange failed: "+err.Error(), clientState)
+		slog.Warn("Token exchange failed", "error", err)
+		h.redirectWithError(w, authReq.RedirectURI, "server_error", "Token exchange failed", clientState)
 		return
 	}
 
@@ -489,7 +490,9 @@ func (h *OAuthHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) {
 			atpSession.AccessTokenScopes = tokenResp.Scope
 		}
 		atpSession.SessionExchangedAt = &now
-		_ = h.atpSessions.Update(ctx, atpSession)
+		if err := h.atpSessions.Update(ctx, atpSession); err != nil {
+			slog.Warn("Failed to update ATP session after token exchange", "error", err)
+		}
 	}
 
 	// Generate authorization code for client
@@ -557,7 +560,7 @@ func (h *OAuthHandlers) HandleToken(w http.ResponseWriter, r *http.Request) {
 	case "refresh_token":
 		h.handleRefreshTokenGrant(w, r)
 	default:
-		h.writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "Unsupported grant_type: "+grantType)
+		h.writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "Unsupported grant_type")
 	}
 }
 
@@ -721,6 +724,9 @@ func (h *OAuthHandlers) handleAuthorizationCodeGrant(w http.ResponseWriter, r *h
 		tokenTypeStr = "DPoP"
 	}
 
+	slog.Info("[oauth] Token issued via authorization_code",
+		"client_id", authCode.ClientID, "user_id", authCode.UserID)
+
 	resp := TokenResponse{
 		AccessToken:  accessTokenStr,
 		TokenType:    tokenTypeStr,
@@ -877,6 +883,9 @@ func (h *OAuthHandlers) handleRefreshTokenGrant(w http.ResponseWriter, r *http.R
 		tokenTypeStr = "DPoP"
 	}
 
+	slog.Info("[oauth] Token refreshed",
+		"client_id", oldRefreshToken.ClientID, "user_id", oldRefreshToken.UserID)
+
 	resp := TokenResponse{
 		AccessToken:  newAccessTokenStr,
 		TokenType:    tokenTypeStr,
@@ -989,17 +998,12 @@ func (h *OAuthHandlers) validateDPoP(ctx context.Context, r *http.Request, clien
 }
 
 // isValidRedirectURI checks if the redirect URI is valid for the client.
-func (h *OAuthHandlers) isValidRedirectURI(uri string, registeredURIs []string, requireExact bool) bool {
+// Always uses exact matching to prevent open-redirect attacks via path
+// extension (e.g. registered "https://a.com/cb" matching "https://a.com/cb.evil.com").
+func (h *OAuthHandlers) isValidRedirectURI(uri string, registeredURIs []string, _ bool) bool {
 	for _, registered := range registeredURIs {
-		if requireExact {
-			if uri == registered {
-				return true
-			}
-		} else {
-			// Allow prefix match for non-exact mode
-			if strings.HasPrefix(uri, registered) {
-				return true
-			}
+		if uri == registered {
+			return true
 		}
 	}
 	return false
@@ -1092,12 +1096,20 @@ func (h *OAuthHandlers) StartCleanupWorker(ctx context.Context, interval time.Du
 				return
 			case <-ticker.C:
 				now := oauth.CurrentTimestamp()
-				_ = h.authRequests.DeleteExpired(ctx, now)
-				_ = h.atpRequests.DeleteExpired(ctx, now)
-				_ = h.authCodes.DeleteExpired(ctx, now)
-				_ = h.accessTokens.DeleteExpired(ctx, now)
-				// Clean up JTIs older than 1 hour
-				_ = h.dpopJTIs.DeleteOlderThan(ctx, now-3600)
+				for _, task := range []struct {
+					name string
+					err  error
+				}{
+					{"auth_requests", h.authRequests.DeleteExpired(ctx, now)},
+					{"atp_requests", h.atpRequests.DeleteExpired(ctx, now)},
+					{"auth_codes", h.authCodes.DeleteExpired(ctx, now)},
+					{"access_tokens", h.accessTokens.DeleteExpired(ctx, now)},
+					{"dpop_jtis", h.dpopJTIs.DeleteOlderThan(ctx, now-3600)},
+				} {
+					if task.err != nil {
+						slog.Warn("OAuth cleanup failed", "table", task.name, "error", task.err)
+					}
+				}
 			}
 		}
 	}()

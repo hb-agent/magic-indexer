@@ -124,15 +124,27 @@ func newTestExecutor(t *testing.T) database.Executor {
 func resetBetweenTests(t *testing.T, exec database.Executor) {
 	t.Helper()
 	tables := []string{
+		// Children first (FK order), parents last.
+		"oauth_authorization_code",
+		"oauth_access_token",
+		"oauth_refresh_token",
+		"oauth_par_request",
+		"oauth_dpop_jti",
+		"oauth_dpop_nonce",
+		"oauth_auth_request",
+		"oauth_atp_request",
+		"oauth_atp_session",
+		"admin_session",
+		"oauth_client",
 		"label",
 		"label_preferences",
 		"report",
 		"record",
 		"actor",
+		"lexicon",
 		"jetstream_activity",
+		"jetstream_cursor",
 		"config",
-		"oauth_clients",
-		"lexicons",
 	}
 	for _, tbl := range tables {
 		// Ignore errors — the table may not exist in all migration states.

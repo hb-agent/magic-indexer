@@ -91,11 +91,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Context:        ctx,
 	})
 
-	// Write response
+	// Write response — always return 200 per GraphQL-over-HTTP spec;
+	// errors are conveyed in the response body's "errors" array.
 	w.Header().Set("Content-Type", "application/json")
-	if len(result.Errors) > 0 {
-		w.WriteHeader(http.StatusBadRequest)
-	}
 	_ = json.NewEncoder(w).Encode(result)
 }
 
