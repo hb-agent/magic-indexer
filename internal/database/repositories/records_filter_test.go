@@ -197,7 +197,7 @@ func TestGetByCollectionFiltered_KeysetPaginationStability(t *testing.T) {
 	// For this direct-repository test, match the DB's native format.
 	tsFormat := "2006-01-02 15:04:05" // SQLite default
 	if db.Executor.Dialect() == database.PostgreSQL {
-		tsFormat = "2006-01-02T15:04:05Z"
+		tsFormat = "2006-01-02T15:04:05.999999Z07:00"
 	}
 
 	var afterTS, afterURI string
