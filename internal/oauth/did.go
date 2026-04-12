@@ -138,7 +138,7 @@ func (r *DIDResolver) resolvePLCDID(did string) (*DIDDocument, error) {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	return parseDIDDocument(body)
+	return parseDIDDocument(body, did)
 }
 
 // resolveWebDID resolves a did:web DID.
@@ -184,7 +184,7 @@ func (r *DIDResolver) resolveWebDID(did string) (*DIDDocument, error) {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	return parseDIDDocument(body)
+	return parseDIDDocument(body, did)
 }
 
 // ResolveHandleToDID resolves a handle to a DID using the AT Protocol identity resolution.
@@ -267,13 +267,17 @@ func (doc *DIDDocument) GetHandle() string {
 }
 
 // parseDIDDocument parses a DID document from JSON.
-func parseDIDDocument(data []byte) (*DIDDocument, error) {
+// If expectedDID is non-empty, the document's id must match it.
+func parseDIDDocument(data []byte, expectedDID ...string) (*DIDDocument, error) {
 	var doc DIDDocument
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("failed to parse DID document: %w", err)
 	}
 	if doc.ID == "" {
 		return nil, errors.New("invalid DID document: missing id")
+	}
+	if len(expectedDID) > 0 && expectedDID[0] != "" && doc.ID != expectedDID[0] {
+		return nil, fmt.Errorf("DID document id %q does not match requested %q", doc.ID, expectedDID[0])
 	}
 	return &doc, nil
 }

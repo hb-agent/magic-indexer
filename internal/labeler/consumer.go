@@ -501,9 +501,13 @@ func (c *Consumer) handleLabelMessage(ctx context.Context, msg *LabelMessage) {
 		metrics.RecordLabelRejected(c.config.LabelerDID, "upsert")
 	}
 
+	// Only advance cursor if at least some labels were persisted or
+	// the batch was empty (pure metadata frame). If ALL labels were
+	// rejected (e.g. transient DB failure), do NOT advance so that
+	// the frame can be re-processed after reconnection.
 	c.cursorMu.Lock()
 	prev := c.cursor
-	if msg.Seq > c.cursor {
+	if msg.Seq > c.cursor && (rejected == 0 || rejected < len(msg.Labels)) {
 		c.cursor = msg.Seq
 	}
 	c.cursorMu.Unlock()

@@ -103,6 +103,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 	maxBackoff := 2 * time.Minute
 
 	for {
+		connStart := time.Now()
 		err := c.startInternal(c.ctx)
 
 		// Check if we should stop (context cancelled)
@@ -112,8 +113,11 @@ func (c *Consumer) Start(ctx context.Context) error {
 		default:
 		}
 
-		// If error is nil, connection closed gracefully (shouldn't happen in normal operation)
-		// but we still try to reconnect
+		// Reset backoff if the connection was stable for a while.
+		if time.Since(connStart) > 30*time.Second {
+			backoff = time.Second
+		}
+
 		if err != nil {
 			slog.Error("Jetstream connection lost, will reconnect",
 				"error", err,
@@ -257,10 +261,44 @@ func (c *Consumer) UpdateCollections(parent context.Context, collections []strin
 	ctx := c.ctx
 	c.clientMu.Unlock()
 
-	// Start in background
+	// Start in background with reconnection loop (same as Start).
 	go func() {
-		if err := c.startInternal(ctx); err != nil {
-			slog.Error("Failed to reconnect Jetstream", "error", err)
+		backoff := time.Second
+		maxBackoff := 2 * time.Minute
+
+		for {
+			err := c.startInternal(ctx)
+
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			if err != nil {
+				slog.Error("Jetstream connection lost after collection update, will reconnect",
+					"error", err, "backoff", backoff)
+			} else {
+				slog.Warn("Jetstream connection closed after collection update, will reconnect",
+					"backoff", backoff)
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+
+			c.clientMu.Lock()
+			c.cursorDone = make(chan struct{})
+			c.clientMu.Unlock()
+
+			slog.Info("Attempting to reconnect to Jetstream after collection update...")
 		}
 	}()
 
@@ -269,7 +307,11 @@ func (c *Consumer) UpdateCollections(parent context.Context, collections []strin
 
 // Collections returns the currently subscribed collections.
 func (c *Consumer) Collections() []string {
-	return c.config.Collections
+	c.clientMu.Lock()
+	cols := make([]string, len(c.config.Collections))
+	copy(cols, c.config.Collections)
+	c.clientMu.Unlock()
+	return cols
 }
 
 // Stats returns the current statistics.
@@ -287,18 +329,14 @@ func (c *Consumer) processEvents(ctx context.Context) {
 		eventCount := c.stats.EventsReceived
 		c.statsMu.Unlock()
 
-		// Log every event received (for debugging)
+		// Process commit events
 		if event.IsCommit() {
-			slog.Info("[jetstream] Event received",
+			slog.Debug("[jetstream] Event received",
 				"collection", event.Commit.Collection,
 				"operation", event.Commit.Operation,
 				"did", event.DID,
 				"total_events", eventCount,
 			)
-		}
-
-		// Process commit events
-		if event.IsCommit() {
 			metrics.RecordJetstreamEvent(event.Commit.Collection, string(event.Commit.Operation))
 			if err := c.handleCommit(ctx, event); err != nil {
 				slog.Warn("Failed to handle commit",
@@ -393,7 +431,7 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 
 		updateActivityStatus("success", nil)
 
-		slog.Info("[jetstream] Stored record",
+		slog.Debug("[jetstream] Stored record",
 			"uri", uri,
 			"collection", commit.Collection,
 			"operation", commit.Operation,
@@ -422,18 +460,9 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 }
 
 // ensureActor ensures the actor exists in the database.
+// Uses Upsert (INSERT ON CONFLICT) directly — no pre-check SELECT.
 func (c *Consumer) ensureActor(ctx context.Context, did string) error {
-	// Check if actor exists
-	exists, err := c.actorsRepo.Exists(ctx, did)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-
-	// Upsert actor (without handle resolution per user request)
-	return c.actorsRepo.Upsert(ctx, did, "") // Empty handle
+	return c.actorsRepo.Upsert(ctx, did, "")
 }
 
 // cursorFlusher periodically flushes the cursor to the database.

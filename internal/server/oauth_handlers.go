@@ -471,7 +471,8 @@ func (h *OAuthHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		DPoPKey:       dpopKey,
 	})
 	if err != nil {
-		h.redirectWithError(w, authReq.RedirectURI, "server_error", "Token exchange failed: "+err.Error(), clientState)
+		slog.Warn("Token exchange failed", "error", err)
+		h.redirectWithError(w, authReq.RedirectURI, "server_error", "Token exchange failed", clientState)
 		return
 	}
 
@@ -989,17 +990,12 @@ func (h *OAuthHandlers) validateDPoP(ctx context.Context, r *http.Request, clien
 }
 
 // isValidRedirectURI checks if the redirect URI is valid for the client.
-func (h *OAuthHandlers) isValidRedirectURI(uri string, registeredURIs []string, requireExact bool) bool {
+// Always uses exact matching to prevent open-redirect attacks via path
+// extension (e.g. registered "https://a.com/cb" matching "https://a.com/cb.evil.com").
+func (h *OAuthHandlers) isValidRedirectURI(uri string, registeredURIs []string, _ bool) bool {
 	for _, registered := range registeredURIs {
-		if requireExact {
-			if uri == registered {
-				return true
-			}
-		} else {
-			// Allow prefix match for non-exact mode
-			if strings.HasPrefix(uri, registered) {
-				return true
-			}
+		if uri == registered {
+			return true
 		}
 	}
 	return false

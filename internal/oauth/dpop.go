@@ -53,6 +53,7 @@ type DPoPValidationResult struct {
 	JKT string // JWK Thumbprint (SHA-256) of the public key
 	JTI string // Unique identifier for replay protection
 	IAT int64  // Issued-at timestamp
+	ATH string // Access token hash from the proof (may be empty)
 }
 
 // DPoPClaims represents the claims in a DPoP proof JWT.
@@ -345,6 +346,7 @@ func VerifyDPoPProof(proof, method, url string, maxAgeSeconds int64) (*DPoPValid
 		JKT: jkt,
 		JTI: claims.ID,
 		IAT: iat,
+		ATH: claims.ATH,
 	}, nil
 }
 
@@ -355,18 +357,13 @@ func VerifyDPoPProofWithATH(proof, method, url, accessToken string, maxAgeSecond
 		return nil, err
 	}
 
-	// Verify ATH if access token is provided
+	// Verify ATH against the access token. The ATH claim was already
+	// extracted during the verified parse in VerifyDPoPProof.
 	if accessToken != "" {
-		// Re-parse to get claims (we need ATH)
-		token, _ := jwt.ParseWithClaims(proof, &DPoPClaims{}, func(token *jwt.Token) (interface{}, error) {
-			return nil, nil // We've already verified, just need to parse
-		})
-		if claims, ok := token.Claims.(*DPoPClaims); ok {
-			expectedATH := sha256.Sum256([]byte(accessToken))
-			expectedATHStr := base64.RawURLEncoding.EncodeToString(expectedATH[:])
-			if claims.ATH != expectedATHStr {
-				return nil, ErrDPoPATHMismatch
-			}
+		expectedATH := sha256.Sum256([]byte(accessToken))
+		expectedATHStr := base64.RawURLEncoding.EncodeToString(expectedATH[:])
+		if result.ATH != expectedATHStr {
+			return nil, ErrDPoPATHMismatch
 		}
 	}
 

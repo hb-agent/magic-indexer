@@ -36,8 +36,8 @@ func NewExecutor(databaseURL string) (*Executor, error) {
 	// recycling so we don't hold stale connections past a Postgres
 	// side restart / failover, and the idle bound keeps the pool
 	// from hoarding connections between quiet periods.
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
+	db.SetMaxOpenConns(50)
+	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(30 * time.Minute)
 	db.SetConnMaxIdleTime(5 * time.Minute)
 

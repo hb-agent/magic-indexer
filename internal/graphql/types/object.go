@@ -3,6 +3,7 @@ package types //nolint:revive // package name is descriptive within graphql cont
 import (
 	"fmt"
 	"log/slog"
+	"unicode"
 
 	"github.com/graphql-go/graphql"
 
@@ -378,5 +379,7 @@ func capitalizeFirst(s string) string {
 	if s == "" {
 		return s
 	}
-	return string(s[0]-32) + s[1:]
+	r := []rune(s)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
 }

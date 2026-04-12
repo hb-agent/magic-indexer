@@ -479,7 +479,8 @@ func (r *Resolver) CreateOAuthClient(ctx context.Context, clientName, clientType
 		"clientName":   client.ClientName,
 		"clientType":   string(client.ClientType),
 		"redirectUris": client.RedirectURIs,
-		"createdAt":    time.Unix(client.CreatedAt, 0).Format(time.RFC3339),
+		"createdAt":    client.CreatedAt,
+		"scope":        client.Scope,
 	}
 	if client.ClientSecret != nil {
 		result["clientSecret"] = *client.ClientSecret
@@ -513,7 +514,8 @@ func (r *Resolver) UpdateOAuthClient(ctx context.Context, clientID, clientName s
 		"clientName":   client.ClientName,
 		"clientType":   string(client.ClientType),
 		"redirectUris": client.RedirectURIs,
-		"createdAt":    time.Unix(client.CreatedAt, 0).Format(time.RFC3339),
+		"createdAt":    client.CreatedAt,
+		"scope":        client.Scope,
 	}
 	if client.ClientSecret != nil {
 		result["clientSecret"] = *client.ClientSecret

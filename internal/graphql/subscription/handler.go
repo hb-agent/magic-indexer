@@ -10,6 +10,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/graphql-go/graphql"
+
+	"github.com/GainForest/hypergoat/internal/graphql/depth"
 )
 
 const (
@@ -134,10 +136,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		schema:        h.schema,
 		pubsub:        h.pubsub,
 		subscriptions: make(map[string]context.CancelFunc),
+		done:          make(chan struct{}),
 	}
 
+	go client.pingLoop()
 	go client.run()
 }
+
+const (
+	wsPingPeriod   = 30 * time.Second
+	wsWriteTimeout = 10 * time.Second
+)
 
 // wsClient manages a single WebSocket connection.
 type wsClient struct {
@@ -147,6 +156,8 @@ type wsClient struct {
 	subscriptions map[string]context.CancelFunc
 	mu            sync.Mutex
 	initialized   bool
+	done     chan struct{}
+	closeOnce sync.Once
 }
 
 // run handles the WebSocket connection lifecycle.
@@ -207,6 +218,13 @@ func (c *wsClient) handleSubscribe(msg *wsMessage) {
 	var payload subscribePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		c.sendError(msg.ID, "Invalid subscribe payload")
+		return
+	}
+
+	// Depth-guard subscription queries to prevent resource abuse.
+	const maxSubscriptionQueryDepth = 15
+	if err := depth.Check(payload.Query, maxSubscriptionQueryDepth); err != nil {
+		c.sendError(msg.ID, "Query too deeply nested")
 		return
 	}
 
@@ -359,14 +377,45 @@ func (c *wsClient) send(msg *wsMessage) {
 	}
 }
 
+// pingLoop sends periodic WebSocket pings to keep the connection alive
+// and detect dead clients. Without this, idle subscriptions would be
+// disconnected by the server's read deadline.
+func (c *wsClient) pingLoop() {
+	ticker := time.NewTicker(wsPingPeriod)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			err := c.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+			if err == nil {
+				err = c.conn.WriteMessage(websocket.PingMessage, nil)
+			}
+			c.mu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}
+}
+
 // close closes the WebSocket connection and all subscriptions.
 func (c *wsClient) close() {
-	c.mu.Lock()
-	for id, cancel := range c.subscriptions {
-		cancel()
-		delete(c.subscriptions, id)
-	}
-	c.mu.Unlock()
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		for id, cancel := range c.subscriptions {
+			cancel()
+			delete(c.subscriptions, id)
+		}
+		// Close the connection while holding the mutex to prevent
+		// races with concurrent send() or pingLoop() writes.
+		_ = c.conn.Close()
+		c.mu.Unlock()
 
-	_ = c.conn.Close()
+		// Signal pingLoop to exit.
+		close(c.done)
+	})
 }

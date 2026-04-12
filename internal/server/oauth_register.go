@@ -71,6 +71,10 @@ func (h *OAuthRegisterHandler) HandleRegister(w http.ResponseWriter, r *http.Req
 
 	ctx := r.Context()
 
+	// Limit request body size to prevent resource exhaustion.
+	const maxRegisterBodySize = 1 << 20 // 1 MiB
+	r.Body = http.MaxBytesReader(w, r.Body, maxRegisterBodySize)
+
 	// Parse JSON request
 	var req RegistrationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
