@@ -169,11 +169,15 @@ type ListReposByCollectionResponse struct {
 }
 
 // ListReposByCollection fetches all repos that have records for a collection.
+// maxBackfillPages caps pagination to prevent infinite loops from a
+// misbehaving relay that always returns a non-empty cursor.
+const maxBackfillPages = 10_000
+
 func (c *Client) ListReposByCollection(ctx context.Context, collection string) ([]string, error) {
 	var allRepos []string
 	var cursor string
 
-	for {
+	for page := 0; page < maxBackfillPages; page++ {
 		repos, nextCursor, err := c.listReposByCollectionPage(ctx, collection, cursor)
 		if err != nil {
 			return nil, err

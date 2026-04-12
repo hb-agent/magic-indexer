@@ -490,7 +490,9 @@ func (h *OAuthHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) {
 			atpSession.AccessTokenScopes = tokenResp.Scope
 		}
 		atpSession.SessionExchangedAt = &now
-		_ = h.atpSessions.Update(ctx, atpSession)
+		if err := h.atpSessions.Update(ctx, atpSession); err != nil {
+			slog.Warn("Failed to update ATP session after token exchange", "error", err)
+		}
 	}
 
 	// Generate authorization code for client
@@ -558,7 +560,7 @@ func (h *OAuthHandlers) HandleToken(w http.ResponseWriter, r *http.Request) {
 	case "refresh_token":
 		h.handleRefreshTokenGrant(w, r)
 	default:
-		h.writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "Unsupported grant_type: "+grantType)
+		h.writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "Unsupported grant_type")
 	}
 }
 
@@ -722,6 +724,9 @@ func (h *OAuthHandlers) handleAuthorizationCodeGrant(w http.ResponseWriter, r *h
 		tokenTypeStr = "DPoP"
 	}
 
+	slog.Info("[oauth] Token issued via authorization_code",
+		"client_id", authCode.ClientID, "user_id", authCode.UserID)
+
 	resp := TokenResponse{
 		AccessToken:  accessTokenStr,
 		TokenType:    tokenTypeStr,
@@ -877,6 +882,9 @@ func (h *OAuthHandlers) handleRefreshTokenGrant(w http.ResponseWriter, r *http.R
 	if dpopJKT != nil {
 		tokenTypeStr = "DPoP"
 	}
+
+	slog.Info("[oauth] Token refreshed",
+		"client_id", oldRefreshToken.ClientID, "user_id", oldRefreshToken.UserID)
 
 	resp := TokenResponse{
 		AccessToken:  newAccessTokenStr,
@@ -1088,12 +1096,20 @@ func (h *OAuthHandlers) StartCleanupWorker(ctx context.Context, interval time.Du
 				return
 			case <-ticker.C:
 				now := oauth.CurrentTimestamp()
-				_ = h.authRequests.DeleteExpired(ctx, now)
-				_ = h.atpRequests.DeleteExpired(ctx, now)
-				_ = h.authCodes.DeleteExpired(ctx, now)
-				_ = h.accessTokens.DeleteExpired(ctx, now)
-				// Clean up JTIs older than 1 hour
-				_ = h.dpopJTIs.DeleteOlderThan(ctx, now-3600)
+				for _, task := range []struct {
+					name string
+					err  error
+				}{
+					{"auth_requests", h.authRequests.DeleteExpired(ctx, now)},
+					{"atp_requests", h.atpRequests.DeleteExpired(ctx, now)},
+					{"auth_codes", h.authCodes.DeleteExpired(ctx, now)},
+					{"access_tokens", h.accessTokens.DeleteExpired(ctx, now)},
+					{"dpop_jtis", h.dpopJTIs.DeleteOlderThan(ctx, now - 3600)},
+				} {
+					if task.err != nil {
+						slog.Warn("OAuth cleanup failed", "table", task.name, "error", task.err)
+					}
+				}
 			}
 		}
 	}()

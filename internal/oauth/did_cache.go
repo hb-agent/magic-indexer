@@ -5,6 +5,8 @@ package oauth
 import (
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // CachedDIDDocument wraps a DID document with expiration.
@@ -24,6 +26,7 @@ type DIDCache struct {
 	cache    map[string]*CachedDIDDocument
 	ttl      time.Duration
 	resolver *DIDResolver
+	flight   singleflight.Group
 }
 
 // DIDCacheOption configures the DID cache.
@@ -81,16 +84,20 @@ func (c *DIDCache) GetWithInvalidate(did string, invalidateFirst bool) (*DIDDocu
 }
 
 // resolveFresh resolves a DID and caches the result.
+// Uses singleflight to collapse concurrent resolutions for the same DID.
 func (c *DIDCache) resolveFresh(did string) (*DIDDocument, error) {
-	doc, err := c.resolver.ResolveDID(did)
+	v, err, _ := c.flight.Do(did, func() (interface{}, error) {
+		doc, err := c.resolver.ResolveDID(did)
+		if err != nil {
+			return nil, err
+		}
+		c.Put(did, doc)
+		return doc, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Cache the result
-	c.Put(did, doc)
-
-	return doc, nil
+	return v.(*DIDDocument), nil
 }
 
 // Put stores a DID document in the cache.

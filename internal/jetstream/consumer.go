@@ -191,8 +191,9 @@ func (c *Consumer) startInternal(ctx context.Context) error {
 		go c.cursorFlusher(ctx)
 	}
 
-	// Start event processor
-	go c.processEvents(ctx)
+	// Start event processor — pass client explicitly to avoid a data
+	// race on c.client during reconnection (matches labeler pattern).
+	go c.processEvents(ctx, c.client)
 
 	// Run client (blocking)
 	return c.client.Run(ctx)
@@ -322,8 +323,8 @@ func (c *Consumer) Stats() Stats {
 }
 
 // processEvents handles incoming events.
-func (c *Consumer) processEvents(ctx context.Context) {
-	for event := range c.client.Events() {
+func (c *Consumer) processEvents(ctx context.Context, client *Client) {
+	for event := range client.Events() {
 		c.statsMu.Lock()
 		c.stats.EventsReceived++
 		eventCount := c.stats.EventsReceived
