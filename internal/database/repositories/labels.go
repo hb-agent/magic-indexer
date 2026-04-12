@@ -138,7 +138,7 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 		var label Label
 		var retCtsStr string
 		var cidNull, expNull sql.NullString
-		var neg int
+		var neg bool
 		err := r.db.QueryRow(ctx, sqlStr, params,
 			&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull)
 		if err != nil {
@@ -150,7 +150,7 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 			}
 			return nil, err
 		}
-		label.Neg = neg != 0
+		label.Neg = neg
 		label.Cts = parseStoredTime(retCtsStr)
 		if cidNull.Valid {
 			label.CID = &cidNull.String
@@ -201,12 +201,12 @@ func (r *LabelsRepository) findExistingAssertion(ctx context.Context, src, uri, 
 	var label Label
 	var retCtsStr string
 	var cidNull, expNull sql.NullString
-	var neg int
+	var neg bool
 	if err := r.db.QueryRow(ctx, sqlStr, params,
 		&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull); err != nil {
 		return nil, err
 	}
-	label.Neg = neg != 0
+	label.Neg = neg
 	label.Cts = parseStoredTime(retCtsStr)
 	if cidNull.Valid {
 		label.CID = &cidNull.String
@@ -257,7 +257,7 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 		var label Label
 		var retCtsStr string
 		var cidNull, expNull sql.NullString
-		var neg int
+		var neg bool
 		err := r.db.QueryRow(ctx, sqlStr, params,
 			&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull)
 		if err != nil {
@@ -266,7 +266,7 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 			}
 			return nil, err
 		}
-		label.Neg = neg != 0
+		label.Neg = neg
 		label.Cts = parseStoredTime(retCtsStr)
 		if cidNull.Valid {
 			label.CID = &cidNull.String
@@ -301,12 +301,12 @@ func (r *LabelsRepository) findExistingNegation(ctx context.Context, src, uri, v
 	var label Label
 	var retCtsStr string
 	var cidNull, expNull sql.NullString
-	var neg int
+	var neg bool
 	if err := r.db.QueryRow(ctx, sqlStr, params,
 		&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull); err != nil {
 		return nil, err
 	}
-	label.Neg = neg != 0
+	label.Neg = neg
 	label.Cts = parseStoredTime(retCtsStr)
 	if cidNull.Valid {
 		label.CID = &cidNull.String
@@ -323,7 +323,7 @@ func (r *LabelsRepository) GetByID(ctx context.Context, id int64) (*Label, error
 	var label Label
 	var ctsStr string
 	var cidNull, expNull sql.NullString
-	var neg int
+	var neg bool
 
 	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Int(id)},
 		&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &ctsStr, &expNull)
@@ -331,7 +331,7 @@ func (r *LabelsRepository) GetByID(ctx context.Context, id int64) (*Label, error
 		return nil, err
 	}
 
-	label.Neg = neg != 0
+	label.Neg = neg
 	label.Cts = parseStoredTime(ctsStr)
 	if cidNull.Valid {
 		label.CID = &cidNull.String
@@ -580,13 +580,13 @@ func scanLabels(rows *sql.Rows) ([]Label, error) {
 		var label Label
 		var ctsStr string
 		var cidNull, expNull sql.NullString
-		var neg int
+		var neg bool
 
 		if err := rows.Scan(&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &ctsStr, &expNull); err != nil {
 			return nil, err
 		}
 
-		label.Neg = neg != 0
+		label.Neg = neg
 		label.Cts = parseStoredTime(ctsStr)
 		if cidNull.Valid {
 			label.CID = &cidNull.String
