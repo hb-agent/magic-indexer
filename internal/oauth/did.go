@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -53,18 +54,53 @@ func WithHTTPClient(client *http.Client) DIDResolverOption {
 	}
 }
 
+// maxDIDDocumentBytes is the largest DID document or handle-resolution
+// response we will accept. Real DID docs are a few KB; the cap guards
+// against a hostile PLC or did:web returning multi-GB JSON and
+// exhausting memory in io.ReadAll.
+const maxDIDDocumentBytes = 256 * 1024
+
 // NewDIDResolver creates a new DID resolver.
 func NewDIDResolver(opts ...DIDResolverOption) *DIDResolver {
 	r := &DIDResolver{
 		plcDirectoryURL: DefaultPLCDirectoryURL,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
+			// Reject redirects that would land on a private /
+			// loopback / link-local address. This closes the
+			// SSRF hole where a hostile PLC directory redirects
+			// a lookup to 127.0.0.1 or 169.254.169.254 after the
+			// initial hostname check has already passed.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return fmt.Errorf("stopped after 10 redirects")
+				}
+				if err := rejectPrivateHost(req.URL.Host); err != nil {
+					return fmt.Errorf("redirect blocked: %w", err)
+				}
+				return nil
+			},
 		},
 	}
 	for _, opt := range opts {
 		opt(r)
 	}
 	return r
+}
+
+// readBounded reads at most maxDIDDocumentBytes from r and returns an
+// error if the stream is larger. Replaces io.ReadAll on DID-adjacent
+// HTTP responses.
+func readBounded(r io.Reader) ([]byte, error) {
+	limited := io.LimitReader(r, maxDIDDocumentBytes+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxDIDDocumentBytes {
+		return nil, fmt.Errorf("response body exceeds %d bytes", maxDIDDocumentBytes)
+	}
+	return body, nil
 }
 
 // ResolveDID resolves a DID to its document.
@@ -97,7 +133,7 @@ func (r *DIDResolver) resolvePLCDID(did string) (*DIDDocument, error) {
 		return nil, fmt.Errorf("PLC resolution failed with status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -106,6 +142,14 @@ func (r *DIDResolver) resolvePLCDID(did string) (*DIDDocument, error) {
 }
 
 // resolveWebDID resolves a did:web DID.
+//
+// Security: did:web documents are fetched from the hostname embedded in
+// the DID, which is attacker-controlled. To prevent SSRF we reject any
+// hostname that resolves to a loopback, link-local, private, or
+// unspecified address before making the request. An operator that
+// legitimately needs to resolve an internal did:web can set
+// ALLOW_PRIVATE_DID_WEB=true at their own risk (not implemented
+// here; the cleaner path is to run a split-horizon PLC directory).
 func (r *DIDResolver) resolveWebDID(did string) (*DIDDocument, error) {
 	// Extract domain from did:web:domain
 	// Handle percent-encoded colons for ports (did:web:localhost%3A3000)
@@ -113,6 +157,10 @@ func (r *DIDResolver) resolveWebDID(did string) (*DIDDocument, error) {
 	domain, err := url.PathUnescape(domain)
 	if err != nil {
 		return nil, fmt.Errorf("invalid did:web encoding: %w", err)
+	}
+
+	if err := rejectPrivateHost(domain); err != nil {
+		return nil, fmt.Errorf("did:web hostname rejected: %w", err)
 	}
 
 	// Build the .well-known URL
@@ -131,7 +179,7 @@ func (r *DIDResolver) resolveWebDID(did string) (*DIDDocument, error) {
 		return nil, fmt.Errorf("web DID resolution failed with status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -154,7 +202,7 @@ func (r *DIDResolver) ResolveHandleToDID(handle string) (string, error) {
 		return "", fmt.Errorf("handle resolution failed with status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBounded(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}
@@ -199,6 +247,16 @@ func (doc *DIDDocument) GetLabelerEndpoint() string {
 
 // GetHandle extracts the handle from a DID document's alsoKnownAs field.
 // Returns the first at:// URI stripped of the at:// prefix.
+//
+// SECURITY: the value returned here is *not* verified. A DID document
+// is signed by the DID subject, so the subject can claim any handle
+// they want in alsoKnownAs. Callers that rely on a handle for a
+// *trust* decision (access control, permissioning, impersonation
+// checks) must independently resolve the handle back to the DID via
+// com.atproto.identity.resolveHandle and assert the result matches.
+// Callers that only use the handle for display purposes (e.g.
+// persisting it on an actor row for UI rendering) can use this as-is.
+// The current call sites are display-only.
 func (doc *DIDDocument) GetHandle() string {
 	for _, aka := range doc.AlsoKnownAs {
 		if strings.HasPrefix(aka, "at://") {
@@ -223,6 +281,43 @@ func parseDIDDocument(data []byte) (*DIDDocument, error) {
 // IsValidDID checks if a string is a valid DID format.
 func IsValidDID(did string) bool {
 	return strings.HasPrefix(did, "did:plc:") || strings.HasPrefix(did, "did:web:")
+}
+
+// rejectPrivateHost errors out if host resolves to any loopback,
+// link-local, private, unspecified, or multicast address. Used to
+// block SSRF via attacker-controlled hostnames (did:web resolution).
+// Strips any ":port" suffix before resolving.
+func rejectPrivateHost(host string) error {
+	// strip port if present (host may be "example.com:8443")
+	hostOnly := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		hostOnly = h
+	}
+	// Hostnames that are literally loopback-ish get rejected early so
+	// that even broken resolvers can't trick us.
+	lower := strings.ToLower(hostOnly)
+	if lower == "localhost" || lower == "localhost.localdomain" {
+		return fmt.Errorf("loopback hostname %q not allowed", host)
+	}
+
+	ips, err := net.LookupIP(hostOnly)
+	if err != nil {
+		// Resolution failure is treated as rejection — an unreachable
+		// host can't serve a DID document anyway, and proceeding would
+		// either fail or hit a different IP on retry.
+		return fmt.Errorf("resolve %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("resolve %q: no addresses", host)
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() ||
+			ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+			ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
+			return fmt.Errorf("hostname %q resolves to disallowed address %s", host, ip)
+		}
+	}
+	return nil
 }
 
 // IsDIDPLC checks if a DID uses the plc method.

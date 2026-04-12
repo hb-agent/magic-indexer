@@ -35,10 +35,10 @@ type AccessTokenStore interface {
 
 // JTIStore provides DPoP JTI replay protection.
 type JTIStore interface {
-	// Exists checks if a JTI has been used.
-	Exists(ctx context.Context, jti string) (bool, error)
-	// Insert records a JTI as used.
-	Insert(ctx context.Context, jti *DPoPJTI) error
+	// InsertIfNew records a JTI as used and reports whether it was
+	// newly inserted. A false return indicates the JTI already
+	// existed, i.e. a replay.
+	InsertIfNew(ctx context.Context, jti *DPoPJTI) (bool, error)
 }
 
 // AuthMiddleware validates OAuth access tokens for protected resources.
@@ -120,23 +120,19 @@ func (m *AuthMiddleware) validateDPoPToken(r *http.Request, token string) (*Auth
 		return nil, &AuthError{Code: "invalid_dpop_proof", Description: err.Error()}
 	}
 
-	// Check JTI for replay
-	used, err := m.jtis.Exists(ctx, result.JTI)
-	if err != nil {
-		return nil, ErrServerError
-	}
-	if used {
-		return nil, ErrDPoPReplay
-	}
-
-	// Record JTI to prevent replay
+	// Race-safe replay detection: InsertIfNew returns (true, nil)
+	// if the row was new and (false, nil) if a row with the same
+	// JTI already existed. The old Exists-then-Insert pattern had a
+	// TOCTOU window between the check and the insert.
 	jti := &DPoPJTI{
 		JTI:       result.JTI,
 		CreatedAt: result.IAT,
 	}
-	if err := m.jtis.Insert(ctx, jti); err != nil {
-		// Insert failure likely means a concurrent request used the same JTI
-		// (unique constraint violation). Treat as a replay attempt, not a server error.
+	inserted, err := m.jtis.InsertIfNew(ctx, jti)
+	if err != nil {
+		return nil, ErrServerError
+	}
+	if !inserted {
 		return nil, ErrDPoPReplay
 	}
 
@@ -246,7 +242,16 @@ func (m *AuthMiddleware) RequireAuth(next http.Handler) http.Handler {
 
 // OptionalAuth returns middleware that accepts optional authentication.
 // Requests without authentication proceed without user context.
-// Requests with invalid authentication receive a 401 response.
+// Requests whose Authorization header is present but *not* a valid
+// OAuth access token also proceed without user context — the
+// downstream handler is expected to perform its own auth check (for
+// example, the admin GraphQL handler accepts an ADMIN_API_KEY bearer
+// token that is not an OAuth token). Previously this middleware
+// returned 401 unconditionally on a failed OAuth validation, which
+// broke the admin API-key auth path.
+//
+// Handlers that need to *require* a valid OAuth token should use
+// RequireAuth, not OptionalAuth.
 func (m *AuthMiddleware) OptionalAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check if Authorization header is present
@@ -256,10 +261,13 @@ func (m *AuthMiddleware) OptionalAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// Auth header present, validate it
+		// Auth header present, try to validate it as an OAuth token.
+		// On failure, pass through with no user context — the
+		// downstream handler may accept a different auth scheme
+		// (API key, etc.).
 		result, err := m.ValidateRequest(r)
 		if err != nil {
-			m.writeError(w, err)
+			next.ServeHTTP(w, r)
 			return
 		}
 
@@ -401,28 +409,14 @@ func (e *AuthError) HTTPStatus() int {
 	}
 }
 
-// UseJTI atomically checks if a JTI exists and inserts it if not.
-// This is a helper for stores that don't have atomic operations.
-// Returns true if the JTI was successfully recorded (not a replay).
+// UseJTI atomically records a JTI and reports whether this was a
+// new entry. A false return means the JTI already existed and the
+// caller should treat it as a replay.
 func UseJTI(ctx context.Context, store JTIStore, jti string, iat int64) (bool, error) {
-	exists, err := store.Exists(ctx, jti)
-	if err != nil {
-		return false, err
-	}
-	if exists {
-		return false, nil // Replay detected
-	}
-
-	err = store.Insert(ctx, &DPoPJTI{
+	return store.InsertIfNew(ctx, &DPoPJTI{
 		JTI:       jti,
 		CreatedAt: iat,
 	})
-	if err != nil {
-		// Could be a race condition, treat as replay
-		return false, err
-	}
-
-	return true, nil
 }
 
 // CleanupExpiredJTIs is a helper to clean up old JTI records.

@@ -5,6 +5,7 @@ package oauth
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 )
 
@@ -29,12 +30,15 @@ func GenerateCodeChallenge(verifier string) string {
 // Returns true if the verifier matches the challenge using the specified method.
 // Supported methods: "S256" (recommended), "plain" (discouraged but spec-compliant).
 func VerifyCodeChallenge(verifier, challenge, method string) bool {
+	// Use constant-time comparison even though these are public-ish
+	// values. Defense-in-depth: subtle.ConstantTimeCompare also
+	// handles the equal-lengths requirement cleanly.
 	switch method {
 	case "S256":
-		computedChallenge := GenerateCodeChallenge(verifier)
-		return computedChallenge == challenge
+		computed := GenerateCodeChallenge(verifier)
+		return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 	case "plain":
-		return verifier == challenge
+		return subtle.ConstantTimeCompare([]byte(verifier), []byte(challenge)) == 1
 	default:
 		return false
 	}

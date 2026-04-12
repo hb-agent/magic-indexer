@@ -6,6 +6,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -351,18 +354,97 @@ func (f LabelFilter) IsEmpty() bool {
 	return len(f.Include) == 0 && len(f.Exclude) == 0
 }
 
-// GetByCollectionWithLabelFilterAndKeysetCursor is the label-aware sibling of
-// GetByCollectionWithKeysetCursor. It applies Include/Exclude semantics from
-// the label table while preserving the same composite (indexed_at, uri) keyset
-// ordering. If filter.IsEmpty() it delegates to the existing method.
-func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
+// MaxAuthorsFilterSize is the server-enforced cap on the number of DIDs
+// passed in the Authors filter. Chosen to stay comfortably under SQLite's
+// default 999-parameter limit (even when composed with other filters and
+// keyset cursor params) and to keep Postgres planner estimates honest —
+// at very large IN-list sizes the planner may switch to less efficient
+// scan strategies. Trust sets larger than this should be shrunk on the
+// client side before querying; the trust graph at this scale is either a
+// client bug or a signal that a different indexing strategy is needed.
+const MaxAuthorsFilterSize = 500
+
+// ErrAuthorsFilterTooLarge is returned by GetByCollectionFiltered when
+// RecordFilter.Authors exceeds MaxAuthorsFilterSize.
+var ErrAuthorsFilterTooLarge = errors.New("authors filter exceeds maximum size")
+
+// RecordFilter composes the filter axes applied to a collection query.
+// Its zero value means "no filter applied" and behaves identically to
+// the unfiltered query path. Each field carries its own distinct
+// "empty" semantic — see field comments.
+type RecordFilter struct {
+	// Authors is the "any of" author-DID filter.
+	//
+	// Semantics:
+	//   nil         → no author filter is applied.
+	//   []string{}  → return zero results WITHOUT querying the DB.
+	//   [a, b, ...] → return records with r.did IN (a, b, ...).
+	//
+	// The nil/empty distinction is load-bearing: a client bug that
+	// silently produces an empty slice must NOT degrade to "no
+	// filter" and show the full firehose. Callers that parse this
+	// from a request are responsible for preserving the distinction
+	// (e.g. pointer-to-slice at the GraphQL resolver layer).
+	Authors []string
+
+	// Labels narrows results via the existing label Include/Exclude
+	// semantics, unchanged from the previous LabelFilter path.
+	Labels LabelFilter
+}
+
+// IsEmpty reports whether the filter imposes no constraints. A nil
+// Authors slice means "no author filter"; an empty-but-non-nil Authors
+// slice means "match nothing" and does NOT count as empty.
+func (f RecordFilter) IsEmpty() bool {
+	return f.Authors == nil && f.Labels.IsEmpty()
+}
+
+// GetByCollectionFiltered is the canonical filtered-records query path.
+// It applies the supplied RecordFilter over the existing composite
+// (indexed_at, uri) keyset cursor and returns up to `limit` records.
+//
+// The sibling methods GetByCollectionWithKeysetCursor and
+// GetByCollectionWithLabelFilterAndKeysetCursor are now thin wrappers
+// over this method; new callers should use GetByCollectionFiltered
+// directly and let the compose-ability of RecordFilter handle future
+// filter axes.
+func (r *RecordsRepository) GetByCollectionFiltered(
 	ctx context.Context,
 	collection string,
 	limit int,
 	afterTimestamp, afterURI string,
-	filter LabelFilter,
+	filter RecordFilter,
 ) ([]*Record, error) {
-	if filter.IsEmpty() {
+	// Load-bearing empty-authors short-circuit. See RecordFilter.Authors
+	// field doc for why this cannot be collapsed into "no filter".
+	if filter.Authors != nil && len(filter.Authors) == 0 {
+		slog.Info("records filter short-circuited on empty authors",
+			"collection", collection,
+		)
+		return nil, nil
+	}
+
+	// Enforce the DID-list size cap before touching the DB so a
+	// misbehaving client cannot trip SQLite's parameter ceiling.
+	if len(filter.Authors) > MaxAuthorsFilterSize {
+		return nil, ErrAuthorsFilterTooLarge
+	}
+
+	// Dedup + sort author DIDs for a stable query plan and predictable
+	// binding order. slices.Compact only removes consecutive duplicates,
+	// so sort first. Work on a clone so we do not mutate the caller's
+	// slice.
+	authors := filter.Authors
+	if len(authors) > 1 {
+		authors = slices.Clone(authors)
+		sort.Strings(authors)
+		authors = slices.Compact(authors)
+	}
+
+	// Fast path: no filters at all. Delegate to the plain keyset path
+	// to avoid the (cheap but nonzero) overhead of building the shared
+	// filter SQL when no constraints apply.
+	if filter.Labels.IsEmpty() && len(authors) == 0 {
 		return r.GetByCollectionWithKeysetCursor(ctx, collection, limit, afterTimestamp, afterURI)
 	}
 
@@ -379,13 +461,31 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 	// Postgres stores neg as BOOLEAN; SQLite as INTEGER. Use
 	// dialect-correct literals so the query plans correctly on both.
 	negFalse, negTrue := "0", "1"
+	nowLit := "datetime('now')"
 	if r.db.Dialect() == database.PostgreSQL {
 		negFalse, negTrue = "false", "true"
+		nowLit = "NOW()"
 	}
 
 	// collection = ?
 	whereClauses = append(whereClauses, fmt.Sprintf("r.collection = %s", ph()))
 	args = append(args, collection)
+
+	// authors: r.did IN (?, ?, ...). Placeholders are generated in
+	// input order so SQLite positional binding and Postgres numeric
+	// binding match. `authors` has already been deduped and sorted
+	// above, and capped at MaxAuthorsFilterSize. An empty slice would
+	// have short-circuited above; a nil slice falls through with no
+	// clause appended.
+	if len(authors) > 0 {
+		didPhs := make([]string, len(authors))
+		for i, did := range authors {
+			didPhs[i] = ph()
+			args = append(args, did)
+		}
+		whereClauses = append(whereClauses,
+			fmt.Sprintf("r.did IN (%s)", strings.Join(didPhs, ", ")))
+	}
 
 	// keyset cursor
 	if afterTimestamp != "" || afterURI != "" {
@@ -409,9 +509,9 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 			args = append(args, v)
 		}
 		srcClause := ""
-		if len(filter.LabelerSrcs) > 0 {
-			srcPhs := make([]string, len(filter.LabelerSrcs))
-			for i, s := range filter.LabelerSrcs {
+		if len(filter.Labels.LabelerSrcs) > 0 {
+			srcPhs := make([]string, len(filter.Labels.LabelerSrcs))
+			for i, s := range filter.Labels.LabelerSrcs {
 				srcPhs[i] = ph()
 				args = append(args, s)
 			}
@@ -425,6 +525,7 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 			SELECT 1 FROM label l
 			WHERE l.uri = r.uri
 			  AND l.neg = %s
+			  AND (l.exp IS NULL OR l.exp > %s)
 			  AND l.val IN (%s)%s
 			  AND NOT EXISTS (
 			    SELECT 1 FROM label neg
@@ -434,19 +535,19 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 			      AND neg.neg = %s
 			      AND neg.cts >= l.cts
 			  )
-		)`, verb, negFalse, strings.Join(valPhs, ", "), srcClause, negTrue)
+		)`, verb, negFalse, nowLit, strings.Join(valPhs, ", "), srcClause, negTrue)
 	}
 
 	// Include: EXISTS a non-negated label whose val matches one of the
 	// Include set (optionally restricted to LabelerSrcs).
-	if len(filter.Include) > 0 {
-		whereClauses = append(whereClauses, labelFilterSub(filter.Include, true))
+	if len(filter.Labels.Include) > 0 {
+		whereClauses = append(whereClauses, labelFilterSub(filter.Labels.Include, true))
 	}
 
 	// Exclude: NOT EXISTS an active label whose val matches one of the
 	// Exclude set (optionally restricted to LabelerSrcs).
-	if len(filter.Exclude) > 0 {
-		whereClauses = append(whereClauses, labelFilterSub(filter.Exclude, false))
+	if len(filter.Labels.Exclude) > 0 {
+		whereClauses = append(whereClauses, labelFilterSub(filter.Labels.Exclude, false))
 	}
 
 	// Build columns with "r." prefix.
@@ -479,6 +580,22 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 	defer rows.Close()
 
 	return scanRecords(rows)
+}
+
+// GetByCollectionWithLabelFilterAndKeysetCursor is the legacy label-only
+// filter entry point. Deprecated: use GetByCollectionFiltered with a
+// RecordFilter{Labels: filter} instead. This wrapper is retained for
+// backward compatibility with existing callers; it will be removed in a
+// follow-up cleanup.
+func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
+	ctx context.Context,
+	collection string,
+	limit int,
+	afterTimestamp, afterURI string,
+	filter LabelFilter,
+) ([]*Record, error) {
+	return r.GetByCollectionFiltered(ctx, collection, limit, afterTimestamp, afterURI,
+		RecordFilter{Labels: filter})
 }
 
 // GetByDID retrieves all records for a specific DID.

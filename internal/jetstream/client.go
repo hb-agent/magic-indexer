@@ -87,6 +87,12 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
+	// Bound per-frame memory so a hostile Jetstream server can't
+	// send a single multi-GB frame and exhaust heap before the
+	// parser gets a chance to reject it. Jetstream events are
+	// tiny in practice; 8 MiB is a comfortable ceiling.
+	conn.SetReadLimit(maxJetstreamFrameSize)
+
 	c.mu.Lock()
 	c.conn = conn
 	c.mu.Unlock()
@@ -94,6 +100,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	slog.Info("Connected to Jetstream")
 	return nil
 }
+
+// maxJetstreamFrameSize caps any single binary websocket frame.
+const maxJetstreamFrameSize = 8 << 20
 
 // buildURL constructs the Jetstream URL with query parameters.
 func (c *Client) buildURL() (*url.URL, error) {

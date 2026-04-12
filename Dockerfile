@@ -1,7 +1,7 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
-WORKDIR /app
+WORKDIR /src
 
 # Install build dependencies
 RUN apk add --no-cache git
@@ -16,29 +16,42 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o /hypergoat ./cmd/hypergoat
+# Build the binary. -trimpath strips /workspace/... paths from the
+# binary so builds are reproducible across machines; -buildvcs=false
+# avoids embedding git metadata that differs between CI and local
+# builds.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -o /hypergoat ./cmd/hypergoat
 
 # Runtime stage
 FROM alpine:3.19
 
+# Install runtime dependencies.
+RUN apk add --no-cache ca-certificates tzdata wget
+
+# Create a non-root user and group for the runtime container.
+# Running as UID 1000 (non-zero) applies the principle of least
+# privilege: even if an attacker compromises the process they
+# cannot write to /etc or trivially escalate inside the container.
+RUN addgroup -S -g 1000 hypergoat \
+    && adduser -S -u 1000 -G hypergoat -h /app hypergoat \
+    && mkdir -p /app/data /app/static \
+    && chown -R hypergoat:hypergoat /app
+
 WORKDIR /app
 
-# Install runtime dependencies
-RUN apk add --no-cache ca-certificates tzdata
+# Copy the statically-linked binary from the builder stage.
+COPY --from=builder --chown=hypergoat:hypergoat /hypergoat /app/hypergoat
 
-# Copy binary from builder
-COPY --from=builder /hypergoat /app/hypergoat
+# Drop privileges before running the process.
+USER hypergoat
 
-# Copy static files (Quickslice client UI) if they exist
-# Note: static directory may not exist yet during development
-RUN mkdir -p /app/static
-
-# Copy migrations (embedded in binary, but kept for reference)
-# Note: migrations are embedded via go:embed, this line may be removed later
-
-# Create data directory
-RUN mkdir -p /app/data
+# Note: we intentionally do NOT declare VOLUME /app/data here.
+# Railway bans the Dockerfile VOLUME keyword and expects operators
+# to attach persistent storage via its native volume mechanism.
+# Other platforms (plain Docker, Compose, Fly) can mount /app/data
+# at runtime with `-v` / `volumes:` / `mount` without the Dockerfile
+# declaration. SQLite still works — it just writes its -wal/-shm
+# sidecars into whatever directory /app/data resolves to.
 
 # Expose port
 EXPOSE 8080

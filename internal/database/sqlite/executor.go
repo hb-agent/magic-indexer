@@ -46,6 +46,15 @@ func NewExecutor(databaseURL string) (*Executor, error) {
 		return nil, database.ConnectionError("failed to enable foreign keys", err)
 	}
 
+	// Give writers 5 seconds to wait for the write lock before
+	// returning SQLITE_BUSY. With MaxOpenConns=1 this is mostly a
+	// belt-and-suspenders guard against the driver returning BUSY on
+	// transient lock contention during WAL checkpoints.
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		_ = db.Close()
+		return nil, database.ConnectionError("failed to set busy_timeout", err)
+	}
+
 	// Enable WAL mode for better concurrent read performance (skip for :memory:)
 	if path != ":memory:" {
 		if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {

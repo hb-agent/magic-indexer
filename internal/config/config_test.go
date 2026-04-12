@@ -284,6 +284,14 @@ func TestConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "dev placeholder secret rejected",
+			config: Config{
+				SecretKeyBase: devSecretKeyBase,
+				Port:          8080,
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

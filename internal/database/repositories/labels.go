@@ -51,6 +51,16 @@ func (r *LabelsRepository) negLiterals() (negFalse, negTrue string) {
 	return "0", "1"
 }
 
+// nowLiteral returns the SQL expression for "current time" in the
+// active dialect. Used by active-label filters so that expired labels
+// (l.exp < now) are treated as inactive without a separate cleanup job.
+func (r *LabelsRepository) nowLiteral() string {
+	if r.db.Dialect() == database.PostgreSQL {
+		return "NOW()"
+	}
+	return "datetime('now')"
+}
+
 // parseStoredTime parses a timestamp string that may have been written
 // by this code (UTC RFC3339Nano), by Postgres' TIMESTAMPTZ serializer
 // (RFC3339 with offset, no fractional seconds), or by SQLite's
@@ -334,6 +344,27 @@ func (r *LabelsRepository) GetByID(ctx context.Context, id int64) (*Label, error
 	return &label, nil
 }
 
+// GetAllForURI returns every label row stored against a single URI,
+// including negations and expired labels. This is a diagnostic view
+// used by the /admin/label-chain inspection endpoint — ordinary
+// query paths should use GetByURIs, which filters to the active set.
+// Results are ordered by cts descending so an operator reading the
+// response tops-down sees the most recent activity first.
+func (r *LabelsRepository) GetAllForURI(ctx context.Context, uri string) ([]Label, error) {
+	sqlStr := fmt.Sprintf(`SELECT l.id, l.src, l.uri, l.cid, l.val, l.neg, l.cts, l.exp
+		FROM label l
+		WHERE l.uri = %s
+		ORDER BY l.cts DESC, l.id DESC`, r.db.Placeholder(1))
+
+	rows, err := r.db.DB().QueryContext(ctx, sqlStr, uri)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanLabels(rows)
+}
+
 // GetByURIs retrieves active (non-negated) labels for a list of URIs.
 func (r *LabelsRepository) GetByURIs(ctx context.Context, uris []string) ([]Label, error) {
 	if len(uris) == 0 {
@@ -342,19 +373,23 @@ func (r *LabelsRepository) GetByURIs(ctx context.Context, uris []string) ([]Labe
 
 	placeholders := r.db.Placeholders(len(uris), 1)
 	negFalse, negTrue := r.negLiterals()
+	now := r.nowLiteral()
 	// Get only labels that haven't been negated. The negation check uses
 	// cts (the labeler's canonical timestamp) rather than the local
 	// auto-increment id, so a backfilled negation with an earlier wire
-	// cts correctly retracts an already-streamed assertion.
+	// cts correctly retracts an already-streamed assertion. Expired
+	// labels (l.exp <= now) are filtered out here rather than cleaned
+	// up by a background job.
 	sqlStr := fmt.Sprintf(`SELECT l.id, l.src, l.uri, l.cid, l.val, l.neg, l.cts, l.exp
 		FROM label l
 		WHERE l.uri IN (%s) AND l.neg = %s
+		AND (l.exp IS NULL OR l.exp > %s)
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg
 			WHERE neg.uri = l.uri AND neg.src = l.src AND neg.val = l.val
 			  AND neg.neg = %s AND neg.cts >= l.cts
 		)
-		ORDER BY l.cts DESC`, placeholders, negFalse, negTrue)
+		ORDER BY l.cts DESC`, placeholders, negFalse, now, negTrue)
 
 	params := make([]any, len(uris))
 	for i, uri := range uris {
@@ -458,11 +493,12 @@ func (r *LabelsRepository) HasTakedown(ctx context.Context, uri string, allowedS
 
 	sqlStr := fmt.Sprintf(`SELECT COUNT(*) FROM label
 		WHERE uri = %s AND val = '!takedown' AND neg = %s%s
+		AND (exp IS NULL OR exp > %s)
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg
 			WHERE neg.uri = label.uri AND neg.src = label.src AND neg.val = '!takedown'
 			  AND neg.neg = %s AND neg.cts >= label.cts
-		)`, r.db.Placeholder(1), negFalse, srcClause, negTrue)
+		)`, r.db.Placeholder(1), negFalse, srcClause, r.nowLiteral(), negTrue)
 
 	var count int64
 	err := r.db.QueryRow(ctx, sqlStr, params, &count)
@@ -501,11 +537,12 @@ func (r *LabelsRepository) GetTakedownURIs(ctx context.Context, uris, allowedSrc
 
 	sqlStr := fmt.Sprintf(`SELECT DISTINCT l.uri FROM label l
 		WHERE l.uri IN (%s) AND l.val = '!takedown' AND l.neg = %s%s
+		AND (l.exp IS NULL OR l.exp > %s)
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg
 			WHERE neg.uri = l.uri AND neg.src = l.src AND neg.val = '!takedown'
 			  AND neg.neg = %s AND neg.cts >= l.cts
-		)`, strings.Join(uriPhs, ", "), negFalse, srcClause, negTrue)
+		)`, strings.Join(uriPhs, ", "), negFalse, srcClause, r.nowLiteral(), negTrue)
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, params...)
 	if err != nil {

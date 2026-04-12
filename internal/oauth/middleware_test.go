@@ -28,22 +28,18 @@ type mockJTIStore struct {
 	err  error
 }
 
-func (m *mockJTIStore) Exists(ctx context.Context, jti string) (bool, error) {
+func (m *mockJTIStore) InsertIfNew(ctx context.Context, jti *DPoPJTI) (bool, error) {
 	if m.err != nil {
 		return false, m.err
-	}
-	return m.jtis[jti], nil
-}
-
-func (m *mockJTIStore) Insert(ctx context.Context, jti *DPoPJTI) error {
-	if m.err != nil {
-		return m.err
 	}
 	if m.jtis == nil {
 		m.jtis = make(map[string]bool)
 	}
+	if m.jtis[jti.JTI] {
+		return false, nil
+	}
 	m.jtis[jti.JTI] = true
-	return nil
+	return true, nil
 }
 
 func TestAuthMiddleware_RequireAuth_NoHeader(t *testing.T) {
@@ -486,10 +482,21 @@ func TestAuthMiddleware_OptionalAuth_ValidToken(t *testing.T) {
 }
 
 func TestAuthMiddleware_OptionalAuth_InvalidToken(t *testing.T) {
+	// OptionalAuth passes through on validation failure so that the
+	// downstream handler can apply its own auth scheme (for example,
+	// the admin GraphQL handler's ADMIN_API_KEY bearer token). The
+	// handler is expected to detect missing user context and reject
+	// if its own auth path also fails.
 	middleware := NewAuthMiddleware(&mockTokenStore{}, &mockJTIStore{}, "https://example.com")
 
+	handlerCalled := false
+	var capturedUserID string
 	handler := middleware.OptionalAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("handler should not be called")
+		handlerCalled = true
+		if uid, ok := r.Context().Value(UserIDKey).(string); ok {
+			capturedUserID = uid
+		}
+		w.WriteHeader(http.StatusOK)
 	}))
 
 	req := httptest.NewRequest("GET", "/optional", nil)
@@ -498,8 +505,14 @@ func TestAuthMiddleware_OptionalAuth_InvalidToken(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected status 401, got %d", rec.Code)
+	if !handlerCalled {
+		t.Error("handler should have been called on invalid-token pass-through")
+	}
+	if capturedUserID != "" {
+		t.Errorf("expected no user context on pass-through, got %q", capturedUserID)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected status 200 (pass-through), got %d", rec.Code)
 	}
 }
 

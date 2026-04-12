@@ -10,6 +10,7 @@ import (
 
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/graphql/subscription"
+	"github.com/GainForest/hypergoat/internal/metrics"
 )
 
 // ConsumerConfig configures the Jetstream consumer.
@@ -137,8 +138,12 @@ func (c *Consumer) Start(ctx context.Context) error {
 			backoff = maxBackoff
 		}
 
-		// Reset cursorDone channel for new connection
+		// Reset cursorDone channel for new connection. Must be
+		// done under clientMu so a concurrent Stop() can't race
+		// the pointer swap with the old flusher's select.
+		c.clientMu.Lock()
 		c.cursorDone = make(chan struct{})
+		c.clientMu.Unlock()
 
 		slog.Info("Attempting to reconnect to Jetstream...")
 	}
@@ -210,15 +215,23 @@ func (c *Consumer) Stop() {
 }
 
 // UpdateCollections updates the subscribed collections and reconnects.
-func (c *Consumer) UpdateCollections(collections []string) error {
+// The parent context must be the same graceful-shutdown context used
+// to Start the consumer so that Stop on the parent tears this instance
+// down cleanly — passing context.Background here would silently
+// detach the reconnected consumer from shutdown and leak a goroutine.
+func (c *Consumer) UpdateCollections(parent context.Context, collections []string) error {
 	c.clientMu.Lock()
 	wasRunning := c.running
 	oldClient := c.client
 	c.clientMu.Unlock()
 
 	if !wasRunning {
-		// Just update config, will be used on next Start
+		// Just update config, will be used on next Start. Take
+		// clientMu so startInternal isn't reading c.config
+		// concurrently.
+		c.clientMu.Lock()
 		c.config.Collections = collections
+		c.clientMu.Unlock()
 		slog.Info("Updated Jetstream collections (not running)", "collections", collections)
 		return nil
 	}
@@ -230,18 +243,17 @@ func (c *Consumer) UpdateCollections(collections []string) error {
 		oldClient.Stop()
 	}
 
-	// Update config
-	c.config.Collections = collections
-
-	// Reset cursor done channel for new connection
-	c.cursorDone = make(chan struct{})
-
-	// Create new context
+	// Update config, swap cursorDone, and rotate the cancellable
+	// context under a single lock. c.config and c.cursorDone are
+	// both read from other goroutines (startInternal, Stop,
+	// cursorFlusher), so all mutations must be under clientMu.
 	c.clientMu.Lock()
+	c.config.Collections = collections
+	c.cursorDone = make(chan struct{})
 	if c.ctxCancel != nil {
 		c.ctxCancel()
 	}
-	c.ctx, c.ctxCancel = context.WithCancel(context.Background())
+	c.ctx, c.ctxCancel = context.WithCancel(parent)
 	ctx := c.ctx
 	c.clientMu.Unlock()
 
@@ -287,12 +299,14 @@ func (c *Consumer) processEvents(ctx context.Context) {
 
 		// Process commit events
 		if event.IsCommit() {
+			metrics.RecordJetstreamEvent(event.Commit.Collection, string(event.Commit.Operation))
 			if err := c.handleCommit(ctx, event); err != nil {
 				slog.Warn("Failed to handle commit",
 					"error", err,
 					"did", event.DID,
 					"collection", event.Commit.Collection,
 				)
+				metrics.RecordJetstreamError()
 				c.statsMu.Lock()
 				c.stats.Errors++
 				c.statsMu.Unlock()
@@ -366,6 +380,7 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 			} else {
 				c.stats.RecordsUpdated++
 			}
+			metrics.RecordInserted(commit.Collection)
 		}
 		c.statsMu.Unlock()
 
@@ -426,17 +441,24 @@ func (c *Consumer) cursorFlusher(ctx context.Context) {
 	ticker := time.NewTicker(c.config.CursorFlushInterval)
 	defer ticker.Stop()
 
+	// finalFlush uses a bounded context so shutdown can't hang
+	// indefinitely on a slow DB. 5s is enough for a tiny single-row
+	// write even under moderate pressure.
+	finalFlush := func() {
+		fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		c.flushCursor(fctx)
+	}
+
 	var lastFlushed int64
 
 	for {
 		select {
 		case <-ctx.Done():
-			// Final flush
-			c.flushCursor(context.Background())
+			finalFlush()
 			return
 		case <-c.cursorDone:
-			// Final flush
-			c.flushCursor(context.Background())
+			finalFlush()
 			return
 		case <-ticker.C:
 			c.cursorMu.Lock()

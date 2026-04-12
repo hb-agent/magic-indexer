@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -23,6 +24,65 @@ import (
 	"github.com/GainForest/hypergoat/internal/lexicon"
 	"github.com/GainForest/hypergoat/internal/oauth"
 )
+
+// validateOperatorURL verifies that a URL about to be written into
+// operator settings is an https URL with a real host. A malicious
+// admin could otherwise set relay_url / plc_directory_url to
+// http://attacker.local (leaking tokens) or file:///etc/passwd.
+// http:// is rejected here rather than merely warned — operators
+// wanting a dev-mode override should unset the field.
+func validateOperatorURL(field, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid %s: %w", field, err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("invalid %s: scheme must be https, got %q", field, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("invalid %s: missing host", field)
+	}
+	return nil
+}
+
+// validateJetstreamURL allows ws:// and wss:// in addition to https
+// for the Jetstream firehose URL. Jetstream is a websocket
+// endpoint so http schemes aren't meaningful.
+func validateJetstreamURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid jetstream_url: %w", err)
+	}
+	switch u.Scheme {
+	case "wss", "https":
+		// allowed
+	case "ws", "http":
+		return fmt.Errorf("invalid jetstream_url: scheme must be wss or https, got %q", u.Scheme)
+	default:
+		return fmt.Errorf("invalid jetstream_url: unsupported scheme %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("invalid jetstream_url: missing host")
+	}
+	return nil
+}
+
+// maxAdminPageSize caps any `first` argument on admin list queries.
+// A client asking for millions of rows would otherwise stream them
+// all through the resolver and blow up memory on both sides.
+const maxAdminPageSize = 200
+
+// clampAdminPageSize normalizes a caller-supplied `first` value to the
+// range [1, maxAdminPageSize], defaulting to 20 when zero or negative.
+func clampAdminPageSize(first int) int {
+	if first <= 0 {
+		return 20
+	}
+	if first > maxAdminPageSize {
+		return maxAdminPageSize
+	}
+	return first
+}
 
 // Repositories holds the database repositories needed by the admin API.
 type Repositories struct {
@@ -753,9 +813,7 @@ func (r *Resolver) ViewerLabelPreferences(ctx context.Context, userDID string) (
 
 // Labels returns labels with optional filters and pagination.
 func (r *Resolver) Labels(ctx context.Context, uriFilter, valFilter *string, first int, after *string) (map[string]interface{}, error) {
-	if first == 0 {
-		first = 20
-	}
+	first = clampAdminPageSize(first)
 
 	// Decode cursor to get afterID
 	var afterID *int64
@@ -818,9 +876,7 @@ func (r *Resolver) Labels(ctx context.Context, uriFilter, valFilter *string, fir
 
 // Reports returns reports with optional status filter and pagination.
 func (r *Resolver) Reports(ctx context.Context, statusFilter *string, first int, after *string) (map[string]interface{}, error) {
-	if first == 0 {
-		first = 20
-	}
+	first = clampAdminPageSize(first)
 
 	// Convert status filter
 	var status *repositories.ReportStatus
@@ -904,25 +960,46 @@ func (r *Resolver) UpdateSettings(ctx context.Context, domainAuthority, adminDid
 	}
 
 	if adminDids != nil {
-		// adminDids is passed as comma-separated string
+		// adminDids is passed as comma-separated string. Validate
+		// each entry so an admin can't lock the instance out with
+		// a typo, and so log injection via embedded newlines is
+		// impossible.
+		for _, raw := range strings.Split(*adminDids, ",") {
+			d := strings.TrimSpace(raw)
+			if d == "" {
+				continue
+			}
+			if !oauth.IsValidDID(d) {
+				return nil, fmt.Errorf("invalid admin DID: %q", d)
+			}
+		}
 		if err := r.repos.Config.Set(ctx, "admin_dids", *adminDids); err != nil {
 			return nil, fmt.Errorf("failed to update admin_dids: %w", err)
 		}
 	}
 
 	if relayURL != nil {
+		if err := validateOperatorURL("relay_url", *relayURL); err != nil {
+			return nil, err
+		}
 		if err := r.repos.Config.Set(ctx, "relay_url", *relayURL); err != nil {
 			return nil, fmt.Errorf("failed to update relay_url: %w", err)
 		}
 	}
 
 	if plcDirectoryURL != nil {
+		if err := validateOperatorURL("plc_directory_url", *plcDirectoryURL); err != nil {
+			return nil, err
+		}
 		if err := r.repos.Config.Set(ctx, "plc_directory_url", *plcDirectoryURL); err != nil {
 			return nil, fmt.Errorf("failed to update plc_directory_url: %w", err)
 		}
 	}
 
 	if jetstreamURL != nil {
+		if err := validateJetstreamURL(*jetstreamURL); err != nil {
+			return nil, err
+		}
 		if err := r.repos.Config.Set(ctx, "jetstream_url", *jetstreamURL); err != nil {
 			return nil, fmt.Errorf("failed to update jetstream_url: %w", err)
 		}
@@ -1084,6 +1161,23 @@ func (r *Resolver) NegateLabel(ctx context.Context, uri, val string) (map[string
 func (r *Resolver) CreateLabelDefinition(ctx context.Context, src, val, description, severity string, defaultVisibility *string) (map[string]interface{}, error) {
 	if src == "" {
 		src = r.domainDID
+	}
+
+	// Bound the stringy fields so the admin API can't blow up the DB
+	// with multi-megabyte values. The wire-side labeler ingest path
+	// already caps these via labeler.MaxLabelValLen et al; mirror
+	// those limits here.
+	if val == "" {
+		return nil, fmt.Errorf("val is required")
+	}
+	if len(val) > 128 {
+		return nil, fmt.Errorf("val must be at most 128 bytes")
+	}
+	if len(description) > 1024 {
+		return nil, fmt.Errorf("description must be at most 1024 bytes")
+	}
+	if len(src) > 512 {
+		return nil, fmt.Errorf("src must be at most 512 bytes")
 	}
 
 	// Validate severity

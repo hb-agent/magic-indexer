@@ -25,10 +25,27 @@ var ReservedRecordFields = map[string]bool{
 	"labels": true,
 }
 
+// maxResolveDepth bounds how deep the field-building walker will
+// descend through nested lexicon refs before falling back to
+// graphql.String. Cycles are already handled by the
+// cache-before-thunk pattern in BuildObjectType / BuildRecordType —
+// a ref the builder is already materialising resolves via the
+// cache on the second visit without recursing. This limit is an
+// extra guard against pathological lexicons (e.g., an admin
+// uploading a chain of 200 refs through uploadLexicons) that
+// would otherwise blow the stack during schema construction.
+// Real lexicons we ship nest no more than a handful of levels.
+const maxResolveDepth = 64
+
 // ObjectBuilder builds GraphQL object types from lexicon definitions.
 type ObjectBuilder struct {
 	mapper   *Mapper
 	registry *lexicon.Registry
+	// depth tracks the current resolveRefType recursion depth.
+	// It is not guarded by a mutex because the schema builder runs
+	// single-threaded during startup; if that ever changes, this
+	// needs to move into a per-call parameter.
+	depth int
 }
 
 // NewObjectBuilder creates a new object builder.
@@ -131,8 +148,8 @@ func (b *ObjectBuilder) buildRecordFields(lexiconID string, def *lexicon.RecordD
 			Description: "Record key (last segment of the AT-URI)",
 		},
 		"labels": &graphql.Field{
-			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
-			Description: "Active label values on this record from any ingested labeler.",
+			Type:        graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(graphql.String))),
+			Description: "Active label values on this record from any ingested labeler. Always a list (possibly empty), never null.",
 		},
 	}
 
@@ -206,6 +223,18 @@ func (b *ObjectBuilder) resolveRefType(contextLexiconID, ref string) graphql.Out
 	if t, ok := b.mapper.GetObjectType(fullRef); ok {
 		return t
 	}
+
+	// Bound recursion depth as a defence against hostile uploaded
+	// lexicons. Cycles are handled by the cache above (a second
+	// visit to the same ref hits the cache); this limit only
+	// trips on genuinely unbounded depth.
+	if b.depth >= maxResolveDepth {
+		slog.Warn("Lexicon ref resolution exceeded depth limit; falling back to String",
+			"ref", ref, "fullRef", fullRef, "depth", b.depth, "limit", maxResolveDepth)
+		return graphql.String
+	}
+	b.depth++
+	defer func() { b.depth-- }()
 
 	// Try to resolve from registry
 	resolved, ok := b.registry.ResolveRef(ref, contextLexiconID)

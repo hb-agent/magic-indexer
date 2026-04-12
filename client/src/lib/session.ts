@@ -13,6 +13,13 @@ export interface Session {
   returnTo?: string;
   // OAuth session data (serialized) - persisted across serverless invocations
   oauthSession?: string;
+  // In-flight OAuth authorization states (PKCE verifier, nonce, etc.),
+  // keyed by the `state` parameter the library generates in authorize().
+  // Persisted to the cookie because Vercel Functions are serverless —
+  // module-scope in-memory storage does NOT survive across the
+  // authorize → callback roundtrip when the two requests land on
+  // different function instances. Each entry is a JSON-serialized blob.
+  oauthStates?: Record<string, string>;
 }
 
 const isProduction = process.env.NODE_ENV === "production";

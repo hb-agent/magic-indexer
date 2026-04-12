@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver
 
@@ -31,9 +32,14 @@ func NewExecutor(databaseURL string) (*Executor, error) {
 		return nil, database.ConnectionError("failed to open PostgreSQL database", err)
 	}
 
-	// Configure connection pool
+	// Configure connection pool. The lifetime bound forces periodic
+	// recycling so we don't hold stale connections past a Postgres
+	// side restart / failover, and the idle bound keeps the pool
+	// from hoarding connections between quiet periods.
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 
 	// Test the connection
 	if err := db.Ping(); err != nil {

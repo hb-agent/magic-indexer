@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GainForest/hypergoat/internal/database/repositories"
+	"github.com/GainForest/hypergoat/internal/metrics"
 	"github.com/GainForest/hypergoat/internal/oauth"
 )
 
@@ -412,6 +413,10 @@ func (c *Consumer) runBackfill(ctx context.Context) error {
 			s.LabelsPersisted += int64(len(labels) - rejected)
 			s.LabelsRejected += int64(rejected)
 		})
+		metrics.RecordLabelReceived(c.config.LabelerDID)
+		if rejected > 0 {
+			metrics.RecordLabelRejected(c.config.LabelerDID, "upsert")
+		}
 
 		if total-lastLogged >= BackfillProgressInterval {
 			slog.Info("Labeler backfill progress",
@@ -491,12 +496,26 @@ func (c *Consumer) handleLabelMessage(ctx context.Context, msg *LabelMessage) {
 		s.EventsReceived++
 		s.LastSeq = msg.Seq
 	})
+	metrics.RecordLabelReceived(c.config.LabelerDID)
+	if rejected > 0 {
+		metrics.RecordLabelRejected(c.config.LabelerDID, "upsert")
+	}
 
 	c.cursorMu.Lock()
+	prev := c.cursor
 	if msg.Seq > c.cursor {
 		c.cursor = msg.Seq
 	}
 	c.cursorMu.Unlock()
+
+	// Labeler seqs should be monotonic and contiguous. A gap means
+	// the labeler dropped frames on its end (it should also send
+	// #info:OutdatedCursor, but we don't want to rely on that). Log
+	// so operators can correlate with upstream outages.
+	if prev > 0 && msg.Seq > prev+1 {
+		slog.Warn("Labeler cursor gap detected",
+			"prev", prev, "seq", msg.Seq, "gap", msg.Seq-prev-1)
+	}
 }
 
 // upsertLabels inserts every label in a batch, ensuring the label_definition
@@ -645,11 +664,16 @@ func parseLabelTime(s string) *time.Time {
 // semantics when two labelers happen to emit the same val — each
 // gets its own row keyed by (src, val).
 //
+// The underlying Insert uses ON CONFLICT DO NOTHING, so a concurrent
+// goroutine racing on the same (src, val) is safe and cheap — the
+// loser returns without error and the existing row is kept. No
+// pre-check via Exists is needed, which also closes a TOCTOU window
+// between the old Exists-then-Insert path.
+//
 // Results are memoised per-process via a FIFO cache bounded at
 // MaxKnownVals: when full, the oldest entry is evicted. This keeps
 // the fast path active even when a labeler emits more than
-// MaxKnownVals distinct values, rather than the old "overflow =
-// permanent slow path" behaviour.
+// MaxKnownVals distinct values.
 func (c *Consumer) ensureDefinition(ctx context.Context, src, val string) error {
 	cacheKey := src + "\x00" + val
 
@@ -660,17 +684,8 @@ func (c *Consumer) ensureDefinition(ctx context.Context, src, val string) error 
 	}
 	c.knownValsMu.Unlock()
 
-	exists, err := c.labelDef.Exists(ctx, src, val)
-	if err != nil {
+	if err := c.labelDef.Insert(ctx, src, val, "", repositories.SeverityInform, repositories.VisibilityWarn); err != nil {
 		return err
-	}
-	if !exists {
-		if err := c.labelDef.Insert(ctx, src, val, "", repositories.SeverityInform, repositories.VisibilityWarn); err != nil {
-			// Another racing insert could have created it; tolerate that.
-			if existsAfter, checkErr := c.labelDef.Exists(ctx, src, val); checkErr != nil || !existsAfter {
-				return err
-			}
-		}
 	}
 
 	c.knownValsMu.Lock()

@@ -6,10 +6,16 @@ on:
   pull_request:
     branches: [main]
 
+# Third-party actions below are pinned to full commit SHAs rather
+# than floating tags. If you bump a version, update the # comment
+# next to the SHA and verify the new SHA against the upstream repo's
+# releases page — a compromised tag cannot silently swap a pinned
+# SHA without a visible diff.
+
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
     services:
       postgres:
         image: postgres:16-alpine
@@ -24,35 +30,36 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-    
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
         with:
           go-version-file: 'go.mod'
           cache: true
-      
+
       - name: Install dependencies
         run: go mod download
-      
+
       - name: Build
-        run: go build -v ./...
-      
+        run: go build -trimpath -buildvcs=false -v ./...
+
       - name: Test with SQLite
         run: go test -v -race -coverprofile=coverage-sqlite.out ./...
-        env:
-          DATABASE_URL: "sqlite::memory:"
-      
+
+      # The repository's testutil.SetupTestDB reads TEST_DATABASE_URL
+      # (not DATABASE_URL). Without this env var the Postgres branch
+      # of the dual-dialect tests is never actually exercised.
       - name: Test with PostgreSQL
         run: go test -v -race -coverprofile=coverage-postgres.out ./...
         env:
-          DATABASE_URL: postgres://hypergoat:hypergoat@localhost:5432/hypergoat_test?sslmode=disable
-      
+          TEST_DATABASE_URL: postgres://hypergoat:hypergoat@localhost:5432/hypergoat_test?sslmode=disable
+
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238  # v4
         with:
           files: coverage-sqlite.out,coverage-postgres.out
           fail_ci_if_error: false
@@ -61,30 +68,59 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
         with:
           go-version-file: 'go.mod'
           cache: true
-      
+
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa  # v7
         with:
           version: v2.8.0
+
+  # Builds the hypergoat binary twice with identical flags and
+  # diffs the output. Any drift (build path leakage, VCS metadata,
+  # non-deterministic codegen) fails the job.
+  reproducible-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build twice
+        run: |
+          CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -o /tmp/hypergoat-1 ./cmd/hypergoat
+          CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -o /tmp/hypergoat-2 ./cmd/hypergoat
+
+      - name: Diff binaries
+        run: |
+          if ! cmp -s /tmp/hypergoat-1 /tmp/hypergoat-2; then
+            echo "::error::Repeated go build with identical flags produced different binaries"
+            sha256sum /tmp/hypergoat-1 /tmp/hypergoat-2
+            exit 1
+          fi
+          echo "Binaries match: $(sha256sum /tmp/hypergoat-1 | cut -d' ' -f1)"
 
   build-docker:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
       - name: Build Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
         with:
           context: .
           push: false

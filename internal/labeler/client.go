@@ -156,6 +156,14 @@ func (c *Client) Run(ctx context.Context) error {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 				return nil
 			}
+			// Surface non-normal close codes so operators can
+			// distinguish a transient server bounce from a policy
+			// violation, protocol error, or oversized frame.
+			var closeErr *websocket.CloseError
+			if errors.As(err, &closeErr) {
+				slog.Warn("Labeler websocket closed with non-normal code",
+					"code", closeErr.Code, "text", closeErr.Text)
+			}
 			return fmt.Errorf("read: %w", err)
 		}
 
@@ -173,6 +181,13 @@ func (c *Client) Run(ctx context.Context) error {
 
 		switch {
 		case hdr.Op == 1 && hdr.T == "#labels":
+			// A #labels frame with no body would decode into a
+			// zero-value struct (Seq=0, Labels=nil), which could
+			// quietly rewind our cursor. Reject it explicitly.
+			if len(body) == 0 {
+				slog.Warn("Labeler sent #labels frame with empty body; skipping")
+				continue
+			}
 			lb, err := decodeLabelsBody(body)
 			if err != nil {
 				slog.Warn("Failed to decode labels body", "error", err)
@@ -184,18 +199,22 @@ func (c *Client) Run(ctx context.Context) error {
 				return ctx.Err()
 			}
 		case hdr.Op == 1 && hdr.T == "#info":
-			if ib, err := decodeInfoBody(body); err == nil {
-				slog.Info("Labeler info frame",
-					"name", ib.Name, "message", ib.Message)
-				// OutdatedCursor signals that our stored cursor is older
-				// than anything the labeler can still serve. Treat it as
-				// a hard signal to reset: return a sentinel error so the
-				// consumer can clear the cursor and re-run backfill.
-				if ib.Name == "OutdatedCursor" {
-					return errOutdatedCursor
-				}
-			} else {
-				slog.Info("Labeler info frame (undecoded)")
+			ib, decodeErr := decodeInfoBody(body)
+			if decodeErr != nil {
+				// Surface this at Warn: a corrupted #info frame can
+				// mask an OutdatedCursor signal we depend on to
+				// re-backfill. Operators need to see it.
+				slog.Warn("Labeler info frame (undecoded)", "error", decodeErr)
+				continue
+			}
+			slog.Info("Labeler info frame",
+				"name", ib.Name, "message", ib.Message)
+			// OutdatedCursor signals that our stored cursor is older
+			// than anything the labeler can still serve. Treat it as
+			// a hard signal to reset: return a sentinel error so the
+			// consumer can clear the cursor and re-run backfill.
+			if ib.Name == "OutdatedCursor" {
+				return errOutdatedCursor
 			}
 		case hdr.Op == -1:
 			if eb, err := decodeErrorBody(body); err == nil {

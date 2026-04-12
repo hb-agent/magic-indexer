@@ -3,6 +3,7 @@ package admin
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -10,8 +11,31 @@ import (
 	"github.com/graphql-go/graphql"
 
 	"github.com/GainForest/hypergoat/internal/database/repositories"
+	"github.com/GainForest/hypergoat/internal/graphql/depth"
 	"github.com/GainForest/hypergoat/internal/oauth"
 )
+
+// maxAdminQueryDepth is the nested selection depth cap for the
+// admin GraphQL surface. Admin queries tend to be slightly richer
+// than public ones so we allow a bit more headroom than the 15
+// applied to the public endpoint.
+const maxAdminQueryDepth = 20
+
+// variableKeys returns a sorted list of the top-level keys of a
+// GraphQL variables map, without any values. Used for logging so
+// that hostile or sensitive variable values never reach the log
+// stream while still letting operators see which parameters a
+// mutation was invoked with.
+func variableKeys(vars map[string]interface{}) []string {
+	if len(vars) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	return keys
+}
 
 // Handler handles admin GraphQL requests with authentication.
 type Handler struct {
@@ -53,40 +77,81 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Variables     map[string]interface{} `json:"variables"`
 	}
 
-	if r.Method == "GET" {
-		params.Query = r.URL.Query().Get("query")
-		params.OperationName = r.URL.Query().Get("operationName")
-	} else {
-		if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
+	// Admin queries must be POST: GET would leak the query string
+	// (including mutation names, variables, and tokens if passed
+	// that way) into access logs and proxy caches.
+	if r.Method != http.MethodPost {
+		http.Error(w, "admin graphql requires POST", http.StatusMethodNotAllowed)
+		return
+	}
+	// Cap body size to prevent memory exhaustion via huge JSON.
+	// 2 MiB gives admin tooling a bit more room than the public
+	// endpoint.
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
 	}
 
-	// Log mutation requests
+	// Pre-execution depth guard. See depth.Check docs.
+	if err := depth.Check(params.Query, maxAdminQueryDepth); err != nil {
+		if errors.Is(err, depth.ErrTooDeep) {
+			http.Error(w, "query rejected: nested too deeply", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "query rejected", http.StatusBadRequest)
+		return
+	}
+
+	// Log mutation requests — but only the operation name and the
+	// variable *keys*, not the values. Values may contain tokens,
+	// PII, or attacker-controlled strings that would forge log
+	// lines if dumped verbatim.
 	if strings.Contains(params.Query, "mutation") {
-		slog.Info("[admin] Mutation request", "operation", params.OperationName, "variables", params.Variables)
+		slog.Info("[admin] Mutation request",
+			"operation", params.OperationName,
+			"variable_keys", variableKeys(params.Variables))
 	}
 
 	// Get authentication info from context (set by middleware) or X-User-DID header
 	ctx := r.Context()
 	userDID := oauth.UserIDFromContext(ctx)
+	apiKeyAuth := false
 
 	// Trust X-User-DID header only when the request carries a valid admin API key.
 	// This allows frontends and CLI tools to authenticate as a specific user
 	// without requiring the full OAuth flow.
 	if userDID == "" && h.adminAPIKey != "" {
 		if h.validAPIKey(r) {
-			userDID = r.Header.Get("X-User-DID")
-			if userDID != "" {
+			apiKeyAuth = true
+			candidate := r.Header.Get("X-User-DID")
+			// Validate the DID format before trusting it —
+			// otherwise a caller with the API key could pass an
+			// arbitrary string and forge audit log entries.
+			if candidate != "" && oauth.IsValidDID(candidate) {
+				userDID = candidate
 				slog.Info("[admin] Auth via X-User-DID + API key",
 					"did", userDID,
+					"remote_addr", r.RemoteAddr)
+			} else if candidate != "" {
+				slog.Warn("[admin] X-User-DID header rejected: not a valid DID",
 					"remote_addr", r.RemoteAddr)
 			}
 		} else if r.Header.Get("X-User-DID") != "" {
 			slog.Warn("[admin] X-User-DID header rejected: missing or invalid API key",
 				"remote_addr", r.RemoteAddr)
 		}
+	}
+
+	// Reject completely unauthenticated requests. The admin endpoint
+	// was previously mounted behind OptionalAuth to allow API-key auth
+	// without an Authorization header, but that also exposed the
+	// schema (including admin-only fields) to unauthenticated
+	// introspection. Require *some* proof of auth: either a validated
+	// OAuth user, or a valid API key.
+	if userDID == "" && !apiKeyAuth {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
 	}
 	handle := "" // Would need to resolve from DID
 

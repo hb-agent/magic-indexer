@@ -13,7 +13,10 @@ import (
 	"github.com/GainForest/hypergoat/internal/database/migrations"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/database/sqlite"
+	hgraphql "github.com/GainForest/hypergoat/internal/graphql"
 	"github.com/GainForest/hypergoat/internal/graphql/admin"
+	"github.com/GainForest/hypergoat/internal/graphql/resolver"
+	"github.com/GainForest/hypergoat/internal/lexicon"
 
 	"github.com/graphql-go/graphql"
 )
@@ -563,5 +566,87 @@ func TestAdminGraphQL_OAuthClients(t *testing.T) {
 	clients = data["oauthClients"].([]interface{})
 	if len(clients) != 0 {
 		t.Errorf("Expected 0 clients after delete, got %d", len(clients))
+	}
+}
+
+// ========== Public GraphQL + Label Filter End-to-End ==========
+
+// TestPublicGraphQL_LabelFilter stitches the whole ingest-to-query
+// story together: seeds records + labels via the real repositories,
+// builds the public GraphQL schema via the real lexicon registry +
+// schema builder, executes a records(filter: {labels: [...]}) query
+// through graphql.Do, and asserts that the filter subquery +
+// batch-label-load path both return what the end-to-end review
+// expected. This is the concrete regression test for issue #15.
+func TestPublicGraphQL_LabelFilter(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	// Seed three records in a simple test collection.
+	recs := []*repositories.Record{
+		{URI: "at://did:plc:alice/app.bsky.feed.post/1", CID: "cidA1", DID: "did:plc:alice", Collection: "app.bsky.feed.post", JSON: `{"text":"clean"}`, RKey: "1"},
+		{URI: "at://did:plc:alice/app.bsky.feed.post/2", CID: "cidA2", DID: "did:plc:alice", Collection: "app.bsky.feed.post", JSON: `{"text":"hq"}`, RKey: "2"},
+		{URI: "at://did:plc:bob/app.bsky.feed.post/1", CID: "cidB1", DID: "did:plc:bob", Collection: "app.bsky.feed.post", JSON: `{"text":"draft"}`, RKey: "1"},
+	}
+	if err := db.Records.BatchInsert(ctx, recs); err != nil {
+		t.Fatalf("BatchInsert: %v", err)
+	}
+
+	// Seed label definitions + labels. The labeler is a test DID.
+	labeler := "did:plc:test-labeler"
+	labels := repositories.NewLabelsRepository(db.Executor)
+	defs := repositories.NewLabelDefinitionsRepository(db.Executor)
+	if err := defs.Insert(ctx, labeler, "high-quality", "", repositories.SeverityInform, repositories.VisibilityWarn); err != nil {
+		t.Fatalf("label def insert: %v", err)
+	}
+	if err := defs.Insert(ctx, labeler, "draft", "", repositories.SeverityInform, repositories.VisibilityWarn); err != nil {
+		t.Fatalf("label def insert: %v", err)
+	}
+	if _, err := labels.Insert(ctx, labeler, "at://did:plc:alice/app.bsky.feed.post/2", nil, "high-quality", nil, nil); err != nil {
+		t.Fatalf("label insert: %v", err)
+	}
+	if _, err := labels.Insert(ctx, labeler, "at://did:plc:bob/app.bsky.feed.post/1", nil, "draft", nil, nil); err != nil {
+		t.Fatalf("label insert: %v", err)
+	}
+
+	// Build the public GraphQL schema against an empty lexicon
+	// registry (generic record path), then query it.
+	registry := lexicon.NewRegistry()
+	repos := &resolver.Repositories{
+		Records:  db.Records,
+		Actors:   db.Actors,
+		Lexicons: db.Lexicons,
+		Labels:   labels,
+	}
+	handler, err := hgraphql.NewHandler(registry, repos)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	schema := handler.Schema()
+	queryCtx := resolver.WithRepositories(ctx, repos)
+
+	// Include filter: only records with high-quality from the test labeler.
+	query := `{
+		records(collection: "app.bsky.feed.post", labels: ["high-quality"], labelerDids: ["did:plc:test-labeler"]) {
+			edges { node { uri labels } }
+		}
+	}`
+	result := executeQuery(schema, query, queryCtx)
+	if len(result.Errors) > 0 {
+		t.Fatalf("graphql errors: %v", result.Errors)
+	}
+	data, _ := result.Data.(map[string]interface{})
+	rec, _ := data["records"].(map[string]interface{})
+	edges, _ := rec["edges"].([]interface{})
+	if len(edges) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(edges))
+	}
+	node := edges[0].(map[string]interface{})["node"].(map[string]interface{})
+	if got := node["uri"].(string); got != "at://did:plc:alice/app.bsky.feed.post/2" {
+		t.Errorf("unexpected uri: %s", got)
+	}
+	gotLabels, _ := node["labels"].([]interface{})
+	if len(gotLabels) != 1 || gotLabels[0].(string) != "high-quality" {
+		t.Errorf("unexpected labels: %v", gotLabels)
 	}
 }

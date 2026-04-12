@@ -3,6 +3,8 @@ package admin
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/graphql-go/graphql"
@@ -289,6 +291,60 @@ func TestValidAPIKey(t *testing.T) {
 				t.Errorf("validAPIKey() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestHandler_RejectsGET verifies that Round 3's POST-only
+// enforcement on /admin/graphql is in place: an unauthenticated
+// GET must not execute a query and must not leak schema.
+func TestHandler_RejectsGET(t *testing.T) {
+	h := &Handler{adminAPIKey: ""} // no API key, no middleware
+	req := httptest.NewRequest(http.MethodGet, "/admin/graphql?query={__schema{types{name}}}", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 MethodNotAllowed on GET, got %d", rec.Code)
+	}
+}
+
+// TestHandler_RejectsUnauthenticatedPOST verifies that a POST
+// without any authentication (no OAuth context, no API key) is
+// rejected with 401, matching the Round 2 fix that closed the
+// OptionalAuth introspection loophole.
+func TestHandler_RejectsUnauthenticatedPOST(t *testing.T) {
+	h := &Handler{adminAPIKey: ""}
+	body := `{"query":"{__schema{types{name}}}"}`
+	req := httptest.NewRequest(http.MethodPost, "/admin/graphql", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized on unauthenticated POST, got %d", rec.Code)
+	}
+}
+
+// TestHandler_VariableKeysHelper is a quick check that variableKeys
+// returns top-level variable names and never the values — the Round
+// 3 fix that closed a log-injection vector via admin mutation
+// logging.
+func TestHandler_VariableKeysHelper(t *testing.T) {
+	got := variableKeys(map[string]interface{}{
+		"uri":   "at://did:plc:abc/app.bsky.feed.post/x",
+		"token": "Bearer sensitive",
+	})
+	if len(got) != 2 {
+		t.Fatalf("variableKeys returned %d keys, want 2", len(got))
+	}
+	for _, k := range got {
+		if k != "uri" && k != "token" {
+			t.Errorf("unexpected key %q in variableKeys result", k)
+		}
+	}
+	// variableKeys must never return the values themselves.
+	for _, k := range got {
+		if strings.Contains(k, "Bearer") || strings.Contains(k, "did:plc:") {
+			t.Errorf("variableKeys returned a value-looking string %q", k)
+		}
 	}
 }
 

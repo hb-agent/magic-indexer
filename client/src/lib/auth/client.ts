@@ -25,16 +25,63 @@ const sharedStore: Map<string, unknown> = (
   global as Record<string, unknown>
 )[globalStoreKey] as Map<string, unknown>;
 
-// State store - in-memory only, used during short-lived OAuth flow
+// State store — persisted to the iron-session cookie so it survives
+// the authorize→callback roundtrip on serverless platforms like Vercel
+// Functions, where in-memory storage on `global` does NOT survive
+// between invocations (different function instances may handle the
+// two sides of the flow).
+//
+// State entries are small (PKCE verifier, nonce, etc.) and short-lived
+// (deleted as soon as callback() succeeds), so cookie size is not a
+// concern in practice. We keep a process-local Map as a warm-path
+// cache so a single request doesn't round-trip through the cookie
+// twice for the same key.
 const stateStore = {
   async get(key: string) {
-    return sharedStore.get(`state:${key}`);
+    const memKey = `state:${key}`;
+    const memValue = sharedStore.get(memKey);
+    if (memValue) {
+      return memValue;
+    }
+    try {
+      const session = await getRawSession();
+      const raw = session.oauthStates?.[key];
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        sharedStore.set(memKey, parsed);
+        return parsed;
+      }
+    } catch (err) {
+      console.warn("Failed to restore OAuth state from cookie:", err);
+    }
+    return undefined;
   },
   async set(key: string, value: unknown) {
     sharedStore.set(`state:${key}`, value);
+    try {
+      const session = await getRawSession();
+      session.oauthStates = {
+        ...(session.oauthStates || {}),
+        [key]: JSON.stringify(value),
+      };
+      await session.save();
+    } catch (err) {
+      console.warn("Failed to persist OAuth state to cookie:", err);
+    }
   },
   async del(key: string) {
     sharedStore.delete(`state:${key}`);
+    try {
+      const session = await getRawSession();
+      if (session.oauthStates && key in session.oauthStates) {
+        const copy = { ...session.oauthStates };
+        delete copy[key];
+        session.oauthStates = Object.keys(copy).length > 0 ? copy : undefined;
+        await session.save();
+      }
+    } catch (err) {
+      console.warn("Failed to clear OAuth state from cookie:", err);
+    }
   },
 };
 
