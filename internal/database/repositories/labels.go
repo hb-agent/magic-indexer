@@ -231,19 +231,21 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 	}
 	ctsStr := effectiveCts.UTC().Format(time.RFC3339Nano)
 
+	_, negTrue := r.negLiterals()
+
 	var sqlStr string
 	switch r.db.Dialect() {
 	case database.PostgreSQL:
 		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
-			VALUES (%s, %s, %s, 1, %s)
+			VALUES (%s, %s, %s, %s, %s)
 			ON CONFLICT (src, uri, val) WHERE neg = true DO NOTHING
 			RETURNING id, src, uri, cid, val, neg, cts, exp`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), negTrue, r.db.Placeholder(4))
 	default:
 		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
-			VALUES (%s, %s, %s, 1, %s)
+			VALUES (%s, %s, %s, %s, %s)
 			ON CONFLICT DO NOTHING`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
+			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), negTrue, r.db.Placeholder(4))
 	}
 
 	params := []database.Value{

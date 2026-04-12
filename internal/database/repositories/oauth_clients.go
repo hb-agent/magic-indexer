@@ -58,11 +58,6 @@ func (r *OAuthClientsRepository) Insert(ctx context.Context, client *oauth.Clien
 			r.db.Placeholder(17))
 	}
 
-	requireExact := 0
-	if client.RequireRedirectExact {
-		requireExact = 1
-	}
-
 	params := []database.Value{
 		database.Text(client.ClientID),
 		database.NullableText(client.ClientSecret),
@@ -78,7 +73,7 @@ func (r *OAuthClientsRepository) Insert(ctx context.Context, client *oauth.Clien
 		database.Text(client.Metadata),
 		database.Int(client.AccessTokenExpiration),
 		database.Int(client.RefreshTokenExpiration),
-		database.Int(int64(requireExact)),
+		database.Bool(client.RequireRedirectExact),
 		database.NullableText(client.RegistrationAccessToken),
 		database.NullableText(client.JWKS),
 	}
@@ -96,7 +91,7 @@ func (r *OAuthClientsRepository) Get(ctx context.Context, clientID string) (*oau
 			grant_types, response_types, scope, token_endpoint_auth_method,
 			client_type, created_at, updated_at, metadata::text,
 			access_token_expiration, refresh_token_expiration,
-			require_redirect_exact::int, registration_access_token, jwks::text
+			require_redirect_exact, registration_access_token, jwks::text
 		FROM oauth_client WHERE client_id = %s`, r.db.Placeholder(1))
 	default:
 		sqlStr = fmt.Sprintf(`SELECT client_id, client_secret, client_name, redirect_uris,
@@ -116,7 +111,7 @@ func (r *OAuthClientsRepository) Get(ctx context.Context, clientID string) (*oau
 		scope             sql.NullString
 		authMethod        string
 		clientType        string
-		requireExact      int
+		requireExact      bool
 		regToken          sql.NullString
 		jwks              sql.NullString
 	)
@@ -161,7 +156,7 @@ func (r *OAuthClientsRepository) Get(ctx context.Context, clientID string) (*oau
 
 	client.TokenEndpointAuthMethod = oauth.AuthMethod(authMethod)
 	client.ClientType = oauth.ClientType(clientType)
-	client.RequireRedirectExact = requireExact == 1
+	client.RequireRedirectExact = requireExact
 
 	return &client, nil
 }
@@ -175,7 +170,7 @@ func (r *OAuthClientsRepository) GetAll(ctx context.Context) ([]*oauth.Client, e
 			grant_types, response_types, scope, token_endpoint_auth_method,
 			client_type, created_at, updated_at, metadata::text,
 			access_token_expiration, refresh_token_expiration,
-			require_redirect_exact::int, registration_access_token, jwks::text
+			require_redirect_exact, registration_access_token, jwks::text
 		FROM oauth_client WHERE client_id != 'admin' ORDER BY created_at DESC`
 	default:
 		sqlStr = `SELECT client_id, client_secret, client_name, redirect_uris,
@@ -240,11 +235,6 @@ func (r *OAuthClientsRepository) Update(ctx context.Context, client *oauth.Clien
 			r.db.Placeholder(13), r.db.Placeholder(14))
 	}
 
-	requireExact := 0
-	if client.RequireRedirectExact {
-		requireExact = 1
-	}
-
 	params := []database.Value{
 		database.NullableText(client.ClientSecret),
 		database.Text(client.ClientName),
@@ -257,7 +247,7 @@ func (r *OAuthClientsRepository) Update(ctx context.Context, client *oauth.Clien
 		database.Text(client.Metadata),
 		database.Int(client.AccessTokenExpiration),
 		database.Int(client.RefreshTokenExpiration),
-		database.Int(int64(requireExact)),
+		database.Bool(client.RequireRedirectExact),
 		database.NullableText(client.JWKS),
 		database.Text(client.ClientID),
 	}
@@ -322,7 +312,7 @@ func scanOAuthClient(rows *sql.Rows) (*oauth.Client, error) {
 		scope             sql.NullString
 		authMethod        string
 		clientType        string
-		requireExact      int
+		requireExact      bool
 		regToken          sql.NullString
 		jwks              sql.NullString
 	)
@@ -362,7 +352,7 @@ func scanOAuthClient(rows *sql.Rows) (*oauth.Client, error) {
 
 	client.TokenEndpointAuthMethod = oauth.AuthMethod(authMethod)
 	client.ClientType = oauth.ClientType(clientType)
-	client.RequireRedirectExact = requireExact == 1
+	client.RequireRedirectExact = requireExact
 
 	return &client, nil
 }
