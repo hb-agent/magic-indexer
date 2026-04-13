@@ -43,20 +43,21 @@ type rawObjectDef struct {
 
 // rawProperty is used to parse property definitions.
 type rawProperty struct {
-	Type        string          `json:"type"`
-	Format      string          `json:"format,omitempty"`
-	Ref         string          `json:"ref,omitempty"`
-	Refs        []string        `json:"refs,omitempty"`
-	Items       json.RawMessage `json:"items,omitempty"`
-	Description string          `json:"description,omitempty"`
-	Default     any             `json:"default,omitempty"`
-	Minimum     *float64        `json:"minimum,omitempty"`
-	Maximum     *float64        `json:"maximum,omitempty"`
-	MinLength   *int            `json:"minLength,omitempty"`
-	MaxLength   *int            `json:"maxLength,omitempty"`
-	Enum        []string        `json:"enum,omitempty"`
-	Const       string          `json:"const,omitempty"`
-	KnownValues []string        `json:"knownValues,omitempty"`
+	Type         string          `json:"type"`
+	Format       string          `json:"format,omitempty"`
+	Ref          string          `json:"ref,omitempty"`
+	Refs         []string        `json:"refs,omitempty"`
+	Items        json.RawMessage `json:"items,omitempty"`
+	Description  string          `json:"description,omitempty"`
+	Default      any             `json:"default,omitempty"`
+	Minimum      *float64        `json:"minimum,omitempty"`
+	Maximum      *float64        `json:"maximum,omitempty"`
+	MinLength    *int            `json:"minLength,omitempty"`
+	MaxLength    *int            `json:"maxLength,omitempty"`
+	MaxGraphemes *int            `json:"maxGraphemes,omitempty"`
+	Enum         []string        `json:"enum,omitempty"`
+	Const        string          `json:"const,omitempty"`
+	KnownValues  []string        `json:"knownValues,omitempty"`
 }
 
 // rawArrayItems is used to parse array item definitions.
@@ -263,19 +264,20 @@ func parseProperty(data json.RawMessage) (*Property, error) {
 	}
 
 	prop := &Property{
-		Type:        raw.Type,
-		Format:      raw.Format,
-		Ref:         raw.Ref,
-		Refs:        raw.Refs,
-		Description: raw.Description,
-		Default:     raw.Default,
-		Minimum:     raw.Minimum,
-		Maximum:     raw.Maximum,
-		MinLength:   raw.MinLength,
-		MaxLength:   raw.MaxLength,
-		Enum:        raw.Enum,
-		Const:       raw.Const,
-		KnownValues: raw.KnownValues,
+		Type:         raw.Type,
+		Format:       raw.Format,
+		Ref:          raw.Ref,
+		Refs:         raw.Refs,
+		Description:  raw.Description,
+		Default:      raw.Default,
+		Minimum:      raw.Minimum,
+		Maximum:      raw.Maximum,
+		MinLength:    raw.MinLength,
+		MaxLength:    raw.MaxLength,
+		MaxGraphemes: raw.MaxGraphemes,
+		Enum:         raw.Enum,
+		Const:        raw.Const,
+		KnownValues:  raw.KnownValues,
 	}
 
 	// Parse items if present (for arrays)
