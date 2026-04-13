@@ -12,6 +12,8 @@ import (
 	"github.com/GainForest/hypergoat/internal/atproto"
 	"github.com/GainForest/hypergoat/internal/config"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
+	"github.com/GainForest/hypergoat/internal/lexicon"
+	"github.com/GainForest/hypergoat/internal/metrics"
 	"github.com/GainForest/hypergoat/internal/oauth"
 )
 
@@ -108,6 +110,8 @@ type Backfiller struct {
 	recordsRepo  *repositories.RecordsRepository
 	actorsRepo   *repositories.ActorsRepository
 	activityRepo *repositories.JetstreamActivityRepository
+	validator    *lexicon.Validator
+	valMode      string // "disabled", "warn", "enforce"
 
 	// httpSem is a global semaphore limiting concurrent HTTP requests.
 	// This prevents overwhelming the network and running out of file descriptors.
@@ -121,11 +125,14 @@ type Backfiller struct {
 }
 
 // NewBackfiller creates a new backfiller.
+// validator and validationMode are optional — pass nil/"disabled" to skip validation.
 func NewBackfiller(
 	cfg Config,
 	recordsRepo *repositories.RecordsRepository,
 	actorsRepo *repositories.ActorsRepository,
 	activityRepo *repositories.JetstreamActivityRepository,
+	validator *lexicon.Validator,
+	validationMode string,
 ) *Backfiller {
 	// Create DID resolver with custom PLC URL
 	didResolver := oauth.NewDIDResolver(
@@ -147,6 +154,8 @@ func NewBackfiller(
 		recordsRepo:      recordsRepo,
 		actorsRepo:       actorsRepo,
 		activityRepo:     activityRepo,
+		validator:        validator,
+		valMode:          validationMode,
 		httpSem:          make(chan struct{}, cfg.MaxHTTPConcurrent),
 		didCache:         didCache,
 		stopCacheCleanup: stopCleanup,
@@ -511,6 +520,25 @@ func (b *Backfiller) processRepo(ctx context.Context, pdsURL string, data *Atpro
 	atomic.AddInt64(&b.stats.RecordsSkipped, int64(skipped))
 	dedupMs := time.Since(dedupStart).Milliseconds()
 
+	// Phase 3.5: Validate records against lexicon schemas
+	if b.validator != nil && b.valMode != "disabled" {
+		var validRecords []*repositories.Record
+		for _, rec := range filteredRecords {
+			result := b.validator.Validate(rec.Collection, []byte(rec.JSON))
+			if !result.Valid {
+				slog.Debug("[backfill] Record failed validation",
+					"uri", rec.URI, "violations", fmt.Sprintf("%v", result.Violations))
+				metrics.RecordValidationFailed(rec.Collection)
+				if b.valMode == "enforce" {
+					atomic.AddInt64(&b.stats.RecordsSkipped, 1)
+					continue
+				}
+			}
+			validRecords = append(validRecords, rec)
+		}
+		filteredRecords = validRecords
+	}
+
 	// Phase 4: Batch insert
 	insertStart := time.Now()
 	insertedCount := 0
@@ -641,6 +669,20 @@ func (b *Backfiller) processRepoLegacy(ctx context.Context, pdsURL string, data 
 		}
 
 		for _, rec := range records {
+			// Validate before insert.
+			if b.validator != nil && b.valMode != "disabled" {
+				vr := b.validator.Validate(collection, rec.Value)
+				if !vr.Valid {
+					slog.Debug("[backfill] Record failed validation",
+						"uri", rec.URI, "violations", fmt.Sprintf("%v", vr.Violations))
+					metrics.RecordValidationFailed(collection)
+					if b.valMode == "enforce" {
+						atomic.AddInt64(&b.stats.RecordsSkipped, 1)
+						continue
+					}
+				}
+			}
+
 			result, err := b.recordsRepo.Insert(ctx, rec.URI, rec.CID, data.DID, collection, string(rec.Value))
 			if err != nil {
 				slog.Debug("[backfill] Failed to insert record",

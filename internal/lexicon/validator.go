@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/rivo/uniseg"
 )
 
 // Validator checks records against their lexicon definitions.
@@ -150,7 +152,7 @@ func validateProperties(props []PropertyEntry, data map[string]interface{}, pref
 						Message: fmt.Sprintf("string length %d exceeds maxLength %d", len(s), *prop.MaxLength),
 					})
 				}
-				if prop.MaxGraphemes != nil && utf8.RuneCountInString(s) > *prop.MaxGraphemes {
+				if prop.MaxGraphemes != nil && uniseg.GraphemeClusterCount(s) > *prop.MaxGraphemes {
 					violations = append(violations, Violation{
 						Field:   path,
 						Rule:    "maxGraphemes",
@@ -449,14 +451,15 @@ func validateFormat(value, format string) bool {
 	}
 }
 
-// truncateString truncates a string by maxLength (bytes) and maxGraphemes (runes).
-// Returns the original string if no truncation is needed.
+// truncateString truncates a string by maxLength (bytes) and maxGraphemes
+// (Unicode grapheme clusters per UAX #29). Returns the original string if
+// no truncation is needed.
 func truncateString(s string, maxLength, maxGraphemes *int) string {
 	if maxLength != nil && len(s) > *maxLength {
 		s = truncateUTF8(s, *maxLength)
 	}
-	if maxGraphemes != nil && utf8.RuneCountInString(s) > *maxGraphemes {
-		s = truncateRunes(s, *maxGraphemes)
+	if maxGraphemes != nil && uniseg.GraphemeClusterCount(s) > *maxGraphemes {
+		s = truncateGraphemes(s, *maxGraphemes)
 	}
 	return s
 }
@@ -474,16 +477,17 @@ func truncateUTF8(s string, maxBytes int) string {
 	return s[:maxBytes]
 }
 
-// truncateRunes truncates a string to at most maxRunes runes.
-// This is a conservative approximation of grapheme cluster count
-// (rune count >= grapheme count, so we may truncate slightly less
-// than a true grapheme-aware implementation would allow).
-func truncateRunes(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
+// truncateGraphemes truncates a string to at most max grapheme clusters
+// using Unicode UAX #29 segmentation (via rivo/uniseg).
+func truncateGraphemes(s string, max int) string {
+	var result string
+	remaining := s
+	for i := 0; i < max && remaining != ""; i++ {
+		cluster, rest, _, _ := uniseg.FirstGraphemeClusterInString(remaining, -1)
+		result += cluster
+		remaining = rest
 	}
-	return string(runes[:maxRunes])
+	return result
 }
 
 // inEnum checks if a value is in the allowed enum list.

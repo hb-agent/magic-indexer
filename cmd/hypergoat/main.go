@@ -176,6 +176,11 @@ func run() error {
 	pubsub := subscription.NewPubSub()
 	collections, validator := setupGraphQL(r, cfg, svc, pubsub)
 
+	// Configure backfill callbacks now that the validator exists.
+	if adminHandler != nil {
+		configureBackfillCallbacks(adminHandler, cfg, svc, validator)
+	}
+
 	// Start background workers (activity cleanup)
 	startWorkers(svc, bg)
 
@@ -662,7 +667,8 @@ func setupAdmin(r *chi.Mux, cfg *config.Config, svc *services) *admin.Handler {
 	}
 
 	// Wire up backfill callbacks for the admin UI
-	configureBackfillCallbacks(adminHandler, cfg, svc)
+	// Backfill callbacks are configured later, after the validator is
+	// created in setupGraphQL. See run() after setupGraphQL call.
 
 	// Admin endpoint with optional auth (allows introspection without auth)
 	r.Handle("/admin/graphql", adminHandler.OptionalAuth())
@@ -720,13 +726,13 @@ func setupAdmin(r *chi.Mux, cfg *config.Config, svc *services) *admin.Handler {
 
 // configureBackfillCallbacks sets up single-actor and full-network backfill
 // callbacks on the admin handler's resolver, used by the admin UI.
-func configureBackfillCallbacks(adminHandler *admin.Handler, cfg *config.Config, svc *services) {
+func configureBackfillCallbacks(adminHandler *admin.Handler, cfg *config.Config, svc *services, validator *lexicon.Validator) {
 	bfConfig := backfill.NewConfigFromApp(cfg)
 	if bfConfig.Collections == nil {
 		bfConfig.Collections = atproto.ParseCollections(cfg.JetstreamCollections)
 	}
 
-	actorBackfiller := backfill.NewBackfiller(bfConfig, svc.records, svc.actors, svc.activity)
+	actorBackfiller := backfill.NewBackfiller(bfConfig, svc.records, svc.actors, svc.activity, validator, cfg.ValidationMode)
 
 	// Single actor backfill
 	adminHandler.Resolver().SetBackfillCallback(func(ctx context.Context, did string) error {
@@ -755,7 +761,7 @@ func configureBackfillCallbacks(adminHandler *admin.Handler, cfg *config.Config,
 
 		fullConfig := bfConfig
 		fullConfig.Collections = collections
-		bf := backfill.NewBackfiller(fullConfig, svc.records, svc.actors, svc.activity)
+		bf := backfill.NewBackfiller(fullConfig, svc.records, svc.actors, svc.activity, validator, cfg.ValidationMode)
 		defer bf.Close()
 
 		slog.Info("[backfill] Starting full network backfill", "collections", collections)
@@ -1071,7 +1077,7 @@ func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
 // BACKFILL_ON_START is set. The goroutine gets a tracked cancel so
 // graceful shutdown can interrupt an in-progress backfill instead of
 // hanging indefinitely on bg.Stop.
-func startBackfill(cfg *config.Config, svc *services, bg *backgroundServices, _ *lexicon.Validator) {
+func startBackfill(cfg *config.Config, svc *services, bg *backgroundServices, validator *lexicon.Validator) {
 	if !cfg.BackfillOnStart {
 		return
 	}
@@ -1086,7 +1092,7 @@ func startBackfill(cfg *config.Config, svc *services, bg *backgroundServices, _ 
 		return
 	}
 
-	backfiller := backfill.NewBackfiller(bfConfig, svc.records, svc.actors, svc.activity)
+	backfiller := backfill.NewBackfiller(bfConfig, svc.records, svc.actors, svc.activity, validator, cfg.ValidationMode)
 
 	bfCtx, bfCancel := context.WithCancel(context.Background())
 	bg.backfillCancel = bfCancel
