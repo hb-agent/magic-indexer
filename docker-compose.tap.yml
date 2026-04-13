@@ -1,0 +1,50 @@
+services:
+  tap:
+    image: ghcr.io/bluesky-social/indigo/tap:latest
+    ports:
+      - "127.0.0.1:2480:2480"
+    volumes:
+      - tap-data:/data
+    environment:
+      TAP_DATABASE_URL: "sqlite:///data/tap.db"
+      TAP_COLLECTION_FILTERS: "${JETSTREAM_COLLECTIONS}"
+      TAP_ADMIN_PASSWORD: "${TAP_ADMIN_PASSWORD}"
+
+  magic-indexer:
+    build: .
+    depends_on:
+      - tap
+      - postgres
+    ports:
+      - "8080:8080"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      TAP_ENABLED: "true"
+      TAP_URL: "ws://tap:2480"
+      TAP_INSECURE: "true"  # OK for local Docker network
+      TAP_ADMIN_PASSWORD: "${TAP_ADMIN_PASSWORD}"
+      DATABASE_URL: "postgres://hypergoat:hypergoat@postgres:5432/hypergoat?sslmode=disable"
+      SECRET_KEY_BASE: "${SECRET_KEY_BASE}"
+      EXTERNAL_BASE_URL: "${EXTERNAL_BASE_URL:-http://localhost:8080}"
+      OAUTH_LOOPBACK_MODE: "${OAUTH_LOOPBACK_MODE:-true}"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hypergoat
+      POSTGRES_PASSWORD: hypergoat
+      POSTGRES_DB: hypergoat
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: pg_isready -U hypergoat
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  tap-data:
+  pgdata:
