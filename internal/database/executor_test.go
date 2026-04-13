@@ -11,7 +11,6 @@ func TestDialectString(t *testing.T) {
 		dialect Dialect
 		want    string
 	}{
-		{SQLite, "sqlite"},
 		{PostgreSQL, "postgresql"},
 		{Dialect(99), "unknown"},
 	}
@@ -48,24 +47,14 @@ func TestParseDialect(t *testing.T) {
 			want:        PostgreSQL,
 		},
 		{
-			name:        "sqlite URL",
-			databaseURL: "sqlite:data/test.db",
-			want:        SQLite,
-		},
-		{
-			name:        "sqlite memory",
-			databaseURL: "sqlite::memory:",
-			want:        SQLite,
-		},
-		{
-			name:        "unknown defaults to SQLite",
+			name:        "unknown returns invalid dialect",
 			databaseURL: "mysql://user:pass@localhost/db",
-			want:        SQLite,
+			want:        Dialect(-1),
 		},
 		{
-			name:        "empty string defaults to SQLite",
+			name:        "empty string returns invalid dialect",
 			databaseURL: "",
-			want:        SQLite,
+			want:        Dialect(-1),
 		},
 	}
 

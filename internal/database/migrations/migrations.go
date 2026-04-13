@@ -15,9 +15,6 @@ import (
 	"github.com/GainForest/hypergoat/internal/database"
 )
 
-//go:embed sqlite/*.sql
-var sqliteMigrations embed.FS
-
 //go:embed postgres/*.sql
 var postgresMigrations embed.FS
 
@@ -51,12 +48,12 @@ func Run(ctx context.Context, exec database.Executor) error {
 	// Apply pending migrations. Each migration runs inside a single
 	// transaction with its schema_migrations row write so we can
 	// never persist partial DDL or end up with an applied schema
-	// change that the tracking table disagrees about. Both SQLite
-	// and Postgres support transactional DDL for the operations we
-	// actually run (CREATE/ALTER/DROP TABLE, CREATE INDEX). If a
-	// future migration ever needs a non-transactional operation
-	// (e.g., Postgres `CREATE INDEX CONCURRENTLY`) it should be
-	// flagged and handled outside this loop.
+	// change that the tracking table disagrees about. Postgres
+	// supports transactional DDL for the operations we actually
+	// run (CREATE/ALTER/DROP TABLE, CREATE INDEX). If a future
+	// migration ever needs a non-transactional operation (e.g.,
+	// Postgres `CREATE INDEX CONCURRENTLY`) it should be flagged
+	// and handled outside this loop.
 	for _, m := range migrations {
 		if applied[m.Version] {
 			slog.Debug("Migration already applied", "version", m.Version, "name", m.Name)
@@ -181,19 +178,10 @@ func Rollback(ctx context.Context, exec database.Executor) error {
 }
 
 func createMigrationsTable(ctx context.Context, exec database.Executor) error {
-	var sqlStr string
-	switch exec.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = `CREATE TABLE IF NOT EXISTS schema_migrations (
-			version TEXT PRIMARY KEY,
-			applied_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-		)`
-	default:
-		sqlStr = `CREATE TABLE IF NOT EXISTS schema_migrations (
-			version TEXT PRIMARY KEY,
-			applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-		)`
-	}
+	sqlStr := `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version TEXT PRIMARY KEY,
+		applied_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+	)`
 
 	_, err := exec.DB().ExecContext(ctx, sqlStr)
 	return err
@@ -228,8 +216,7 @@ func loadMigrations(dialect database.Dialect) ([]Migration, error) {
 		fs = postgresMigrations
 		dir = "postgres"
 	default:
-		fs = sqliteMigrations
-		dir = "sqlite"
+		return nil, fmt.Errorf("unsupported dialect: %s", dialect)
 	}
 
 	entries, err := fs.ReadDir(dir)

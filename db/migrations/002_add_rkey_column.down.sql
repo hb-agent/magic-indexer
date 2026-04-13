@@ -1,2 +1,0 @@
--- Note: SQLite doesn't support DROP COLUMN, would need table rebuild
--- This is a no-op for SQLite

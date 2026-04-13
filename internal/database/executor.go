@@ -1,5 +1,4 @@
-// Package database provides a unified interface for database operations
-// across different backends (SQLite, PostgreSQL).
+// Package database provides a unified interface for database operations.
 package database
 
 import (
@@ -14,14 +13,11 @@ import (
 type Dialect int
 
 const (
-	SQLite Dialect = iota
-	PostgreSQL
+	PostgreSQL Dialect = iota
 )
 
 func (d Dialect) String() string {
 	switch d {
-	case SQLite:
-		return "sqlite"
 	case PostgreSQL:
 		return "postgresql"
 	default:
@@ -64,8 +60,7 @@ type BlobValue []byte
 
 func (BlobValue) isValue() {}
 
-// TimestamptzValue represents an ISO 8601 timestamp.
-// PostgreSQL treats this as TIMESTAMPTZ, SQLite as TEXT.
+// TimestamptzValue represents an ISO 8601 timestamp (TIMESTAMPTZ).
 type TimestamptzValue string
 
 func (TimestamptzValue) isValue() {}
@@ -117,31 +112,27 @@ type Executor interface {
 	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
 
 	// ConvertParams converts []Value to []any for use with direct *sql.DB calls.
-	// The conversion is dialect-specific (e.g., SQLite uses integers for booleans).
 	ConvertParams(params []Value) []any
 
 	// Dialect returns the database dialect.
 	Dialect() Dialect
 
 	// Placeholder returns the placeholder for the given parameter index (1-based).
-	// SQLite: "?", PostgreSQL: "$1", "$2", etc.
+	// PostgreSQL: "$1", "$2", etc.
 	Placeholder(index int) string
 
 	// Placeholders returns a comma-separated list of placeholders.
 	Placeholders(count, startIndex int) string
 
 	// JSONExtract generates SQL for extracting a JSON field.
-	// SQLite: json_extract(column, '$.field')
 	// PostgreSQL: column->>'field'
 	JSONExtract(column, field string) string
 
 	// JSONExtractPath generates SQL for extracting a nested JSON path.
-	// SQLite: json_extract(column, '$.path.to.field')
 	// PostgreSQL: column->'path'->'to'->>'field'
 	JSONExtractPath(column string, path []string) string
 
-	// Now generates SQL for the current timestamp.
-	// SQLite: datetime('now'), PostgreSQL: NOW()
+	// Now generates SQL for the current timestamp (NOW()).
 	Now() string
 
 	// Close closes the database connection.
@@ -253,5 +244,5 @@ func ParseDialect(databaseURL string) Dialect {
 	if strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://") {
 		return PostgreSQL
 	}
-	return SQLite
+	return Dialect(-1)
 }

@@ -1,3 +1,0 @@
-DROP TABLE IF EXISTS report;
-DROP TABLE IF EXISTS label;
-DROP TABLE IF EXISTS label_definition;

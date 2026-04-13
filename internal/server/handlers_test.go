@@ -469,23 +469,10 @@ func TestHandleGraphiQL(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConnectDatabase(t *testing.T) {
-	t.Run("sqlite memory URL succeeds", func(t *testing.T) {
-		executor, err := ConnectDatabase("sqlite::memory:")
-		if err != nil {
-			t.Fatalf("expected no error, got %v", err)
-		}
-		defer executor.Close()
-
-		if executor == nil {
-			t.Fatal("expected non-nil executor")
-		}
-	})
-
-	t.Run("invalid sqlite path returns error", func(t *testing.T) {
-		// A path to a non-existent deeply nested directory should fail.
-		_, err := ConnectDatabase("sqlite:/no/such/directory/that/exists/test.db")
+	t.Run("unsupported URL returns error", func(t *testing.T) {
+		_, err := ConnectDatabase("mysql://user:pass@localhost/db")
 		if err == nil {
-			t.Fatal("expected error for invalid SQLite path")
+			t.Fatal("expected error for unsupported database URL")
 		}
 	})
 }
