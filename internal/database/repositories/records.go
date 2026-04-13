@@ -775,15 +775,14 @@ func (r *RecordsRepository) GetCIDsByURIs(ctx context.Context, uris []string) (m
 			return nil, err
 		}
 
+		defer rows.Close()
 		for rows.Next() {
 			var uri, cid string
 			if err := rows.Scan(&uri, &cid); err != nil {
-				rows.Close()
 				return nil, err
 			}
 			result[uri] = cid
 		}
-		rows.Close()
 
 		if err := rows.Err(); err != nil {
 			return nil, err
@@ -824,15 +823,14 @@ func (r *RecordsRepository) GetExistingCIDs(ctx context.Context, cids []string) 
 			return nil, err
 		}
 
+		defer rows.Close()
 		for rows.Next() {
 			var cid string
 			if err := rows.Scan(&cid); err != nil {
-				rows.Close()
 				return nil, err
 			}
 			result[cid] = true
 		}
-		rows.Close()
 
 		if err := rows.Err(); err != nil {
 			return nil, err
