@@ -1,70 +1,9 @@
 "use client";
-
 import { cn } from "@/lib/utils";
 import { ButtonHTMLAttributes, forwardRef, ElementType, ComponentPropsWithoutRef } from "react";
-
-type ButtonBaseProps = {
-  variant?: "default" | "outline" | "ghost" | "destructive" | "primary";
-  size?: "sm" | "md" | "lg";
-  loading?: boolean;
-  as?: ElementType;
-};
-
-type ButtonProps<T extends ElementType = "button"> = ButtonBaseProps &
-  Omit<ComponentPropsWithoutRef<T>, keyof ButtonBaseProps>;
-
-const buttonVariants = {
-  default: "bg-zinc-900 text-white hover:bg-zinc-800",
-  primary: "bg-emerald-600 text-white hover:bg-emerald-700",
-  outline: "border border-zinc-200/60 bg-transparent text-zinc-600 hover:bg-zinc-50",
-  ghost: "bg-transparent text-zinc-600 hover:bg-zinc-50",
-  destructive: "bg-red-600 text-white hover:bg-red-700",
-};
-
-const buttonSizes = {
-  sm: "h-8 px-3 text-sm",
-  md: "h-10 px-4 text-sm",
-  lg: "h-12 px-6",
-};
-
-export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
-  (
-    {
-      className,
-      variant = "default",
-      size = "md",
-      loading,
-      disabled,
-      children,
-      as,
-      ...props
-    },
-    ref
-  ) => {
-    const Component = as || "button";
-    const isButton = Component === "button";
-
-    return (
-      <Component
-        ref={ref}
-        className={cn(
-          "inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/30 focus-visible:border-emerald-400",
-          "disabled:opacity-50 disabled:cursor-not-allowed",
-          buttonVariants[variant],
-          buttonSizes[size],
-          className
-        )}
-        {...(isButton ? { disabled: disabled || loading } : {})}
-        {...props}
-      >
-        {loading && (
-          <div className="w-4 h-4 rounded-full border-2 border-current border-t-transparent animate-spin" />
-        )}
-        {children}
-      </Component>
-    );
-  }
-);
-
+type ButtonBaseProps = { variant?: "default" | "outline" | "ghost" | "destructive" | "primary"; size?: "sm" | "md" | "lg"; loading?: boolean; as?: ElementType; };
+type ButtonProps<T extends ElementType = "button"> = ButtonBaseProps & Omit<ComponentPropsWithoutRef<T>, keyof ButtonBaseProps>;
+const buttonVariants = { default: "bg-[var(--btn-primary-bg)] text-[var(--btn-primary-fg)] hover:bg-[var(--btn-primary-bg-hover)]", primary: "bg-[var(--btn-primary-bg)] text-[var(--btn-primary-fg)] hover:bg-[var(--btn-primary-bg-hover)]", outline: "border border-[var(--border-default)] bg-transparent text-[var(--fg-primary)] hover:border-[var(--border-hover)]", ghost: "bg-transparent text-[var(--fg-muted)] hover:bg-[var(--overlay-weak)] hover:text-[var(--fg-primary)]", destructive: "bg-[var(--color-error)]/10 text-[var(--color-error)] border border-[var(--color-error)]/20 hover:bg-[var(--color-error)]/15" };
+const buttonSizes = { sm: "h-8 px-4 text-xs", md: "h-10 px-6 text-sm", lg: "h-12 px-8 text-sm" };
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(({ className, variant = "default", size = "md", loading, disabled, children, as, ...props }, ref) => { const Component = as || "button"; const isButton = Component === "button"; return (<Component ref={ref} className={cn("inline-flex items-center justify-center gap-2 font-medium tracking-wide rounded-sm transition-all duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--fg-primary)]/20 disabled:opacity-50 disabled:cursor-not-allowed", buttonVariants[variant], buttonSizes[size], className)} {...(isButton ? { disabled: disabled || loading } : {})} {...props}>{loading && (<div className="w-4 h-4 rounded-full border-2 border-current border-t-transparent animate-spin" />)}{children}</Component>); });
 Button.displayName = "Button";
