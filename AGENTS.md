@@ -738,6 +738,12 @@ deploy. The per-round logs and final reports are in
 [`docs/reviews/`](docs/reviews/). Read the index there if you
 suspect something has already been audited.
 
+A comprehensive security audit was performed on **2026-04-13**
+(see [`docs/AUDIT_REPORT_2026-04-13.md`](docs/AUDIT_REPORT_2026-04-13.md)).
+It identified 29 findings (4 Critical, 5 High, 8 Medium) and
+fixed 15 of them across 14 commits. The remaining items are
+low-severity or require architectural changes.
+
 Combined totals:
 
 | Rounds | Reviewers | Critical | Major | Minor | Nice | Fixed |
@@ -745,7 +751,8 @@ Combined totals:
 | 1–10   | 200       | 35       | 100   | 95    | 19   | 55 fixes + 3 regression tests |
 | 11–18  | 160       | 2        | 1     | 0     | 0    | 3 fixes (jetstream state races, Round 14) |
 | 19–23  | 100       | 0        | 0     | 0     | 0    | 1 mid-deploy fix (`OptionalAuth` pass-through) |
-| **total** | **460** | **37** | **101** | **95** | **19** | **59 fixes + 3 regression tests** |
+| Audit  | 10+       | 4        | 5     | 8     | 12   | 15 fixes across 14 commits |
+| **total** | **470+** | **41** | **106** | **103** | **31** | **74 fixes + 3 regression tests** |
 
 ### Items deliberately deferred (do not re-discover)
 

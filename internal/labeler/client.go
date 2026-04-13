@@ -72,7 +72,10 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	slog.Info("Connecting to labeler", "url", u.String())
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), nil)
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, u.String(), nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("dial labeler: %w", err)
 	}

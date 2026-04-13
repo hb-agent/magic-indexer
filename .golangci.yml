@@ -21,6 +21,8 @@ linters:
     - revive
     - nilerr
     - errorlint
+    - gosec       # Security-specific Go linter (SQL injection, weak crypto, etc.)
+    - bodyclose   # Ensures HTTP response bodies are closed
   settings:
     govet:
       disable:
@@ -67,10 +69,31 @@ linters:
           - gocritic
           - unparam
           - errcheck
+          - gosec       # Test files use hardcoded URLs, os.Setenv, etc.
       # defer Rollback is safe to ignore (Rollback is a no-op after Commit)
       - linters:
           - errcheck
         text: "Error return value of .*.Rollback.* is not checked"
+      # G201: SQL string formatting — these use Placeholder() for bind
+      # params, not user input. The fmt.Sprintf builds parameterized SQL.
+      # Scoped to database/ and migrations/ so real injection in other
+      # packages is still caught.
+      - path: 'internal/database/'
+        linters:
+          - gosec
+        text: "G201"
+      # G304: File inclusion via variable — reads from operator-configured
+      # lexicon dirs or hardcoded testdata paths. Scoped to the two
+      # packages that do file I/O.
+      - path: '(cmd/hypergoat/|internal/graphql/schema/)'
+        linters:
+          - gosec
+        text: "G304"
+      # G101: Hardcoded test DB credentials in testutil/db.go — these are
+      # ephemeral CI-only credentials, not production secrets.
+      - path: 'internal/testutil/'
+        linters:
+          - gosec
 
 formatters:
   enable:

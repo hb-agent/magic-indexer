@@ -4,10 +4,6 @@ package oauth
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // AuthorizationServerMetadata contains OAuth metadata from an AT Protocol PDS.
@@ -312,13 +310,17 @@ func (b *Bridge) RefreshTokens(ctx context.Context, req RefreshTokensRequest) (*
 
 // fetchTokens performs the token request with DPoP and optional nonce retry.
 func (b *Bridge) fetchTokens(ctx context.Context, tokenURL string, body url.Values, dpopKey *DPoPKeyPair, issuer string, nonce *string) (*TokenResponse, error) {
-	// Add client_assertion if signing key is configured
+	// Add client_assertion if signing key is configured. If assertion
+	// creation fails, propagate the error — a silently missing assertion
+	// would cause the token exchange to fail with a confusing server-side
+	// "invalid_client" error instead of a clear local diagnostic.
 	if b.signingKey != nil {
 		assertion, err := b.createClientAssertion(issuer)
-		if err == nil {
-			body.Set("client_assertion", assertion)
-			body.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+		if err != nil {
+			return nil, &BridgeError{Type: ErrTypeTokenExchange, Message: "failed to create client assertion", Cause: err}
 		}
+		body.Set("client_assertion", assertion)
+		body.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
 	}
 
 	// Create request
@@ -383,38 +385,30 @@ func (b *Bridge) fetchTokens(ctx context.Context, tokenURL string, body url.Valu
 	}
 }
 
-// createClientAssertion creates a JWT client assertion for authentication.
+// createClientAssertion creates a JWT client assertion for authentication
+// using the vetted golang-jwt/jwt/v5 library rather than hand-rolled crypto.
 func (b *Bridge) createClientAssertion(audience string) (string, error) {
 	if b.signingKey == nil || b.signingKey.PrivateKey == nil {
 		return "", errors.New("no signing key configured")
 	}
 
-	// Create a simple JWT assertion
-	// In production, you'd want a proper JWT library with all RFC claims
 	now := time.Now()
 	jti, err := generateJTI()
 	if err != nil {
 		return "", err
 	}
 
-	header := map[string]interface{}{
-		"alg": "ES256",
-		"typ": "JWT",
-		"kid": b.signingKey.CalculateJKT(),
-	}
-
-	claims := map[string]interface{}{
+	token := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
 		"iss": b.clientID,
 		"sub": b.clientID,
 		"aud": audience,
 		"jti": jti,
 		"iat": now.Unix(),
 		"exp": now.Add(5 * time.Minute).Unix(),
-	}
+	})
+	token.Header["kid"] = b.signingKey.CalculateJKT()
 
-	// This is a simplified implementation
-	// For production, use github.com/golang-jwt/jwt/v5 properly
-	return signJWT(header, claims, b.signingKey.PrivateKey)
+	return token.SignedString(b.signingKey.PrivateKey)
 }
 
 // PushAuthorizationRequest sends a Pushed Authorization Request to the server.
@@ -465,38 +459,4 @@ func BuildAuthorizationURL(authEndpoint string, params url.Values) string {
 		return authEndpoint + "&" + params.Encode()
 	}
 	return authEndpoint + "?" + params.Encode()
-}
-
-// signJWT is a helper to sign a JWT with an ECDSA key.
-// This is a simplified implementation - use jwt library in production.
-func signJWT(header, claims map[string]interface{}, key interface{}) (string, error) {
-	ecdsaKey, ok := key.(*ecdsa.PrivateKey)
-	if !ok {
-		return "", errors.New("invalid key type")
-	}
-
-	headerJSON, _ := json.Marshal(header)
-	claimsJSON, _ := json.Marshal(claims)
-
-	headerB64 := base64.RawURLEncoding.EncodeToString(headerJSON)
-	claimsB64 := base64.RawURLEncoding.EncodeToString(claimsJSON)
-
-	signingInput := headerB64 + "." + claimsB64
-	hash := sha256.Sum256([]byte(signingInput))
-
-	r, s, err := ecdsa.Sign(rand.Reader, ecdsaKey, hash[:])
-	if err != nil {
-		return "", err
-	}
-
-	// Convert to fixed-size format for ES256
-	rBytes := r.Bytes()
-	sBytes := s.Bytes()
-	sig := make([]byte, 64)
-	copy(sig[32-len(rBytes):32], rBytes)
-	copy(sig[64-len(sBytes):64], sBytes)
-
-	sigB64 := base64.RawURLEncoding.EncodeToString(sig)
-
-	return headerB64 + "." + claimsB64 + "." + sigB64, nil
 }

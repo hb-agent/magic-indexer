@@ -110,12 +110,13 @@ export const GET_LEXICONS = gql`
   }
 `;
 
-// OAuth Clients
+// OAuth Clients — clientSecret is intentionally excluded to avoid
+// sending secrets to the browser. The backend should also gate this
+// field behind admin auth, but defense in depth starts here.
 export const GET_OAUTH_CLIENTS = gql`
   query GetOAuthClients {
     oauthClients {
       clientId
-      clientSecret
       clientName
       clientType
       redirectUris

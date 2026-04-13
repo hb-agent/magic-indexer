@@ -29,7 +29,9 @@ const sessionOptions: SessionOptions = {
   password: env.COOKIE_SECRET,
   cookieOptions: {
     secure: isProduction,
-    maxAge: 60 * 60 * 24 * 30, // 30 days
+    httpOnly: true,
+    sameSite: "lax" as const,
+    maxAge: 60 * 60 * 24 * 7, // 7 days (reduced from 30 — limits stolen cookie window)
   },
 };
 

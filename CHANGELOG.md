@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-04-13 — Security & Code Quality Audit
+
+**Scope:** Full codebase security audit covering the Go backend (hypergoat), Next.js admin client, Docker/CI infrastructure, and all dependencies.
+
+### Critical Fixes
+- **CS-001** Pin Go version to 1.23 (was referencing non-existent 1.25); upgrade Alpine to 3.21; set GOTOOLCHAIN=local
+- **CS-002** Remove hardcoded cookie secret default from client env.ts — app now fails loudly if COOKIE_SECRET is missing
+- **CS-003** Remove hardcoded production Railway URLs from docs pages — derive from request URL at runtime
+- **CS-004** Stop exposing OAuth client secrets to browser in GET_OAUTH_CLIENTS query
+
+### High-Priority Fixes
+- **CS-005** Add gosec and bodyclose security linters to golangci-lint
+- **CS-006** Add `permissions: read-all` to GitHub Actions CI workflow
+- **CS-008** Require session authentication on admin GraphQL proxy before forwarding ADMIN_API_KEY
+- **CS-009** Replace hand-rolled JWT signing with golang-jwt/jwt/v5 library
+- **CS-013** Pin opencode-anthropic-auth plugin to specific version (was @latest)
+
+### Medium-Priority Fixes
+- **CS-007** Harden session cookie: explicit httpOnly, sameSite=lax, reduce maxAge from 30 to 7 days
+- **CS-010** Stop silently swallowing createClientAssertion errors in OAuth token exchange
+- **CS-011** Add security response headers (HSTS, X-Frame-Options, etc.) to Next.js client via vercel.json
+- **CS-012** Clean up .env.example: remove real admin DID default, un-comment ADMIN_API_KEY
+- **CS-014** Add 1 MiB request body size limit to public GraphQL proxy
+
+### Known Issues Requiring Follow-Up
+- `golang.org/x/crypto v0.21.0` has CVE-2024-45337 (SSH auth bypass) — upgrade to >= v0.31.0 requires Go toolchain
+- Label signature verification not implemented (labeler consumer trusts WebSocket connection)
+- DPoP refresh token key rebinding (#24) still deferred
+- No CSP header on Go backend GraphiQL (uses CDN-loaded assets from unpkg.com)
+
+---
+
 ## 2026-04-13 — Full-text search
 
 **PR:** [#35](https://github.com/hb-agent/magic-indexer/pull/35)

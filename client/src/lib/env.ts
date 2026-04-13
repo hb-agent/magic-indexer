@@ -13,8 +13,19 @@ function getPort(): number {
 }
 
 export const env = {
-  // Secret for encrypting session cookies (must be at least 32 chars)
-  COOKIE_SECRET: getEnv("COOKIE_SECRET", "development-secret-at-least-32-chars!!"),
+  // Secret for encrypting session cookies (must be at least 32 chars).
+  // CRITICAL: No default — a missing secret must fail loudly rather than
+  // silently using a publicly-known value that lets anyone forge sessions.
+  COOKIE_SECRET: (() => {
+    const secret = process.env.COOKIE_SECRET;
+    if (!secret || secret.length < 32) {
+      throw new Error(
+        "COOKIE_SECRET must be set to a random string of at least 32 characters. " +
+        "Generate one with: openssl rand -base64 32"
+      );
+    }
+    return secret;
+  })(),
   
   // Public URL for OAuth callbacks (empty = use localhost)
   PUBLIC_URL: getEnv("PUBLIC_URL", ""),

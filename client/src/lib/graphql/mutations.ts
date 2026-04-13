@@ -91,7 +91,6 @@ export const UPDATE_OAUTH_CLIENT = gql`
       redirectUris: $redirectUris
     ) {
       clientId
-      clientSecret
       clientName
       clientType
       redirectUris

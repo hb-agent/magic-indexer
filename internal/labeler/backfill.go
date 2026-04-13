@@ -97,7 +97,7 @@ func (b *BackfillClient) Fetch(
 		}
 
 		body, err := io.ReadAll(io.LimitReader(resp.Body, MaxBackfillBodyBytes+1))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return fmt.Errorf("read queryLabels response: %w", err)
 		}

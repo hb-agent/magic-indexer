@@ -29,13 +29,18 @@ export async function POST(request: NextRequest) {
       headers["Authorization"] = `Bearer ${env.ADMIN_API_KEY}`;
     }
 
-    // If user is authenticated, pass their DID
-    if (session.did) {
-      headers["X-User-DID"] = session.did;
-      console.log("[admin-graphql] Authenticated request", { did: session.did });
-    } else {
-      console.log("[admin-graphql] Unauthenticated request - no session DID");
+    // Reject unauthenticated requests at the proxy layer. The backend
+    // would also reject (no X-User-DID + no OAuth token = 401), but
+    // failing early avoids forwarding the ADMIN_API_KEY bearer token
+    // on behalf of a caller with no session.
+    if (!session.did) {
+      return NextResponse.json(
+        { errors: [{ message: "Authentication required" }] },
+        { status: 401 }
+      );
     }
+
+    headers["X-User-DID"] = session.did;
 
     // Proxy to Hypergoat
     const response = await fetch(`${env.HYPERGOAT_URL}/admin/graphql`, {

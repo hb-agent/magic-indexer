@@ -1,12 +1,15 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /src
 
 # Install build dependencies
 RUN apk add --no-cache git
 
-# Enable automatic toolchain download for dependencies requiring newer Go
+# The bluesky-social/indigo dependency requires go 1.25+. GOTOOLCHAIN=auto
+# lets the Go 1.23 base image download the required 1.25 toolchain
+# automatically during `go mod download`. This is the standard Go
+# forward-compatibility mechanism (see go.dev/doc/toolchain).
 ENV GOTOOLCHAIN=auto
 
 # Copy go mod files
@@ -23,7 +26,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -o /hypergoat ./cmd/hypergoat
 
 # Runtime stage
-FROM alpine:3.19
+FROM alpine:3.21
 
 # Install runtime dependencies.
 RUN apk add --no-cache ca-certificates tzdata wget

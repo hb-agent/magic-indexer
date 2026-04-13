@@ -12,6 +12,11 @@ on:
 # releases page — a compromised tag cannot silently swap a pinned
 # SHA without a visible diff.
 
+# Restrict GITHUB_TOKEN to read-only by default. Individual jobs or
+# steps that need write access (e.g., pushing packages) should
+# declare their own narrower permissions block.
+permissions: read-all
+
 jobs:
   test:
     runs-on: ubuntu-latest
