@@ -1,0 +1,1 @@
+-- No-op (SQLite has no search_vector column to drop).

@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-04-13 — Full-text search
+
+**PR:** [#35](https://github.com/hb-agent/magic-indexer/pull/35)
+
+Add a `search: String` parameter to all typed collection queries and the generic `records` query. Uses Postgres `tsvector` with a GIN index for fast, stemmed full-text search.
+
+- **Searched fields**: title (A), shortDescription (B), description (C), workScope (D)
+- **Behavior**: space-separated terms are implicitly ANDed, English stemming applied
+- **Combinable with**: `authors`, `labels`, `excludeLabels` filters
+- **Max query length**: 500 characters
+
+### Breaking changes
+
+None. The `search` parameter is optional — existing queries work unchanged.
+
+### Deployment notes
+
+- Migration 012 adds a `search_vector` generated column and GIN index. Runs automatically on startup. At ~5000 records, takes under a second.
+- Requires an `immutable_to_tsvector` wrapper function (created by the migration) because `to_tsvector` is STABLE not IMMUTABLE.
+
+---
+
+## 2026-04-13 — Record validation against lexicon schemas
+
+**PR:** [#28](https://github.com/hb-agent/magic-indexer/pull/28)
+
+Records with missing required fields no longer crash GraphQL responses. Query-time sanitization (always on) filters out bad records silently. Ingestion-time validation is configurable via `VALIDATION_MODE` env var.
+
+---
+
 ## 2026-04-12 — Deep Code Review: 42 fixes across security, concurrency, performance
 
 **PR:** [#25](https://github.com/hb-agent/magic-indexer/pull/25)

@@ -1,0 +1,2 @@
+-- SQLite does not support tsvector. Full-text search is Postgres-only.
+-- This is a no-op migration to keep version numbers in sync.

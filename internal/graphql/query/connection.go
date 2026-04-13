@@ -3,6 +3,7 @@ package query
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/graphql-go/graphql"
 
@@ -96,6 +97,10 @@ func ConnectionArgs() graphql.FieldConfigArgument {
 			Type:        graphql.String,
 			Description: "Cursor to start after (forward pagination)",
 		},
+		"search": &graphql.ArgumentConfig{
+			Type:        graphql.String,
+			Description: "Full-text search across title, shortDescription, description, and workScope. Terms are space-separated and implicitly ANDed. Uses English stemming.",
+		},
 		"authors": &graphql.ArgumentConfig{
 			Type: graphql.NewList(graphql.NewNonNull(graphql.String)),
 			Description: fmt.Sprintf(
@@ -146,6 +151,15 @@ func ParseAuthorsFilter(args map[string]interface{}) (*[]string, error) {
 		return nil, fmt.Errorf("authors filter exceeds maximum of %d DIDs", repositories.MaxAuthorsFilterSize)
 	}
 	return &dids, nil
+}
+
+// ParseSearchFilter extracts the "search" argument from GraphQL resolver args.
+func ParseSearchFilter(args map[string]interface{}) string {
+	raw, ok := args["search"].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(raw)
 }
 
 // BuildEdgeType creates an Edge type for a given node type.
