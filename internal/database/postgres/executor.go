@@ -14,7 +14,6 @@ import (
 	"github.com/GainForest/hypergoat/internal/database"
 )
 
-
 // Executor implements database.Executor for PostgreSQL.
 type Executor struct {
 	db *sql.DB

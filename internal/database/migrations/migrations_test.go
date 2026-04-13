@@ -27,8 +27,16 @@ func newTestExecutor(t *testing.T) database.Executor {
 	}
 	t.Cleanup(func() { exec.Close() })
 
-	// Drop schema_migrations so each test starts fresh.
-	_, _ = exec.DB().ExecContext(context.Background(), "DROP TABLE IF EXISTS schema_migrations CASCADE")
+	// Drop ALL tables so each test starts completely fresh.
+	// CASCADE handles foreign key dependencies.
+	_, _ = exec.DB().ExecContext(context.Background(), `
+		DO $$ DECLARE r RECORD;
+		BEGIN
+			FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+				EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
+			END LOOP;
+		END $$;
+	`)
 
 	return exec
 }

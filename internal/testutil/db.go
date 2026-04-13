@@ -47,8 +47,21 @@ func SetupTestDB(t *testing.T) *TestDB {
 
 	ctx := context.Background()
 	if err := migrations.Run(ctx, exec); err != nil {
-		exec.Close()
-		t.Fatalf("Failed to run migrations: %v", err)
+		// Migration tests may leave the DB in a dirty state (tables
+		// exist but schema_migrations was dropped). Drop everything
+		// and retry.
+		_, _ = exec.DB().ExecContext(ctx, `
+			DO $$ DECLARE r RECORD;
+			BEGIN
+				FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+					EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
+				END LOOP;
+			END $$;
+		`)
+		if err := migrations.Run(ctx, exec); err != nil {
+			exec.Close()
+			t.Fatalf("Failed to run migrations (even after schema reset): %v", err)
+		}
 	}
 
 	// Each test needs an empty slate since the database is shared
