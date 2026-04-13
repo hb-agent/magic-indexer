@@ -134,6 +134,7 @@ func init() {
 		recordsAuthorsFilterSize,
 		recordsAuthorsFilterEmptyBlockedTotal,
 		recordsAuthorsFilterTooLargeTotal,
+		recordValidationFailedTotal,
 	)
 }
 
@@ -202,6 +203,21 @@ func RecordAuthorsFilterEmptyBlocked() {
 // rejected because the authors list exceeded MaxAuthorsFilterSize.
 func RecordAuthorsFilterTooLarge() {
 	recordsAuthorsFilterTooLargeTotal.Inc()
+}
+
+// --- Record validation metrics ---
+
+var recordValidationFailedTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "hypergoat_record_validation_failed_total",
+		Help: "Records that failed lexicon validation at ingestion time.",
+	},
+	[]string{"collection"},
+)
+
+// RecordValidationFailed increments the validation failure counter.
+func RecordValidationFailed(collection string) {
+	recordValidationFailedTotal.WithLabelValues(collection).Inc()
 }
 
 // httpStatusString converts an int status code into a stable

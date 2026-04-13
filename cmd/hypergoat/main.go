@@ -174,19 +174,19 @@ func run() error {
 
 	// Load lexicons and set up public GraphQL + subscriptions
 	pubsub := subscription.NewPubSub()
-	collections := setupGraphQL(r, cfg, svc, pubsub)
+	collections, validator := setupGraphQL(r, cfg, svc, pubsub)
 
 	// Start background workers (activity cleanup)
 	startWorkers(svc, bg)
 
 	// Start Jetstream consumer for real-time events
-	startJetstream(cfg, svc, pubsub, collections, adminHandler, bg)
+	startJetstream(cfg, svc, pubsub, collections, adminHandler, bg, validator)
 
 	// Start labeler subscriptions (if any DIDs configured)
 	startLabeler(cfg, svc, bg)
 
 	// Start backfill if configured
-	startBackfill(cfg, svc, bg)
+	startBackfill(cfg, svc, bg, validator)
 
 	// Run HTTP server with graceful shutdown
 	return serve(r, cfg, bg)
@@ -779,7 +779,7 @@ func configureBackfillCallbacks(adminHandler *admin.Handler, cfg *config.Config,
 // setupGraphQL loads lexicons from disk and database, creates the public GraphQL
 // handler with WebSocket subscriptions, and returns the resolved collection list
 // for Jetstream configuration.
-func setupGraphQL(r *chi.Mux, cfg *config.Config, svc *services, pubsub *subscription.PubSub) []string {
+func setupGraphQL(r *chi.Mux, cfg *config.Config, svc *services, pubsub *subscription.PubSub) ([]string, *lexicon.Validator) {
 	// Load lexicons from filesystem
 	registry := lexicon.NewRegistry()
 	lexiconDir := cfg.LexiconDir
@@ -856,7 +856,7 @@ func setupGraphQL(r *chi.Mux, cfg *config.Config, svc *services, pubsub *subscri
 		}
 	}
 
-	return collections
+	return collections, lexicon.NewValidator(registry)
 }
 
 // startWorkers launches background worker goroutines (activity cleanup).
@@ -877,6 +877,7 @@ func startJetstream(
 	collections []string,
 	adminHandler *admin.Handler,
 	bg *backgroundServices,
+	validator *lexicon.Validator,
 ) {
 	jsURL := cfg.JetstreamURL
 	if jsURL == "" {
@@ -895,6 +896,8 @@ func startJetstream(
 			svc.config,
 			svc.activity,
 			pubsub,
+			validator,
+			cfg.ValidationMode,
 		)
 
 		jsCtx, jsCancel := context.WithCancel(context.Background())
@@ -929,6 +932,8 @@ func startJetstream(
 					svc.config,
 					svc.activity,
 					pubsub,
+					validator,
+					cfg.ValidationMode,
 				)
 
 				// Use a tracked context derived from a fresh
@@ -1066,7 +1071,7 @@ func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
 // BACKFILL_ON_START is set. The goroutine gets a tracked cancel so
 // graceful shutdown can interrupt an in-progress backfill instead of
 // hanging indefinitely on bg.Stop.
-func startBackfill(cfg *config.Config, svc *services, bg *backgroundServices) {
+func startBackfill(cfg *config.Config, svc *services, bg *backgroundServices, validator *lexicon.Validator) {
 	if !cfg.BackfillOnStart {
 		return
 	}

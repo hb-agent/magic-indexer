@@ -739,24 +739,34 @@ func (b *Builder) createGenericRecordsResolver() graphql.FieldResolveFn {
 
 // createCollectionResolver creates a resolver for querying a typed collection.
 func (b *Builder) createCollectionResolver(lexiconID string) graphql.FieldResolveFn {
+	// Look up the record def once per collection, not per record.
+	def, _ := b.registry.GetRecordDef(lexiconID)
+
 	return func(p graphql.ResolveParams) (interface{}, error) {
 		return b.resolveRecordConnection(p, lexiconID,
 			func(rec *repositories.Record, data map[string]interface{}) (interface{}, bool) {
-				// Reserved record fields — always our metadata,
-				// always authoritative. Any lexicon property with
-				// the same name has already been dropped in
-				// buildRecordFields.
-				data["uri"] = rec.URI
-				data["cid"] = rec.CID
-				data["did"] = rec.DID
-				data["rkey"] = rec.RKey
-				return data, true
+				// Sanitize record against lexicon schema. Returns nil
+				// if required fields are missing — skip the record
+				// silently instead of letting NonNull propagation kill
+				// the entire query response.
+				sanitized := lexicon.SanitizeRecord(def, b.registry, data)
+				if sanitized == nil {
+					return nil, false
+				}
+				// Reserved record fields — always our metadata.
+				sanitized["uri"] = rec.URI
+				sanitized["cid"] = rec.CID
+				sanitized["did"] = rec.DID
+				sanitized["rkey"] = rec.RKey
+				return sanitized, true
 			})
 	}
 }
 
 // createSingleRecordResolver creates a resolver for fetching a single record.
 func (b *Builder) createSingleRecordResolver(lexiconID string) graphql.FieldResolveFn {
+	def, _ := b.registry.GetRecordDef(lexiconID)
+
 	return func(p graphql.ResolveParams) (interface{}, error) {
 		uri, ok := p.Args["uri"].(string)
 		if !ok {
@@ -784,22 +794,23 @@ func (b *Builder) createSingleRecordResolver(lexiconID string) graphql.FieldReso
 			return nil, fmt.Errorf("failed to parse record JSON: %w", err)
 		}
 
-		// Reserved record fields — always authoritative, unconditional.
-		// The corresponding lexicon property (if any) was dropped in
-		// buildRecordFields.
-		data["uri"] = rec.URI
-		data["cid"] = rec.CID
-		data["did"] = rec.DID
-		data["rkey"] = rec.RKey
+		// Sanitize record against lexicon schema.
+		sanitized := lexicon.SanitizeRecord(def, b.registry, data)
+		if sanitized == nil {
+			return nil, nil // Record has missing required fields — treat as not found.
+		}
+
+		// Reserved record fields — always authoritative.
+		sanitized["uri"] = rec.URI
+		sanitized["cid"] = rec.CID
+		sanitized["did"] = rec.DID
+		sanitized["rkey"] = rec.RKey
 
 		// Attach labels from every ingested labeler (best-effort).
-		// The single-record resolver does not support a labelerDids
-		// arg today — callers can post-filter client-side — so we
-		// pass nil to get the full union.
 		labelsByURI := loadLabelsByURI(p.Context, repos, nil, []*repositories.Record{rec})
-		data["labels"] = labelsByURI[rec.URI]
+		sanitized["labels"] = labelsByURI[rec.URI]
 
-		return data, nil
+		return sanitized, nil
 	}
 }
 

@@ -4,6 +4,8 @@
 // and other definitions used in the AT Protocol ecosystem.
 package lexicon
 
+import "sync"
+
 // Lexicon represents a parsed AT Protocol lexicon document.
 type Lexicon struct {
 	// ID is the NSID (e.g., "app.bsky.feed.post")
@@ -54,6 +56,10 @@ type RecordDef struct {
 
 	// Properties are the fields of this record
 	Properties []PropertyEntry `json:"properties"`
+
+	// Lazy property index for O(1) lookups.
+	propIndexOnce sync.Once
+	propIndex     map[string]*Property
 }
 
 // ObjectDef defines an object type (a nested structure within a record).
@@ -66,6 +72,10 @@ type ObjectDef struct {
 
 	// Properties are the fields of this object
 	Properties []PropertyEntry `json:"properties"`
+
+	// Lazy property index for O(1) lookups.
+	propIndexOnce sync.Once
+	propIndex     map[string]*Property
 }
 
 // PropertyEntry is a named property with its definition.
@@ -109,8 +119,13 @@ type Property struct {
 	// MinLength for strings
 	MinLength *int `json:"minLength,omitempty"`
 
-	// MaxLength for strings or arrays
+	// MaxLength for strings or arrays (byte count)
 	MaxLength *int `json:"maxLength,omitempty"`
+
+	// MaxGraphemes for strings (user-perceived character count).
+	// AT Protocol defines this as Unicode grapheme clusters (UAX#29).
+	// We approximate with rune count which is conservative (rune count >= grapheme count).
+	MaxGraphemes *int `json:"maxGraphemes,omitempty"`
 
 	// Enum lists allowed values
 	Enum []string `json:"enum,omitempty"`
@@ -164,24 +179,36 @@ const (
 	FormatTID       = "tid"
 )
 
+// buildPropIndex lazily builds the property name → *Property index.
+func (r *RecordDef) buildPropIndex() map[string]*Property {
+	r.propIndexOnce.Do(func() {
+		r.propIndex = make(map[string]*Property, len(r.Properties))
+		for i := range r.Properties {
+			r.propIndex[r.Properties[i].Name] = &r.Properties[i].Property
+		}
+	})
+	return r.propIndex
+}
+
 // GetProperty returns the property with the given name, or nil if not found.
 func (r *RecordDef) GetProperty(name string) *Property {
-	for i := range r.Properties {
-		if r.Properties[i].Name == name {
-			return &r.Properties[i].Property
+	return r.buildPropIndex()[name]
+}
+
+// buildPropIndex lazily builds the property name → *Property index.
+func (o *ObjectDef) buildPropIndex() map[string]*Property {
+	o.propIndexOnce.Do(func() {
+		o.propIndex = make(map[string]*Property, len(o.Properties))
+		for i := range o.Properties {
+			o.propIndex[o.Properties[i].Name] = &o.Properties[i].Property
 		}
-	}
-	return nil
+	})
+	return o.propIndex
 }
 
 // GetProperty returns the property with the given name, or nil if not found.
 func (o *ObjectDef) GetProperty(name string) *Property {
-	for i := range o.Properties {
-		if o.Properties[i].Name == name {
-			return &o.Properties[i].Property
-		}
-	}
-	return nil
+	return o.buildPropIndex()[name]
 }
 
 // IsRequired returns true if the named property is required.

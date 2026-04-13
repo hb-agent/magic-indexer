@@ -10,6 +10,7 @@ import (
 
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/graphql/subscription"
+	"github.com/GainForest/hypergoat/internal/lexicon"
 	"github.com/GainForest/hypergoat/internal/metrics"
 )
 
@@ -36,6 +37,8 @@ type Consumer struct {
 	actorsRepo   *repositories.ActorsRepository
 	configRepo   *repositories.ConfigRepository
 	activityRepo *repositories.JetstreamActivityRepository
+	validator    *lexicon.Validator
+	valMode      string // "disabled", "warn", "enforce"
 
 	// Pub/sub for GraphQL subscriptions
 	pubsub *subscription.PubSub
@@ -67,6 +70,7 @@ type Stats struct {
 }
 
 // NewConsumer creates a new Jetstream consumer.
+// validator and validationMode are optional — pass nil/"disabled" to skip validation.
 func NewConsumer(
 	config ConsumerConfig,
 	recordsRepo *repositories.RecordsRepository,
@@ -74,6 +78,8 @@ func NewConsumer(
 	configRepo *repositories.ConfigRepository,
 	activityRepo *repositories.JetstreamActivityRepository,
 	pubsub *subscription.PubSub,
+	validator *lexicon.Validator,
+	validationMode string,
 ) *Consumer {
 	if config.CursorFlushInterval == 0 {
 		config.CursorFlushInterval = 5 * time.Second
@@ -86,6 +92,8 @@ func NewConsumer(
 		configRepo:   configRepo,
 		activityRepo: activityRepo,
 		pubsub:       pubsub,
+		validator:    validator,
+		valMode:      validationMode,
 		cursorDone:   make(chan struct{}),
 		statsStart:   time.Now(),
 	}
@@ -392,6 +400,23 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 		if c.activityRepo != nil && activityID > 0 {
 			if err := c.activityRepo.UpdateStatus(ctx, activityID, status, errMsg); err != nil {
 				slog.Warn("Failed to update activity status", "error", err)
+			}
+		}
+	}
+
+	// Validate record against lexicon schema (ingestion-time, advisory).
+	if c.validator != nil && c.valMode != "disabled" && (commit.Operation == OpCreate || commit.Operation == OpUpdate) {
+		result := c.validator.Validate(commit.Collection, commit.Record)
+		if !result.Valid {
+			slog.Warn("[jetstream] Record failed validation",
+				"uri", uri,
+				"collection", commit.Collection,
+				"violations", fmt.Sprintf("%v", result.Violations),
+			)
+			metrics.RecordValidationFailed(commit.Collection)
+			if c.valMode == "enforce" {
+				updateActivityStatus("rejected", nil)
+				return nil // skip record
 			}
 		}
 	}

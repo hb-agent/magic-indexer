@@ -63,6 +63,9 @@ type Config struct {
 	LabelerDIDs                string // Comma-separated labeler DIDs to subscribe to (optional)
 	LabelerDryRun              bool   // If true, resolve labeler hosts and exit without ingesting
 	LabelerCursorFlushInterval int    // Cursor flush cadence in seconds (0 = default 5s)
+
+	// Validation
+	ValidationMode string // Record validation mode: "disabled" (default), "warn" (log but store), "enforce" (reject invalid records)
 }
 
 // Load reads configuration from environment variables.
@@ -120,6 +123,7 @@ func Load() (*Config, error) {
 		LabelerDIDs:                getEnv("LABELER_DIDS", ""),
 		LabelerDryRun:              getEnvBool("LABELER_DRY_RUN", false),
 		LabelerCursorFlushInterval: getEnvInt("LABELER_CURSOR_FLUSH_INTERVAL", 0),
+		ValidationMode:             getEnv("VALIDATION_MODE", "disabled"),
 	}
 
 	// Generate SecretKeyBase if not provided

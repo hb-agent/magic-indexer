@@ -53,7 +53,8 @@ type rawProperty struct {
 	Minimum     *float64        `json:"minimum,omitempty"`
 	Maximum     *float64        `json:"maximum,omitempty"`
 	MinLength   *int            `json:"minLength,omitempty"`
-	MaxLength   *int            `json:"maxLength,omitempty"`
+	MaxLength    *int            `json:"maxLength,omitempty"`
+	MaxGraphemes *int            `json:"maxGraphemes,omitempty"`
 	Enum        []string        `json:"enum,omitempty"`
 	Const       string          `json:"const,omitempty"`
 	KnownValues []string        `json:"knownValues,omitempty"`
@@ -272,7 +273,8 @@ func parseProperty(data json.RawMessage) (*Property, error) {
 		Minimum:     raw.Minimum,
 		Maximum:     raw.Maximum,
 		MinLength:   raw.MinLength,
-		MaxLength:   raw.MaxLength,
+		MaxLength:    raw.MaxLength,
+		MaxGraphemes: raw.MaxGraphemes,
 		Enum:        raw.Enum,
 		Const:       raw.Const,
 		KnownValues: raw.KnownValues,
