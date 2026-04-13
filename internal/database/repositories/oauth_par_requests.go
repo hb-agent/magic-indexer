@@ -22,21 +22,11 @@ func NewOAuthPARRequestsRepository(db database.Executor) *OAuthPARRequestsReposi
 
 // Insert creates a new PAR request.
 func (r *OAuthPARRequestsRepository) Insert(ctx context.Context, par *oauth.PARRequest) error {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO oauth_par_request (
-			request_uri, authorization_request, client_id, created_at, expires_at, subject, metadata
-		) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4),
-			r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7))
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO oauth_par_request (
-			request_uri, authorization_request, client_id, created_at, expires_at, subject, metadata
-		) VALUES (%s, %s, %s, %s, %s, %s, %s)`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4),
-			r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7))
-	}
+	sqlStr := fmt.Sprintf(`INSERT INTO oauth_par_request (
+		request_uri, authorization_request, client_id, created_at, expires_at, subject, metadata
+	) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4),
+		r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7))
 
 	params := []database.Value{
 		database.Text(par.RequestURI),
@@ -54,15 +44,8 @@ func (r *OAuthPARRequestsRepository) Insert(ctx context.Context, par *oauth.PARR
 
 // Get retrieves a PAR request by request URI.
 func (r *OAuthPARRequestsRepository) Get(ctx context.Context, requestURI string) (*oauth.PARRequest, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`SELECT request_uri, authorization_request, client_id, created_at, expires_at, subject, metadata::text
-		FROM oauth_par_request WHERE request_uri = %s`, r.db.Placeholder(1))
-	default:
-		sqlStr = fmt.Sprintf(`SELECT request_uri, authorization_request, client_id, created_at, expires_at, subject, metadata
-		FROM oauth_par_request WHERE request_uri = %s`, r.db.Placeholder(1))
-	}
+	sqlStr := fmt.Sprintf(`SELECT request_uri, authorization_request, client_id, created_at, expires_at, subject, metadata::text
+	FROM oauth_par_request WHERE request_uri = %s`, r.db.Placeholder(1))
 
 	var (
 		par     oauth.PARRequest

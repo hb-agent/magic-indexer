@@ -63,18 +63,10 @@ func NewReportsRepository(db database.Executor) *ReportsRepository {
 
 // Insert creates a new report.
 func (r *ReportsRepository) Insert(ctx context.Context, reporterDID, subjectURI string, reasonType ReportReasonType, reason *string) (*Report, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO report (reporter_did, subject_uri, reason_type, reason)
-			VALUES (%s, %s, %s, %s)
-			RETURNING id, reporter_did, subject_uri, reason_type, reason, status, resolved_by, resolved_at, created_at`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO report (reporter_did, subject_uri, reason_type, reason)
-			VALUES (%s, %s, %s, %s)`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
-	}
+	sqlStr := fmt.Sprintf(`INSERT INTO report (reporter_did, subject_uri, reason_type, reason)
+		VALUES (%s, %s, %s, %s)
+		RETURNING id, reporter_did, subject_uri, reason_type, reason, status, resolved_by, resolved_at, created_at`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
 
 	params := []database.Value{
 		database.Text(reporterDID),
@@ -83,39 +75,29 @@ func (r *ReportsRepository) Insert(ctx context.Context, reporterDID, subjectURI 
 		database.NullableText(reason),
 	}
 
-	if r.db.Dialect() == database.PostgreSQL {
-		var report Report
-		var reasonNull, resolvedByNull, resolvedAtNull sql.NullString
-		var createdAtStr string
+	var report Report
+	var reasonNull, resolvedByNull, resolvedAtNull sql.NullString
+	var createdAtStr string
 
-		err := r.db.QueryRow(ctx, sqlStr, params,
-			&report.ID, &report.ReporterDID, &report.SubjectURI, &report.ReasonType,
-			&reasonNull, &report.Status, &resolvedByNull, &resolvedAtNull, &createdAtStr)
-		if err != nil {
-			return nil, err
-		}
-
-		if reasonNull.Valid {
-			report.Reason = &reasonNull.String
-		}
-		if resolvedByNull.Valid {
-			report.ResolvedBy = &resolvedByNull.String
-		}
-		if resolvedAtNull.Valid {
-			t, _ := time.Parse(time.RFC3339, resolvedAtNull.String)
-			report.ResolvedAt = &t
-		}
-		report.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-		return &report, nil
-	}
-
-	result, err := r.db.Exec(ctx, sqlStr, params)
+	err := r.db.QueryRow(ctx, sqlStr, params,
+		&report.ID, &report.ReporterDID, &report.SubjectURI, &report.ReasonType,
+		&reasonNull, &report.Status, &resolvedByNull, &resolvedAtNull, &createdAtStr)
 	if err != nil {
 		return nil, err
 	}
-	id, _ := result.LastInsertId()
 
-	return r.Get(ctx, id)
+	if reasonNull.Valid {
+		report.Reason = &reasonNull.String
+	}
+	if resolvedByNull.Valid {
+		report.ResolvedBy = &resolvedByNull.String
+	}
+	if resolvedAtNull.Valid {
+		t, _ := time.Parse(time.RFC3339, resolvedAtNull.String)
+		report.ResolvedAt = &t
+	}
+	report.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
+	return &report, nil
 }
 
 // Get retrieves a report by ID.
@@ -216,19 +198,10 @@ func (r *ReportsRepository) GetPaginated(ctx context.Context, statusFilter *Repo
 
 // Resolve updates a report's status and resolution details.
 func (r *ReportsRepository) Resolve(ctx context.Context, id int64, status ReportStatus, resolvedBy string) (*Report, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`UPDATE report 
-			SET status = %s, resolved_by = %s, resolved_at = NOW()
-			WHERE id = %s`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
-	default:
-		sqlStr = fmt.Sprintf(`UPDATE report 
-			SET status = %s, resolved_by = %s, resolved_at = datetime('now')
-			WHERE id = %s`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
-	}
+	sqlStr := fmt.Sprintf(`UPDATE report
+		SET status = %s, resolved_by = %s, resolved_at = NOW()
+		WHERE id = %s`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
 
 	params := []database.Value{
 		database.Text(string(status)),

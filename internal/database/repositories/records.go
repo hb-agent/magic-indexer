@@ -21,7 +21,7 @@ const (
 	// BatchInsertSize is the number of records per INSERT batch (5 params each = 500 SQL params).
 	BatchInsertSize = 100
 
-	// SQLParamBatchSize is the batch size for IN-clause queries, kept under SQLite's 999 param limit.
+	// SQLParamBatchSize is the batch size for IN-clause queries.
 	SQLParamBatchSize = 900
 
 	// DefaultIterateBatchSize is the default batch size for IterateAll when none specified.
@@ -78,14 +78,9 @@ func NewRecordsRepository(db database.Executor) *RecordsRepository {
 	return &RecordsRepository{db: db}
 }
 
-// recordColumns returns the columns to select based on dialect.
+// recordColumns returns the columns to select.
 func (r *RecordsRepository) recordColumns() string {
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		return "uri, cid, did, collection, json::text, indexed_at::text, rkey"
-	default:
-		return "uri, cid, did, collection, json, indexed_at, rkey"
-	}
+	return "uri, cid, did, collection, json::text, indexed_at::text, rkey"
 }
 
 // Insert inserts or updates a record in the database.
@@ -99,25 +94,13 @@ func (r *RecordsRepository) Insert(ctx context.Context, uri, cid, did, collectio
 
 	// ON CONFLICT … WHERE filters out same-CID re-inserts so that
 	// RowsAffected == 0 when content is unchanged.
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO record (uri, cid, did, collection, json)
-			VALUES (%s, %s, %s, %s, %s::jsonb)
-			ON CONFLICT(uri) DO UPDATE SET
-				cid = EXCLUDED.cid,
-				json = EXCLUDED.json,
-				indexed_at = NOW()
-			WHERE record.cid IS DISTINCT FROM EXCLUDED.cid`, p1, p2, p3, p4, p5)
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO record (uri, cid, did, collection, json)
-			VALUES (%s, %s, %s, %s, %s)
-			ON CONFLICT(uri) DO UPDATE SET
-				cid = excluded.cid,
-				json = excluded.json,
-				indexed_at = datetime('now')
-			WHERE record.cid != excluded.cid`, p1, p2, p3, p4, p5)
-	}
+	sqlStr := fmt.Sprintf(`INSERT INTO record (uri, cid, did, collection, json)
+		VALUES (%s, %s, %s, %s, %s::jsonb)
+		ON CONFLICT(uri) DO UPDATE SET
+			cid = EXCLUDED.cid,
+			json = EXCLUDED.json,
+			indexed_at = NOW()
+		WHERE record.cid IS DISTINCT FROM EXCLUDED.cid`, p1, p2, p3, p4, p5)
 
 	res, err := r.db.Exec(ctx, sqlStr, []database.Value{
 		database.Text(uri),
@@ -180,47 +163,24 @@ func (r *RecordsRepository) insertBatchTx(ctx context.Context, tx *sql.Tx, recor
 
 	for i, rec := range records {
 		base := i * 5
-		var valueSet string
-
-		if r.db.Dialect() == database.PostgreSQL {
-			valueSet = fmt.Sprintf("(%s, %s, %s, %s, %s::jsonb)",
-				r.db.Placeholder(base+1),
-				r.db.Placeholder(base+2),
-				r.db.Placeholder(base+3),
-				r.db.Placeholder(base+4),
-				r.db.Placeholder(base+5))
-		} else {
-			valueSet = fmt.Sprintf("(%s, %s, %s, %s, %s)",
-				r.db.Placeholder(base+1),
-				r.db.Placeholder(base+2),
-				r.db.Placeholder(base+3),
-				r.db.Placeholder(base+4),
-				r.db.Placeholder(base+5))
-		}
+		valueSet := fmt.Sprintf("(%s, %s, %s, %s, %s::jsonb)",
+			r.db.Placeholder(base+1),
+			r.db.Placeholder(base+2),
+			r.db.Placeholder(base+3),
+			r.db.Placeholder(base+4),
+			r.db.Placeholder(base+5))
 		valueSets = append(valueSets, valueSet)
 
 		args = append(args, rec.URI, rec.CID, rec.DID, rec.Collection, rec.JSON)
 	}
 
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO record (uri, cid, did, collection, json)
-			VALUES %s
-			ON CONFLICT(uri) DO UPDATE SET
-				cid = EXCLUDED.cid,
-				json = EXCLUDED.json,
-				indexed_at = NOW()
-			WHERE record.cid IS DISTINCT FROM EXCLUDED.cid`, strings.Join(valueSets, ", "))
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO record (uri, cid, did, collection, json)
-			VALUES %s
-			ON CONFLICT(uri) DO UPDATE SET
-				cid = excluded.cid,
-				json = excluded.json,
-				indexed_at = datetime('now')
-			WHERE record.cid != excluded.cid`, strings.Join(valueSets, ", "))
-	}
+	sqlStr := fmt.Sprintf(`INSERT INTO record (uri, cid, did, collection, json)
+		VALUES %s
+		ON CONFLICT(uri) DO UPDATE SET
+			cid = EXCLUDED.cid,
+			json = EXCLUDED.json,
+			indexed_at = NOW()
+		WHERE record.cid IS DISTINCT FROM EXCLUDED.cid`, strings.Join(valueSets, ", "))
 
 	_, err := tx.ExecContext(ctx, sqlStr, args...)
 	return err
@@ -355,9 +315,7 @@ func (f LabelFilter) IsEmpty() bool {
 }
 
 // MaxAuthorsFilterSize is the server-enforced cap on the number of DIDs
-// passed in the Authors filter. Chosen to stay comfortably under SQLite's
-// default 999-parameter limit (even when composed with other filters and
-// keyset cursor params) and to keep Postgres planner estimates honest —
+// passed in the Authors filter. Keeps Postgres planner estimates honest —
 // at very large IN-list sizes the planner may switch to less efficient
 // scan strategies. Trust sets larger than this should be shrunk on the
 // client side before querying; the trust graph at this scale is either a
@@ -424,8 +382,7 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 		return nil, nil
 	}
 
-	// Enforce the DID-list size cap before touching the DB so a
-	// misbehaving client cannot trip SQLite's parameter ceiling.
+	// Enforce the DID-list size cap before touching the DB.
 	if len(filter.Authors) > MaxAuthorsFilterSize {
 		return nil, ErrAuthorsFilterTooLarge
 	}
@@ -458,22 +415,16 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 		paramIdx++
 		return s
 	}
-	// Postgres stores neg as BOOLEAN; SQLite as INTEGER. Use
-	// dialect-correct literals so the query plans correctly on both.
-	negFalse, negTrue := "0", "1"
-	nowLit := "datetime('now')"
-	if r.db.Dialect() == database.PostgreSQL {
-		negFalse, negTrue = "false", "true"
-		nowLit = "NOW()"
-	}
+	negFalse, negTrue := "false", "true"
+	nowLit := "NOW()"
 
 	// collection = ?
 	whereClauses = append(whereClauses, fmt.Sprintf("r.collection = %s", ph()))
 	args = append(args, collection)
 
 	// authors: r.did IN (?, ?, ...). Placeholders are generated in
-	// input order so SQLite positional binding and Postgres numeric
-	// binding match. `authors` has already been deduped and sorted
+	// input order so Postgres numeric binding matches. `authors` has
+	// already been deduped and sorted
 	// above, and capped at MaxAuthorsFilterSize. An empty slice would
 	// have short-circuited above; a nil slice falls through with no
 	// clause appended.
@@ -499,8 +450,8 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 
 	// labelFilterSub builds an EXISTS / NOT EXISTS subquery for the
 	// Include or Exclude set. The placeholders are generated in the
-	// same order as they appear in the SQL text so SQLite positional
-	// binding and Postgres numeric binding both match up. An empty
+	// same order as they appear in the SQL text so Postgres numeric
+	// binding matches up. An empty
 	// LabelerSrcs list means "any labeler".
 	labelFilterSub := func(vals []string, exists bool) string {
 		valPhs := make([]string, len(vals))
@@ -690,38 +641,18 @@ func (r *RecordsRepository) GetCollectionStatsFiltered(ctx context.Context, coll
 // GetCollectionTimeSeries returns time series data for a collection.
 // Records are grouped by date extracted from createdAt, eventDate, or indexed_at.
 func (r *RecordsRepository) GetCollectionTimeSeries(ctx context.Context, collection string) (*CollectionTimeSeries, error) {
-	var sqlStr string
-
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		// PostgreSQL: Extract date from JSON fields or fall back to indexed_at
-		sqlStr = fmt.Sprintf(`
-			SELECT 
-				DATE(COALESCE(
-					(json->>'createdAt')::timestamp,
-					(json->>'eventDate')::timestamp,
-					indexed_at
-				)) as record_date,
-				COUNT(*) as count
-			FROM record 
-			WHERE collection = %s
-			GROUP BY record_date
-			ORDER BY record_date`, r.db.Placeholder(1))
-	default:
-		// SQLite: Use json_extract for JSON fields
-		sqlStr = fmt.Sprintf(`
-			SELECT 
-				DATE(COALESCE(
-					json_extract(json, '$.createdAt'),
-					json_extract(json, '$.eventDate'),
-					indexed_at
-				)) as record_date,
-				COUNT(*) as count
-			FROM record 
-			WHERE collection = %s
-			GROUP BY record_date
-			ORDER BY record_date`, r.db.Placeholder(1))
-	}
+	sqlStr := fmt.Sprintf(`
+		SELECT
+			DATE(COALESCE(
+				(json->>'createdAt')::timestamp,
+				(json->>'eventDate')::timestamp,
+				indexed_at
+			)) as record_date,
+			COUNT(*) as count
+		FROM record
+		WHERE collection = %s
+		GROUP BY record_date
+		ORDER BY record_date`, r.db.Placeholder(1))
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, collection)
 	if err != nil {

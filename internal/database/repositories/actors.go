@@ -33,21 +33,11 @@ func (r *ActorsRepository) Upsert(ctx context.Context, did, handle string) error
 	p1 := r.db.Placeholder(1)
 	p2 := r.db.Placeholder(2)
 
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO actor (did, handle, indexed_at)
-			VALUES (%s, %s, NOW())
-			ON CONFLICT(did) DO UPDATE SET
-				handle = EXCLUDED.handle,
-				indexed_at = NOW()`, p1, p2)
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO actor (did, handle, indexed_at)
-			VALUES (%s, %s, datetime('now'))
-			ON CONFLICT(did) DO UPDATE SET
-				handle = excluded.handle,
-				indexed_at = datetime('now')`, p1, p2)
-	}
+	sqlStr := fmt.Sprintf(`INSERT INTO actor (did, handle, indexed_at)
+		VALUES (%s, %s, NOW())
+		ON CONFLICT(did) DO UPDATE SET
+			handle = EXCLUDED.handle,
+			indexed_at = NOW()`, p1, p2)
 
 	_, err := r.db.Exec(ctx, sqlStr, []database.Value{
 		database.Text(did),
@@ -92,17 +82,9 @@ func (r *ActorsRepository) batchUpsertChunk(ctx context.Context, actors []ActorD
 
 	for i, actor := range actors {
 		base := i * 2
-		var valueSet string
-
-		if r.db.Dialect() == database.PostgreSQL {
-			valueSet = fmt.Sprintf("(%s, %s, NOW())",
-				r.db.Placeholder(base+1),
-				r.db.Placeholder(base+2))
-		} else {
-			valueSet = fmt.Sprintf("(%s, %s, datetime('now'))",
-				r.db.Placeholder(base+1),
-				r.db.Placeholder(base+2))
-		}
+		valueSet := fmt.Sprintf("(%s, %s, NOW())",
+			r.db.Placeholder(base+1),
+			r.db.Placeholder(base+2))
 		valueSets = append(valueSets, valueSet)
 
 		params = append(params,
@@ -111,21 +93,11 @@ func (r *ActorsRepository) batchUpsertChunk(ctx context.Context, actors []ActorD
 		)
 	}
 
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO actor (did, handle, indexed_at)
-			VALUES %s
-			ON CONFLICT(did) DO UPDATE SET
-				handle = EXCLUDED.handle,
-				indexed_at = NOW()`, strings.Join(valueSets, ", "))
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO actor (did, handle, indexed_at)
-			VALUES %s
-			ON CONFLICT(did) DO UPDATE SET
-				handle = excluded.handle,
-				indexed_at = datetime('now')`, strings.Join(valueSets, ", "))
-	}
+	sqlStr := fmt.Sprintf(`INSERT INTO actor (did, handle, indexed_at)
+		VALUES %s
+		ON CONFLICT(did) DO UPDATE SET
+			handle = EXCLUDED.handle,
+			indexed_at = NOW()`, strings.Join(valueSets, ", "))
 
 	_, err := r.db.Exec(ctx, sqlStr, params)
 	return err
@@ -133,15 +105,8 @@ func (r *ActorsRepository) batchUpsertChunk(ctx context.Context, actors []ActorD
 
 // GetByDID retrieves an actor by their DID.
 func (r *ActorsRepository) GetByDID(ctx context.Context, did string) (*Actor, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf("SELECT did, handle, indexed_at::text FROM actor WHERE did = %s",
-			r.db.Placeholder(1))
-	default:
-		sqlStr = fmt.Sprintf("SELECT did, handle, indexed_at FROM actor WHERE did = %s",
-			r.db.Placeholder(1))
-	}
+	sqlStr := fmt.Sprintf("SELECT did, handle, indexed_at::text FROM actor WHERE did = %s",
+		r.db.Placeholder(1))
 
 	var actor Actor
 	var indexedAtStr string
@@ -157,15 +122,8 @@ func (r *ActorsRepository) GetByDID(ctx context.Context, did string) (*Actor, er
 
 // GetByHandle retrieves an actor by their handle.
 func (r *ActorsRepository) GetByHandle(ctx context.Context, handle string) (*Actor, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf("SELECT did, handle, indexed_at::text FROM actor WHERE handle = %s",
-			r.db.Placeholder(1))
-	default:
-		sqlStr = fmt.Sprintf("SELECT did, handle, indexed_at FROM actor WHERE handle = %s",
-			r.db.Placeholder(1))
-	}
+	sqlStr := fmt.Sprintf("SELECT did, handle, indexed_at::text FROM actor WHERE handle = %s",
+		r.db.Placeholder(1))
 
 	var actor Actor
 	var indexedAtStr string

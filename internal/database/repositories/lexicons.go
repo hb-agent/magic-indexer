@@ -32,19 +32,10 @@ func (r *LexiconsRepository) Upsert(ctx context.Context, id, jsonData string) er
 	p1 := r.db.Placeholder(1)
 	p2 := r.db.Placeholder(2)
 
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO lexicon (id, json)
-			VALUES (%s, %s::jsonb)
-			ON CONFLICT(id) DO UPDATE SET
-				json = EXCLUDED.json`, p1, p2)
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO lexicon (id, json)
-			VALUES (%s, %s)
-			ON CONFLICT(id) DO UPDATE SET
-				json = excluded.json`, p1, p2)
-	}
+	sqlStr := fmt.Sprintf(`INSERT INTO lexicon (id, json)
+		VALUES (%s, %s::jsonb)
+		ON CONFLICT(id) DO UPDATE SET
+			json = EXCLUDED.json`, p1, p2)
 
 	_, err := r.db.Exec(ctx, sqlStr, []database.Value{
 		database.Text(id),
@@ -55,15 +46,8 @@ func (r *LexiconsRepository) Upsert(ctx context.Context, id, jsonData string) er
 
 // GetByID retrieves a lexicon by its ID.
 func (r *LexiconsRepository) GetByID(ctx context.Context, id string) (*Lexicon, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf("SELECT id, json::text, created_at::text FROM lexicon WHERE id = %s",
-			r.db.Placeholder(1))
-	default:
-		sqlStr = fmt.Sprintf("SELECT id, json, created_at FROM lexicon WHERE id = %s",
-			r.db.Placeholder(1))
-	}
+	sqlStr := fmt.Sprintf("SELECT id, json::text, created_at::text FROM lexicon WHERE id = %s",
+		r.db.Placeholder(1))
 
 	var lex Lexicon
 	var createdAtStr string
@@ -79,13 +63,7 @@ func (r *LexiconsRepository) GetByID(ctx context.Context, id string) (*Lexicon, 
 
 // GetAll retrieves all lexicons.
 func (r *LexiconsRepository) GetAll(ctx context.Context) ([]*Lexicon, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = "SELECT id, json::text, created_at::text FROM lexicon ORDER BY id"
-	default:
-		sqlStr = "SELECT id, json, created_at FROM lexicon ORDER BY id"
-	}
+	sqlStr := "SELECT id, json::text, created_at::text FROM lexicon ORDER BY id"
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr)
 	if err != nil {

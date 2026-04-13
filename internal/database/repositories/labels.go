@@ -40,32 +40,11 @@ func NewLabelsRepository(db database.Executor) *LabelsRepository {
 	return &LabelsRepository{db: db}
 }
 
-// negLiterals returns the dialect-correct string literals for the false
-// and true values of the `neg` column. SQLite stores neg as INTEGER so
-// "0"/"1" work, while Postgres defines it as BOOLEAN and requires
-// "false"/"true" (comparisons against integers raise a type error).
-func (r *LabelsRepository) negLiterals() (negFalse, negTrue string) {
-	if r.db.Dialect() == database.PostgreSQL {
-		return "false", "true"
-	}
-	return "0", "1"
-}
-
-// nowLiteral returns the SQL expression for "current time" in the
-// active dialect. Used by active-label filters so that expired labels
-// (l.exp < now) are treated as inactive without a separate cleanup job.
-func (r *LabelsRepository) nowLiteral() string {
-	if r.db.Dialect() == database.PostgreSQL {
-		return "NOW()"
-	}
-	return "datetime('now')"
-}
-
 // parseStoredTime parses a timestamp string that may have been written
-// by this code (UTC RFC3339Nano), by Postgres' TIMESTAMPTZ serializer
-// (RFC3339 with offset, no fractional seconds), or by SQLite's
-// datetime('now') default ("YYYY-MM-DD HH:MM:SS"). Returns the zero
-// time on unrecognized input; callers fall back to defaults via
+// by this code (UTC RFC3339Nano) or by Postgres' TIMESTAMPTZ serializer
+// (RFC3339 with offset, no fractional seconds). Also handles the
+// "YYYY-MM-DD HH:MM:SS" format for legacy data. Returns the zero time
+// on unrecognized input; callers fall back to defaults via
 // time.IsZero() if needed.
 func parseStoredTime(s string) time.Time {
 	if s == "" {
@@ -88,10 +67,7 @@ func parseStoredTime(s string) time.Time {
 // If cts is non-nil, it is stored as the label's canonical timestamp.
 // If cts is nil (e.g. labels authored locally via the admin API) the
 // current time is used. In either case the value is always written as
-// a UTC RFC3339Nano string so that text ordering across SQLite and
-// Postgres is consistent — avoiding the lexicographic mismatch that
-// would occur if we left some rows with the DB default (which renders
-// as "YYYY-MM-DD HH:MM:SS" on SQLite) and others with RFC3339.
+// a UTC RFC3339Nano string for consistent text ordering.
 func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *string, val string, cts, exp *time.Time) (*Label, error) {
 	var sqlStr string
 	var expStr *string
@@ -107,23 +83,14 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 	ctsStr := effectiveCts.UTC().Format(time.RFC3339Nano)
 
 	// Partial unique indexes (see migration 007) make ON CONFLICT DO
-	// NOTHING actually fire on both dialects, so re-ingesting a label
-	// during a backfill/stream overlap is idempotent.
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, cts, exp)
-			VALUES (%s, %s, %s, %s, %s, %s)
-			ON CONFLICT (src, uri, val, COALESCE(cid, '')) WHERE neg = false DO NOTHING
-			RETURNING id, src, uri, cid, val, neg, cts, exp`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-			r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, cts, exp)
-			VALUES (%s, %s, %s, %s, %s, %s)
-			ON CONFLICT DO NOTHING`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-			r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
-	}
+	// NOTHING actually fire, so re-ingesting a label during a
+	// backfill/stream overlap is idempotent.
+	sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, cts, exp)
+		VALUES (%s, %s, %s, %s, %s, %s)
+		ON CONFLICT (src, uri, val, COALESCE(cid, '')) WHERE neg = false DO NOTHING
+		RETURNING id, src, uri, cid, val, neg, cts, exp`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
+		r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
 
 	params := []database.Value{
 		database.Text(src),
@@ -134,46 +101,31 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 		database.NullableText(expStr),
 	}
 
-	if r.db.Dialect() == database.PostgreSQL {
-		var label Label
-		var retCtsStr string
-		var cidNull, expNull sql.NullString
-		var neg bool
-		err := r.db.QueryRow(ctx, sqlStr, params,
-			&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull)
-		if err != nil {
-			// ON CONFLICT DO NOTHING → zero rows returned → sql.ErrNoRows.
-			// Treat as an idempotent success: look up the existing row so
-			// callers still receive a populated Label.
-			if errors.Is(err, sql.ErrNoRows) {
-				return r.findExistingAssertion(ctx, src, uri, val, cid)
-			}
-			return nil, err
-		}
-		label.Neg = neg
-		label.Cts = parseStoredTime(retCtsStr)
-		if cidNull.Valid {
-			label.CID = &cidNull.String
-		}
-		if expNull.Valid {
-			t := parseStoredTime(expNull.String)
-			label.Exp = &t
-		}
-		return &label, nil
-	}
-
-	result, err := r.db.Exec(ctx, sqlStr, params)
+	var label Label
+	var retCtsStr string
+	var cidNull, expNull sql.NullString
+	var neg bool
+	err := r.db.QueryRow(ctx, sqlStr, params,
+		&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull)
 	if err != nil {
+		// ON CONFLICT DO NOTHING → zero rows returned → sql.ErrNoRows.
+		// Treat as an idempotent success: look up the existing row so
+		// callers still receive a populated Label.
+		if errors.Is(err, sql.ErrNoRows) {
+			return r.findExistingAssertion(ctx, src, uri, val, cid)
+		}
 		return nil, err
 	}
-	id, _ := result.LastInsertId()
-	if id == 0 {
-		// SQLite returns LastInsertId == 0 when ON CONFLICT DO NOTHING
-		// suppressed the insert. Look up the existing row.
-		return r.findExistingAssertion(ctx, src, uri, val, cid)
+	label.Neg = neg
+	label.Cts = parseStoredTime(retCtsStr)
+	if cidNull.Valid {
+		label.CID = &cidNull.String
 	}
-
-	return r.GetByID(ctx, id)
+	if expNull.Valid {
+		t := parseStoredTime(expNull.String)
+		label.Exp = &t
+	}
+	return &label, nil
 }
 
 // findExistingAssertion returns the current active (non-negated) label for
@@ -181,7 +133,7 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 // existed" branch of ON CONFLICT DO NOTHING so Insert always returns a
 // populated Label for callers.
 func (r *LabelsRepository) findExistingAssertion(ctx context.Context, src, uri, val string, cid *string) (*Label, error) {
-	negFalse, _ := r.negLiterals()
+	negFalse := "false"
 	var sqlStr string
 	var params []database.Value
 	if cid == nil {
@@ -220,9 +172,8 @@ func (r *LabelsRepository) findExistingAssertion(ctx context.Context, src, uri, 
 
 // InsertNegation creates a negation (retraction) label.
 //
-// Like Insert, cts is always persisted in UTC RFC3339Nano format so that
-// text ordering is consistent across dialects. If cts is nil the current
-// time is used.
+// Like Insert, cts is always persisted in UTC RFC3339Nano format for
+// consistent text ordering. If cts is nil the current time is used.
 func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val string, cts *time.Time) (*Label, error) {
 	effectiveCts := cts
 	if effectiveCts == nil {
@@ -231,22 +182,13 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 	}
 	ctsStr := effectiveCts.UTC().Format(time.RFC3339Nano)
 
-	_, negTrue := r.negLiterals()
+	negTrue := "true"
 
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
-			VALUES (%s, %s, %s, %s, %s)
-			ON CONFLICT (src, uri, val) WHERE neg = true DO NOTHING
-			RETURNING id, src, uri, cid, val, neg, cts, exp`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), negTrue, r.db.Placeholder(4))
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
-			VALUES (%s, %s, %s, %s, %s)
-			ON CONFLICT DO NOTHING`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), negTrue, r.db.Placeholder(4))
-	}
+	sqlStr := fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
+		VALUES (%s, %s, %s, %s, %s)
+		ON CONFLICT (src, uri, val) WHERE neg = true DO NOTHING
+		RETURNING id, src, uri, cid, val, neg, cts, exp`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), negTrue, r.db.Placeholder(4))
 
 	params := []database.Value{
 		database.Text(src),
@@ -255,45 +197,32 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 		database.Text(ctsStr),
 	}
 
-	if r.db.Dialect() == database.PostgreSQL {
-		var label Label
-		var retCtsStr string
-		var cidNull, expNull sql.NullString
-		var neg bool
-		err := r.db.QueryRow(ctx, sqlStr, params,
-			&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return r.findExistingNegation(ctx, src, uri, val)
-			}
-			return nil, err
-		}
-		label.Neg = neg
-		label.Cts = parseStoredTime(retCtsStr)
-		if cidNull.Valid {
-			label.CID = &cidNull.String
-		}
-		_ = expNull // InsertNegation does not set exp
-		return &label, nil
-	}
-
-	result, err := r.db.Exec(ctx, sqlStr, params)
+	var label Label
+	var retCtsStr string
+	var cidNull, expNull sql.NullString
+	var neg bool
+	err := r.db.QueryRow(ctx, sqlStr, params,
+		&label.ID, &label.Src, &label.URI, &cidNull, &label.Val, &neg, &retCtsStr, &expNull)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return r.findExistingNegation(ctx, src, uri, val)
+		}
 		return nil, err
 	}
-	id, _ := result.LastInsertId()
-	if id == 0 {
-		return r.findExistingNegation(ctx, src, uri, val)
+	label.Neg = neg
+	label.Cts = parseStoredTime(retCtsStr)
+	if cidNull.Valid {
+		label.CID = &cidNull.String
 	}
-
-	return r.GetByID(ctx, id)
+	_ = expNull // InsertNegation does not set exp
+	return &label, nil
 }
 
 // findExistingNegation returns the current negation row for the given
 // (src, uri, val) tuple. Used to resolve the ON CONFLICT DO NOTHING
 // branch of InsertNegation.
 func (r *LabelsRepository) findExistingNegation(ctx context.Context, src, uri, val string) (*Label, error) {
-	_, negTrue := r.negLiterals()
+	negTrue := "true"
 	sqlStr := fmt.Sprintf(`SELECT id, src, uri, cid, val, neg, cts, exp FROM label
 		WHERE src = %s AND uri = %s AND val = %s AND neg = %s
 		ORDER BY id DESC LIMIT 1`,
@@ -374,8 +303,8 @@ func (r *LabelsRepository) GetByURIs(ctx context.Context, uris []string) ([]Labe
 	}
 
 	placeholders := r.db.Placeholders(len(uris), 1)
-	negFalse, negTrue := r.negLiterals()
-	now := r.nowLiteral()
+	negFalse, negTrue := "false", "true"
+	now := "NOW()"
 	// Get only labels that haven't been negated. The negation check uses
 	// cts (the labeler's canonical timestamp) rather than the local
 	// auto-increment id, so a backfilled negation with an earlier wire
@@ -478,7 +407,7 @@ func (r *LabelsRepository) GetPaginated(ctx context.Context, uriFilter, valFilte
 // multi-labeler deployment this lets operators scope which labelers
 // can initiate a takedown across the whole index.
 func (r *LabelsRepository) HasTakedown(ctx context.Context, uri string, allowedSrcs []string) (bool, error) {
-	negFalse, negTrue := r.negLiterals()
+	negFalse, negTrue := "false", "true"
 
 	params := []database.Value{database.Text(uri)}
 	paramIdx := 2
@@ -500,7 +429,7 @@ func (r *LabelsRepository) HasTakedown(ctx context.Context, uri string, allowedS
 			SELECT 1 FROM label neg
 			WHERE neg.uri = label.uri AND neg.src = label.src AND neg.val = '!takedown'
 			  AND neg.neg = %s AND neg.cts >= label.cts
-		)`, r.db.Placeholder(1), negFalse, srcClause, r.nowLiteral(), negTrue)
+		)`, r.db.Placeholder(1), negFalse, srcClause, "NOW()", negTrue)
 
 	var count int64
 	err := r.db.QueryRow(ctx, sqlStr, params, &count)
@@ -518,7 +447,7 @@ func (r *LabelsRepository) GetTakedownURIs(ctx context.Context, uris, allowedSrc
 		return nil, nil
 	}
 
-	negFalse, negTrue := r.negLiterals()
+	negFalse, negTrue := "false", "true"
 
 	uriPhs := make([]string, len(uris))
 	params := make([]any, 0, len(uris)+len(allowedSrcs))
@@ -544,7 +473,7 @@ func (r *LabelsRepository) GetTakedownURIs(ctx context.Context, uris, allowedSrc
 			SELECT 1 FROM label neg
 			WHERE neg.uri = l.uri AND neg.src = l.src AND neg.val = '!takedown'
 			  AND neg.neg = %s AND neg.cts >= l.cts
-		)`, strings.Join(uriPhs, ", "), negFalse, srcClause, r.nowLiteral(), negTrue)
+		)`, strings.Join(uriPhs, ", "), negFalse, srcClause, "NOW()", negTrue)
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, params...)
 	if err != nil {
