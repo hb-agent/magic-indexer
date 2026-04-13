@@ -40,9 +40,9 @@ import (
 	"github.com/GainForest/hypergoat/internal/labeler"
 	"github.com/GainForest/hypergoat/internal/lexicon"
 	"github.com/GainForest/hypergoat/internal/metrics"
-	"github.com/GainForest/hypergoat/internal/tap"
 	"github.com/GainForest/hypergoat/internal/oauth"
 	"github.com/GainForest/hypergoat/internal/server"
+	"github.com/GainForest/hypergoat/internal/tap"
 	"github.com/GainForest/hypergoat/internal/workers"
 )
 

@@ -512,10 +512,10 @@ func (b *Builder) resolveRecordConnection(
 	if sortField == "" {
 		sortField = "indexed_at"
 	}
-	sortDir, _ := p.Args["orderDirection"].(string)
-	if sortDir == "" {
-		sortDir = "DESC"
-	}
+	// TODO: Wire sortDir into repository query when sort-aware keyset
+	// pagination is implemented for non-default orderBy fields.
+	// sortDir, _ := p.Args["orderDirection"].(string)
+	_ = p.Args["orderDirection"] // acknowledged, wired when repo layer supports it
 
 	// Decode cursor if provided.
 	var cursorSortValue, cursorURI string
@@ -990,7 +990,6 @@ func emptyConnection() map[string]interface{} {
 	}
 }
 
-// encodeCursor encodes a composite (indexed_at, uri) cursor as base64.
 // isTotalCountRequested checks the GraphQL query AST to determine if the
 // client selected the totalCount field. Only runs the COUNT query when true.
 func isTotalCountRequested(p graphql.ResolveParams) bool {
@@ -1014,11 +1013,6 @@ func encodeCursorV2(sortField, sortValue, uri string) string {
 	return base64.URLEncoding.EncodeToString(data)
 }
 
-// encodeCursor encodes a legacy-format cursor for backward compatibility.
-func encodeCursor(indexedAt, uri string) string {
-	return encodeCursorV2("indexed_at", indexedAt, uri)
-}
-
 // decodeCursorV2 decodes a cursor, supporting both new JSON array format
 // and legacy pipe-delimited format.
 // Returns (sortField, sortValue, uri, error).
@@ -1040,13 +1034,6 @@ func decodeCursorV2(cursor string) (string, string, string, error) {
 		return "", "", "", fmt.Errorf("malformed cursor")
 	}
 	return "indexed_at", parts[0], parts[1], nil
-}
-
-// decodeCursor decodes a cursor into (sortValue, uri) for backward compatibility.
-// Uses the V2 decoder internally.
-func decodeCursor(cursor string) (string, string, error) {
-	_, sortValue, uri, err := decodeCursorV2(cursor)
-	return sortValue, uri, err
 }
 
 // GetRecordType returns the GraphQL type for a record.

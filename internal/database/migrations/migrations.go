@@ -118,8 +118,8 @@ func applyMigrationTx(ctx context.Context, exec database.Executor, m Migration) 
 // isNonTransactional checks if a migration SQL starts with the "-- no-transaction"
 // sentinel comment. Such migrations cannot run inside a transaction (e.g., CREATE
 // INDEX CONCURRENTLY in PostgreSQL).
-func isNonTransactional(sql string) bool {
-	return strings.HasPrefix(strings.TrimSpace(sql), "-- no-transaction")
+func isNonTransactional(sqlText string) bool {
+	return strings.HasPrefix(strings.TrimSpace(sqlText), "-- no-transaction")
 }
 
 // applyMigrationNoTx applies a migration outside a transaction. Used for

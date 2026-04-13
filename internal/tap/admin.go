@@ -30,7 +30,7 @@ func NewAdminClient(baseURL, password string) *AdminClient {
 
 // Health checks if the Tap sidecar is healthy.
 func (c *AdminClient) Health(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/health", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/health", http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func (c *AdminClient) AddRepos(ctx context.Context, dids []string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("tap add repos failed: %d", resp.StatusCode)
@@ -89,7 +89,7 @@ func (c *AdminClient) RemoveRepos(ctx context.Context, dids []string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("tap remove repos failed: %d", resp.StatusCode)

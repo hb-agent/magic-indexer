@@ -32,7 +32,7 @@ func (d *DefaultDialer) Dial(ctx context.Context, url string) (Connection, error
 	}
 	conn, resp, err := dialer.DialContext(ctx, url, http.Header{})
 	if resp != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	if err != nil {
 		return nil, err

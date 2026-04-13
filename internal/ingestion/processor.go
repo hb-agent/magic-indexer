@@ -72,7 +72,7 @@ func (p *RecordProcessor) ProcessRecord(ctx context.Context, op ProcessOp) error
 	// Reject non-object JSON for create/update.
 	if op.Operation != OpDelete && len(op.Record) > 0 {
 		trimmed := strings.TrimSpace(string(op.Record))
-		if len(trimmed) == 0 || trimmed[0] != '{' {
+		if trimmed == "" || trimmed[0] != '{' {
 			slog.Warn("Skipping non-object JSON record",
 				"uri", op.URI, "json_prefix", fmt.Sprintf("%q", truncate(trimmed, 20)))
 			return nil
