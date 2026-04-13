@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -412,53 +413,41 @@ func TestBridgeError(t *testing.T) {
 	})
 }
 
-func TestSignJWT(t *testing.T) {
+func TestCreateClientAssertion(t *testing.T) {
 	keyPair, err := GenerateDPoPKeyPair()
 	if err != nil {
 		t.Fatalf("failed to generate key pair: %v", err)
 	}
 
-	header := map[string]interface{}{
-		"alg": "ES256",
-		"typ": "JWT",
-	}
-	claims := map[string]interface{}{
-		"iss": "test-client",
-		"sub": "test-client",
-		"aud": "https://example.com",
-		"iat": 1234567890,
-		"exp": 1234567890 + 300,
-	}
+	bridge := NewBridge(BridgeConfig{
+		ClientID:  "test-client",
+		SigningKey: keyPair,
+	})
 
-	jwt, err := signJWT(header, claims, keyPair.PrivateKey)
+	token, err := bridge.createClientAssertion("https://example.com")
 	if err != nil {
-		t.Fatalf("failed to sign JWT: %v", err)
+		t.Fatalf("failed to create client assertion: %v", err)
 	}
 
-	// Should have 3 parts
-	parts := len(jwt) > 0 && jwt[0] != '.'
-	if !parts {
-		t.Error("JWT should not be empty")
+	// Should be a valid 3-part JWT
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Errorf("JWT should have 3 parts, got %d", len(parts))
 	}
-
-	// Count dots
-	dotCount := 0
-	for _, c := range jwt {
-		if c == '.' {
-			dotCount++
+	for i, part := range parts {
+		if part == "" {
+			t.Errorf("JWT part %d should not be empty", i)
 		}
-	}
-	if dotCount != 2 {
-		t.Errorf("JWT should have 2 dots, got %d", dotCount)
 	}
 }
 
-func TestSignJWT_InvalidKey(t *testing.T) {
-	header := map[string]interface{}{"alg": "ES256"}
-	claims := map[string]interface{}{"sub": "test"}
+func TestCreateClientAssertion_NoKey(t *testing.T) {
+	bridge := NewBridge(BridgeConfig{
+		ClientID: "test-client",
+	})
 
-	_, err := signJWT(header, claims, "not a key")
+	_, err := bridge.createClientAssertion("https://example.com")
 	if err == nil {
-		t.Error("expected error for invalid key type")
+		t.Error("expected error when no signing key is configured")
 	}
 }
