@@ -141,7 +141,7 @@ func BuildFilterGroupClause(group FilterGroup, paramOffset int) (string, []inter
 	return buildFilterGroupRecursive(group, paramOffset, 0)
 }
 
-func buildFilterGroupRecursive(group FilterGroup, paramIdx int, depth int) (string, []interface{}, error) {
+func buildFilterGroupRecursive(group FilterGroup, paramIdx, depth int) (string, []interface{}, error) {
 	if depth > MaxFilterDepth {
 		return "", nil, fmt.Errorf("filter nesting exceeds maximum depth of %d", MaxFilterDepth)
 	}
