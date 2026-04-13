@@ -207,12 +207,21 @@ func buildFilterGroupRecursive(group FilterGroup, paramIdx, depth int) (string, 
 	return strings.Join(clauses, joiner), params, nil
 }
 
-var fieldNameRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+// fieldSegmentRegex validates a single segment of a field path.
+var fieldSegmentRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
-// ValidateFieldName checks that a field name is safe for SQL use.
+// ValidateFieldName checks that a field name (or nested path with "__" separator)
+// is safe for SQL use. Each segment must match [a-zA-Z_][a-zA-Z0-9_]*.
+// Max 3 nesting levels to prevent deep JSON traversal.
 func ValidateFieldName(name string) error {
-	if !fieldNameRegex.MatchString(name) {
-		return fmt.Errorf("invalid field name %q: must match [a-zA-Z_][a-zA-Z0-9_]*", name)
+	parts := strings.Split(name, "__")
+	if len(parts) > 3 {
+		return fmt.Errorf("field path %q exceeds maximum nesting depth of 3", name)
+	}
+	for _, part := range parts {
+		if !fieldSegmentRegex.MatchString(part) {
+			return fmt.Errorf("invalid field name segment %q in %q: must match [a-zA-Z_][a-zA-Z0-9_]*", part, name)
+		}
 	}
 	return nil
 }
@@ -334,10 +343,10 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 	case OpEq:
 		if f.IsJSON {
 			// Use JSONB containment for GIN index support.
-			// Construct {"fieldName": value} as a JSON string parameter.
+			// For nested paths (a__b__c), construct {"a":{"b":{"c": value}}}.
 			param := fmt.Sprintf("$%d", paramIdx)
 			clause := fmt.Sprintf("json @> %s::jsonb", param)
-			containment := map[string]interface{}{f.FieldName: f.Value}
+			containment := buildNestedContainment(f.FieldName, f.Value)
 			jsonBytes, err := json.Marshal(containment)
 			if err != nil {
 				return "", nil, paramIdx, fmt.Errorf("failed to marshal eq containment: %w", err)
@@ -397,15 +406,34 @@ func jsonExtract(fieldName string, isJSON bool) string {
 	if !isJSON {
 		return fieldName
 	}
-	return fmt.Sprintf("json->>'%s'", fieldName)
+	parts := strings.Split(fieldName, "__")
+	if len(parts) == 1 {
+		return fmt.Sprintf("json->>'%s'", fieldName)
+	}
+	// Nested path: json->'a'->'b'->>'c' (last segment uses ->> for text extraction).
+	var expr string
+	for i, part := range parts {
+		switch {
+		case i == 0 && i == len(parts)-1:
+			expr = fmt.Sprintf("json->>'%s'", part)
+		case i == 0:
+			expr = fmt.Sprintf("json->'%s'", part)
+		case i == len(parts)-1:
+			expr = fmt.Sprintf("%s->>'%s'", expr, part)
+		default:
+			expr = fmt.Sprintf("%s->'%s'", expr, part)
+		}
+	}
+	return expr
 }
 
 // jsonExtractTyped returns the SQL expression with appropriate CAST for typed comparison.
+// Supports nested paths using "__" separator.
 func jsonExtractTyped(fieldName, lexiconType string, isJSON bool) string {
 	if !isJSON {
 		return fieldName
 	}
-	base := fmt.Sprintf("json->>'%s'", fieldName)
+	base := jsonExtract(fieldName, true)
 	switch lexiconType {
 	case "integer", "number":
 		// Guard against non-numeric values.
@@ -430,6 +458,22 @@ func sqlOp(op FilterOperator) string {
 	default:
 		return "="
 	}
+}
+
+// buildNestedContainment constructs a nested JSON object for @> containment.
+// For "a__b__c" with value "x", returns {"a": {"b": {"c": "x"}}}.
+// For "field" with value "x", returns {"field": "x"}.
+func buildNestedContainment(fieldName string, value interface{}) interface{} {
+	parts := strings.Split(fieldName, "__")
+	if len(parts) == 1 {
+		return map[string]interface{}{fieldName: value}
+	}
+	// Build from inside out.
+	result := value
+	for i := len(parts) - 1; i >= 0; i-- {
+		result = map[string]interface{}{parts[i]: result}
+	}
+	return result
 }
 
 // escapeLike escapes special characters for LIKE/ILIKE with ESCAPE '\'.
