@@ -413,7 +413,8 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	// to avoid the (cheap but nonzero) overhead of building the shared
 	// filter SQL when no constraints apply.
 	hasFieldFilters := filterGroup != nil && !filterGroup.IsEmpty()
-	if filter.Labels.IsEmpty() && len(authors) == 0 && filter.Search == "" && !hasFieldFilters {
+	hasCustomSort := sortOpt != nil && !sortOpt.IsDefault()
+	if filter.Labels.IsEmpty() && len(authors) == 0 && filter.Search == "" && !hasFieldFilters && !hasCustomSort {
 		return r.GetByCollectionWithKeysetCursor(ctx, collection, limit, afterSortValue, afterURI)
 	}
 
