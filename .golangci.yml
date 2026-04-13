@@ -21,6 +21,8 @@ linters:
     - revive
     - nilerr
     - errorlint
+    - gosec       # Security-specific Go linter (SQL injection, weak crypto, etc.)
+    - bodyclose   # Ensures HTTP response bodies are closed
   settings:
     govet:
       disable:
