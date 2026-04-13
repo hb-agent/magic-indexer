@@ -74,7 +74,7 @@ func (p *RecordProcessor) ProcessRecord(ctx context.Context, op ProcessOp) error
 		trimmed := strings.TrimSpace(string(op.Record))
 		if len(trimmed) == 0 || trimmed[0] != '{' {
 			slog.Warn("Skipping non-object JSON record",
-				"uri", op.URI, "first_byte", trimmed[:1])
+				"uri", op.URI, "json_prefix", fmt.Sprintf("%q", truncate(trimmed, 20)))
 			return nil
 		}
 	}
@@ -190,4 +190,12 @@ func (p *RecordProcessor) ProcessRecord(ctx context.Context, op ProcessOp) error
 	}
 
 	return nil
+}
+
+// truncate returns at most n bytes of s, appending "..." if truncated.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

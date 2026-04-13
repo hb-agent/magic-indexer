@@ -58,12 +58,16 @@ func (f *Flusher) Run(ctx context.Context) {
 		case <-ticker.C:
 			current := f.cursor.Load()
 			if current > lastFlushed {
-				if err := f.Save(ctx, current); err != nil {
+				// Use a short-lived context for the save so a concurrent
+				// parent cancellation doesn't spuriously fail the write.
+				saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := f.Save(saveCtx, current); err != nil {
 					slog.Warn("Failed to flush cursor",
 						"label", f.Label, "error", err)
 				} else {
 					lastFlushed = current
 				}
+				cancel()
 			}
 		}
 	}

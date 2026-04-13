@@ -47,7 +47,7 @@ func TestRunWithReconnect_ResetsBackoffOnStableConnection(t *testing.T) {
 		cancel()
 	}()
 
-	_ = RunWithReconnect(ctx, func(ctx context.Context) error {
+	err := RunWithReconnect(ctx, func(ctx context.Context) error {
 		n := attempts.Add(1)
 		if n == 1 {
 			// First attempt: simulate a stable connection.
@@ -59,6 +59,9 @@ func TestRunWithReconnect_ResetsBackoffOnStableConnection(t *testing.T) {
 		MaxBackoff:  500 * time.Millisecond,
 		StableAfter: 50 * time.Millisecond,
 	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
 
 	elapsed := time.Since(start)
 	// With stable reset, the second backoff should be ~10ms (reset), not 20ms.
@@ -82,7 +85,7 @@ func TestRunWithReconnect_ExponentialBackoff(t *testing.T) {
 		cancel()
 	}()
 
-	_ = RunWithReconnect(ctx, func(ctx context.Context) error {
+	err := RunWithReconnect(ctx, func(ctx context.Context) error {
 		attempts.Add(1)
 		timestamps = append(timestamps, time.Now())
 		return errors.New("fail")
@@ -90,6 +93,9 @@ func TestRunWithReconnect_ExponentialBackoff(t *testing.T) {
 		MinBackoff: 20 * time.Millisecond,
 		MaxBackoff: 200 * time.Millisecond,
 	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
 
 	if len(timestamps) < 3 {
 		t.Fatalf("expected at least 3 timestamps, got %d", len(timestamps))

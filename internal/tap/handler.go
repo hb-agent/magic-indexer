@@ -54,16 +54,8 @@ func (h *IndexHandler) HandleIdentity(ctx context.Context, event *IdentityEvent)
 		"status", event.Status,
 	)
 
-	if !event.IsActive {
-		slog.Info("Actor deactivated via Tap identity event",
-			"did", event.DID,
-			"status", event.Status,
-		)
-		// For now, just update the handle. The is_active column is added
-		// in migration 014 and will be used when ActorsRepository.Deactivate
-		// is implemented.
-		return h.actors.Upsert(ctx, event.DID, event.Handle)
-	}
-
+	// TODO: When ActorsRepository.Deactivate is implemented, set
+	// is_active=false for deactivated/deleted/takendown actors.
+	// Migration 014 adds the column; the logic needs a new repo method.
 	return h.actors.Upsert(ctx, event.DID, event.Handle)
 }
