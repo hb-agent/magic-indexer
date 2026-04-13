@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestBridge_FetchProtectedResourceMetadata(t *testing.T) {
@@ -441,6 +443,197 @@ func TestCreateClientAssertion(t *testing.T) {
 	}
 }
 
+func TestCreateClientAssertion_ClaimVerification(t *testing.T) {
+	keyPair, err := GenerateDPoPKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+
+	bridge := NewBridge(BridgeConfig{
+		ClientID:   "test-client-id",
+		SigningKey: keyPair,
+	})
+
+	tokenStr, err := bridge.createClientAssertion("https://auth.example.com")
+	if err != nil {
+		t.Fatalf("failed to create client assertion: %v", err)
+	}
+
+	// Parse and verify signature with the public key.
+	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+		return &keyPair.PrivateKey.PublicKey, nil
+	})
+	if err != nil {
+		t.Fatalf("jwt.Parse failed: %v", err)
+	}
+	if !token.Valid {
+		t.Fatal("token is not valid")
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		t.Fatal("claims are not MapClaims")
+	}
+
+	// iss == clientID
+	if iss, _ := claims["iss"].(string); iss != "test-client-id" {
+		t.Errorf("iss = %q, want %q", iss, "test-client-id")
+	}
+	// sub == clientID
+	if sub, _ := claims["sub"].(string); sub != "test-client-id" {
+		t.Errorf("sub = %q, want %q", sub, "test-client-id")
+	}
+	// aud == audience
+	if aud, _ := claims["aud"].(string); aud != "https://auth.example.com" {
+		t.Errorf("aud = %q, want %q", aud, "https://auth.example.com")
+	}
+	// jti is non-empty
+	jti, _ := claims["jti"].(string)
+	if jti == "" {
+		t.Error("jti should be non-empty")
+	}
+	// iat and exp are numbers
+	if _, ok := claims["iat"].(float64); !ok {
+		t.Error("iat should be a number")
+	}
+	if _, ok := claims["exp"].(float64); !ok {
+		t.Error("exp should be a number")
+	}
+}
+
+func TestCreateClientAssertion_HeaderVerification(t *testing.T) {
+	keyPair, err := GenerateDPoPKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+
+	bridge := NewBridge(BridgeConfig{
+		ClientID:   "test-client",
+		SigningKey: keyPair,
+	})
+
+	tokenStr, err := bridge.createClientAssertion("https://example.com")
+	if err != nil {
+		t.Fatalf("failed to create client assertion: %v", err)
+	}
+
+	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+		return &keyPair.PrivateKey.PublicKey, nil
+	})
+	if err != nil {
+		t.Fatalf("jwt.Parse failed: %v", err)
+	}
+
+	// kid == JKT of signing key
+	expectedKid := keyPair.CalculateJKT()
+	if kid, _ := token.Header["kid"].(string); kid != expectedKid {
+		t.Errorf("kid = %q, want %q", kid, expectedKid)
+	}
+
+	// alg == ES256
+	if alg, _ := token.Header["alg"].(string); alg != "ES256" {
+		t.Errorf("alg = %q, want %q", alg, "ES256")
+	}
+}
+
+func TestCreateClientAssertion_ExpRange(t *testing.T) {
+	keyPair, err := GenerateDPoPKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+
+	bridge := NewBridge(BridgeConfig{
+		ClientID:   "test-client",
+		SigningKey: keyPair,
+	})
+
+	tokenStr, err := bridge.createClientAssertion("https://example.com")
+	if err != nil {
+		t.Fatalf("failed to create client assertion: %v", err)
+	}
+
+	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+		return &keyPair.PrivateKey.PublicKey, nil
+	})
+	if err != nil {
+		t.Fatalf("jwt.Parse failed: %v", err)
+	}
+
+	claims := token.Claims.(jwt.MapClaims)
+	iat := claims["iat"].(float64)
+	exp := claims["exp"].(float64)
+
+	// exp - iat should be exactly 300 seconds (5 minutes)
+	diff := exp - iat
+	if diff != 300 {
+		t.Errorf("exp - iat = %v, want 300", diff)
+	}
+}
+
+func TestCreateClientAssertion_JTIUniqueness(t *testing.T) {
+	keyPair, err := GenerateDPoPKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+
+	bridge := NewBridge(BridgeConfig{
+		ClientID:   "test-client",
+		SigningKey: keyPair,
+	})
+
+	tokenStr1, err := bridge.createClientAssertion("https://example.com")
+	if err != nil {
+		t.Fatalf("first call failed: %v", err)
+	}
+	tokenStr2, err := bridge.createClientAssertion("https://example.com")
+	if err != nil {
+		t.Fatalf("second call failed: %v", err)
+	}
+
+	parseJTI := func(tokenStr string) string {
+		token, _ := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+			return &keyPair.PrivateKey.PublicKey, nil
+		})
+		claims := token.Claims.(jwt.MapClaims)
+		return claims["jti"].(string)
+	}
+
+	jti1 := parseJTI(tokenStr1)
+	jti2 := parseJTI(tokenStr2)
+	if jti1 == jti2 {
+		t.Errorf("two calls produced the same jti: %q", jti1)
+	}
+}
+
+func TestCreateClientAssertion_WrongKeyRejection(t *testing.T) {
+	keyPair1, err := GenerateDPoPKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair 1: %v", err)
+	}
+	keyPair2, err := GenerateDPoPKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair 2: %v", err)
+	}
+
+	bridge := NewBridge(BridgeConfig{
+		ClientID:   "test-client",
+		SigningKey: keyPair1,
+	})
+
+	tokenStr, err := bridge.createClientAssertion("https://example.com")
+	if err != nil {
+		t.Fatalf("failed to create client assertion: %v", err)
+	}
+
+	// Verifying with the wrong public key should fail.
+	_, err = jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+		return &keyPair2.PrivateKey.PublicKey, nil
+	})
+	if err == nil {
+		t.Error("expected signature verification to fail with wrong key")
+	}
+}
+
 func TestCreateClientAssertion_NoKey(t *testing.T) {
 	bridge := NewBridge(BridgeConfig{
 		ClientID: "test-client",
@@ -449,5 +642,42 @@ func TestCreateClientAssertion_NoKey(t *testing.T) {
 	_, err := bridge.createClientAssertion("https://example.com")
 	if err == nil {
 		t.Error("expected error when no signing key is configured")
+	}
+}
+
+func TestFetchTokens_ErrorPropagation(t *testing.T) {
+	// Configure a bridge with a DPoPKeyPair that has a nil PrivateKey.
+	// fetchTokens should propagate the createClientAssertion error as a
+	// BridgeError with ErrTypeTokenExchange.
+	keyPair, err := GenerateDPoPKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+	// Nil out the private key so createClientAssertion fails.
+	keyPair.PrivateKey = nil
+
+	bridge := NewBridge(BridgeConfig{
+		ClientID:   "test-client",
+		SigningKey: keyPair,
+	})
+
+	_, err = bridge.fetchTokens(
+		context.Background(),
+		"https://example.com/token",
+		url.Values{"grant_type": {"authorization_code"}},
+		nil, // no DPoP key
+		"https://example.com",
+		nil, // no nonce
+	)
+	if err == nil {
+		t.Fatal("expected error from fetchTokens with nil private key")
+	}
+
+	var bridgeErr *BridgeError
+	if !errors.As(err, &bridgeErr) {
+		t.Fatalf("expected BridgeError, got %T: %v", err, err)
+	}
+	if bridgeErr.Type != ErrTypeTokenExchange {
+		t.Errorf("error type = %q, want %q", bridgeErr.Type, ErrTypeTokenExchange)
 	}
 }
