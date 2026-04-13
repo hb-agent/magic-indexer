@@ -427,10 +427,24 @@ func (b *Builder) buildQueryType() *graphql.Object {
 	for lexiconID, connectionType := range b.connectionTypes {
 		fieldName := lexicon.ToFieldName(lexiconID)
 
+		args := query.ConnectionArgs()
+
+		// Generate per-collection WhereInput if the lexicon has filterable properties.
+		lex, hasLex := b.registry.GetLexicon(lexiconID)
+		if hasLex {
+			whereInput := buildWhereInputType(lex)
+			if whereInput != nil {
+				args["where"] = &graphql.ArgumentConfig{
+					Type:        whereInput,
+					Description: "Filter conditions (all combined with AND)",
+				}
+			}
+		}
+
 		fields[fieldName] = &graphql.Field{
 			Type:        connectionType,
 			Description: fmt.Sprintf("Query %s records", lexiconID),
-			Args:        query.ConnectionArgs(),
+			Args:        args,
 			Resolve:     b.createCollectionResolver(lexiconID),
 		}
 
@@ -517,9 +531,20 @@ func (b *Builder) resolveRecordConnection(
 		}
 	}
 
+	// Extract field filters from `where` argument.
+	var fieldFilters []repositories.FieldFilter
+	if whereArg, ok := p.Args["where"]; ok && whereArg != nil {
+		lex, _ := b.registry.GetLexicon(collection)
+		var err error
+		fieldFilters, err = extractFieldFilters(whereArg, lex)
+		if err != nil {
+			return nil, fmt.Errorf("invalid where filter: %w", err)
+		}
+	}
+
 	// Fetch first+1 to determine hasNextPage
 	records, err := repos.Records.GetByCollectionFiltered(
-		p.Context, collection, first+1, afterTimestamp, afterURI, filter,
+		p.Context, collection, first+1, afterTimestamp, afterURI, filter, fieldFilters...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query records: %w", err)

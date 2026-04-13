@@ -381,6 +381,7 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	limit int,
 	afterTimestamp, afterURI string,
 	filter RecordFilter,
+	fieldFilters ...FieldFilter,
 ) ([]*Record, error) {
 	// Load-bearing empty-authors short-circuit. See RecordFilter.Authors
 	// field doc for why this cannot be collapsed into "no filter".
@@ -457,6 +458,19 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 			fmt.Sprintf("r.search_vector @@ plainto_tsquery('english', %s)", ph()))
 		args = append(args, search)
 		metrics.RecordSearchApplied()
+	}
+
+	// Field filters from `where` argument.
+	if len(fieldFilters) > 0 {
+		fieldClause, fieldParams, err := BuildFieldFilterClause(fieldFilters, paramIdx)
+		if err != nil {
+			return nil, fmt.Errorf("field filter error: %w", err)
+		}
+		if fieldClause != "" {
+			whereClauses = append(whereClauses, fieldClause)
+			args = append(args, fieldParams...)
+			paramIdx += len(fieldParams)
+		}
 	}
 
 	// keyset cursor

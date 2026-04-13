@@ -35,6 +35,7 @@ import (
 	"github.com/GainForest/hypergoat/internal/graphql/admin"
 	"github.com/GainForest/hypergoat/internal/graphql/resolver"
 	"github.com/GainForest/hypergoat/internal/graphql/subscription"
+	"github.com/GainForest/hypergoat/internal/ingestion"
 	"github.com/GainForest/hypergoat/internal/jetstream"
 	"github.com/GainForest/hypergoat/internal/labeler"
 	"github.com/GainForest/hypergoat/internal/lexicon"
@@ -890,6 +891,16 @@ func startJetstream(
 		jsURL = jetstream.DefaultJetstreamURL
 	}
 
+	// Build shared record processor for Jetstream consumer.
+	processor := &ingestion.RecordProcessor{
+		Records:   svc.records,
+		Actors:    svc.actors,
+		Activity:  svc.activity,
+		PubSub:    pubsub,
+		Validator: validator,
+		ValMode:   cfg.ValidationMode,
+	}
+
 	if len(collections) > 0 {
 		bg.jsConsumer = jetstream.NewConsumer(
 			jetstream.ConsumerConfig{
@@ -897,13 +908,8 @@ func startJetstream(
 				Collections:   collections,
 				DisableCursor: cfg.JetstreamDisableCursor,
 			},
-			svc.records,
-			svc.actors,
+			processor,
 			svc.config,
-			svc.activity,
-			pubsub,
-			validator,
-			cfg.ValidationMode,
 		)
 
 		jsCtx, jsCancel := context.WithCancel(context.Background())
@@ -933,13 +939,8 @@ func startJetstream(
 						Collections:   updatedCollections,
 						DisableCursor: cfg.JetstreamDisableCursor,
 					},
-					svc.records,
-					svc.actors,
+					processor,
 					svc.config,
-					svc.activity,
-					pubsub,
-					validator,
-					cfg.ValidationMode,
 				)
 
 				// Use a tracked context derived from a fresh

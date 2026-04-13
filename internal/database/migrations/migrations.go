@@ -62,8 +62,17 @@ func Run(ctx context.Context, exec database.Executor) error {
 
 		slog.Info("Applying migration", "version", m.Version, "name", m.Name)
 
-		if err := applyMigrationTx(ctx, exec, m); err != nil {
-			return err
+		if isNonTransactional(m.UpSQL) {
+			// Non-transactional migrations (e.g., CREATE INDEX CONCURRENTLY)
+			// run outside a transaction. The DDL and version tracking are
+			// separate statements.
+			if err := applyMigrationNoTx(ctx, exec, m); err != nil {
+				return err
+			}
+		} else {
+			if err := applyMigrationTx(ctx, exec, m); err != nil {
+				return err
+			}
 		}
 
 		slog.Info("Migration applied successfully", "version", m.Version)
@@ -103,6 +112,35 @@ func applyMigrationTx(ctx context.Context, exec database.Executor, m Migration) 
 		return fmt.Errorf("failed to commit migration %s: %w", m.Version, err)
 	}
 	committed = true
+	return nil
+}
+
+// isNonTransactional checks if a migration SQL starts with the "-- no-transaction"
+// sentinel comment. Such migrations cannot run inside a transaction (e.g., CREATE
+// INDEX CONCURRENTLY in PostgreSQL).
+func isNonTransactional(sql string) bool {
+	return strings.HasPrefix(strings.TrimSpace(sql), "-- no-transaction")
+}
+
+// applyMigrationNoTx applies a migration outside a transaction. Used for
+// operations like CREATE INDEX CONCURRENTLY that cannot run in a transaction.
+// The DDL runs first; if it succeeds, the version is recorded. If the version
+// recording fails, the DDL is still applied (operator must fix manually).
+func applyMigrationNoTx(ctx context.Context, exec database.Executor, m Migration) error {
+	slog.Warn("Running migration outside transaction (non-transactional)", "version", m.Version)
+
+	if _, err := exec.DB().ExecContext(ctx, m.UpSQL); err != nil {
+		return fmt.Errorf("failed to apply non-transactional migration %s: %w", m.Version, err)
+	}
+
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO schema_migrations (version) VALUES (%s)",
+		exec.Placeholder(1),
+	)
+	if _, err := exec.DB().ExecContext(ctx, insertSQL, m.Version); err != nil {
+		return fmt.Errorf("migration %s DDL succeeded but failed to record version (manual fix needed): %w", m.Version, err)
+	}
+
 	return nil
 }
 
