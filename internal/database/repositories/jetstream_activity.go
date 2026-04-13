@@ -26,9 +26,9 @@ type ActivityEntry struct {
 
 // ValidationStats holds aggregated validation statistics.
 type ValidationStats struct {
-	InvalidCount       int64
+	InvalidCount        int64
 	InvalidByCollection []CollectionValidationCount
-	LastInvalidAt      *time.Time
+	LastInvalidAt       *time.Time
 }
 
 // CollectionValidationCount holds a per-collection invalid record count.

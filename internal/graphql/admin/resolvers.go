@@ -794,9 +794,9 @@ func (r *Resolver) ValidationStats(ctx context.Context, timeRange string) (map[s
 	}
 
 	result := map[string]interface{}{
-		"invalidCount":       stats.InvalidCount,
+		"invalidCount":        stats.InvalidCount,
 		"invalidByCollection": byCollection,
-		"recentInvalid":      recentItems,
+		"recentInvalid":       recentItems,
 	}
 	if stats.LastInvalidAt != nil {
 		result["lastInvalidAt"] = stats.LastInvalidAt.Format(time.RFC3339)
