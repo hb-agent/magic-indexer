@@ -65,6 +65,44 @@ lexicon supports the trusted-evaluator feed filter
 from the npm package `@hypercerts-org/lexicon` (see Operations
 below).
 
+### Full-text search
+
+All typed collection queries and the generic `records` query support
+a `search: String` parameter for full-text search across record
+content. The search uses Postgres `tsvector` with a GIN index for
+fast, stemmed queries.
+
+**Searched fields** (weighted): title (A), shortDescription (B),
+description (C), workScope (D, string variant only).
+
+**Behavior**: terms are space-separated and implicitly ANDed.
+English stemming is applied ("forest" matches "forests"). Special
+characters are stripped by `plainto_tsquery` — no injection risk.
+Max query length: 500 characters.
+
+**Example**:
+```graphql
+{ orgHypercertsClaimActivity(search: "forest conservation", first: 10, authors: ["did:plc:..."]) {
+    edges { node { uri title shortDescription } }
+    pageInfo { hasNextPage }
+} }
+```
+
+**Combinable with**: `authors`, `labels`, `excludeLabels`, `labelerDids`.
+
+### Record validation
+
+Records are validated against their lexicon schemas at two points:
+
+- **Ingestion time** (Jetstream + backfill): controlled by
+  `VALIDATION_MODE` env var (`disabled`/`warn`/`enforce`, default
+  `disabled`). In `warn` mode, invalid records are logged but stored.
+  In `enforce` mode, they are skipped.
+- **Query time** (always on): `SanitizeRecord()` filters out records
+  missing required fields, truncates over-long strings, and nulls
+  invalid optional fields. This prevents NonNull propagation from
+  killing entire query responses.
+
 ---
 
 ## Safety rules — read these first
