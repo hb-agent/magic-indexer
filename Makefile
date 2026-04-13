@@ -108,7 +108,7 @@ tools:
 	@go install github.com/air-verse/air@latest
 	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 	@go install mvdan.cc/gofumpt@latest
-	@go install -tags 'postgres sqlite' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+	@go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 
 # Generate (placeholder for future code generation)
 generate:

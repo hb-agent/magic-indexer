@@ -47,19 +47,13 @@ USER hypergoat
 
 # Note: we intentionally do NOT declare VOLUME /app/data here.
 # Railway bans the Dockerfile VOLUME keyword and expects operators
-# to attach persistent storage via its native volume mechanism.
-# Other platforms (plain Docker, Compose, Fly) can mount /app/data
-# at runtime with `-v` / `volumes:` / `mount` without the Dockerfile
-# declaration. SQLite still works — it just writes its -wal/-shm
-# sidecars into whatever directory /app/data resolves to.
-
 # Expose port
 EXPOSE 8080
 
-# Set environment defaults
+# Set environment defaults. DATABASE_URL must be provided at runtime
+# (e.g., via Railway env vars or docker-compose).
 ENV HOST=0.0.0.0
 ENV PORT=8080
-ENV DATABASE_URL=sqlite:/app/data/hypergoat.db
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

@@ -47,21 +47,15 @@ jobs:
       - name: Build
         run: go build -trimpath -buildvcs=false -v ./...
 
-      - name: Test with SQLite
-        run: go test -v -race -coverprofile=coverage-sqlite.out ./...
-
-      # The repository's testutil.SetupTestDB reads TEST_DATABASE_URL
-      # (not DATABASE_URL). Without this env var the Postgres branch
-      # of the dual-dialect tests is never actually exercised.
-      - name: Test with PostgreSQL
-        run: go test -v -race -coverprofile=coverage-postgres.out ./...
+      - name: Test
+        run: go test -v -race -coverprofile=coverage.out ./...
         env:
           TEST_DATABASE_URL: postgres://hypergoat:hypergoat@localhost:5432/hypergoat_test?sslmode=disable
 
       - name: Upload coverage
         uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238  # v4
         with:
-          files: coverage-sqlite.out,coverage-postgres.out
+          files: coverage.out
           fail_ci_if_error: false
 
   lint:
