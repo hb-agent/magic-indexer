@@ -693,6 +693,23 @@ func (r *Resolver) DeleteLexicon(ctx context.Context, nsid string) (bool, error)
 	return true, nil
 }
 
+// CreateFieldIndex creates a partial expression index on a JSON field for a collection.
+func (r *Resolver) CreateFieldIndex(ctx context.Context, collection, field string) (map[string]interface{}, error) {
+	idxName, err := r.repos.Records.CreateFieldIndex(ctx, collection, field)
+	if err != nil {
+		return map[string]interface{}{"success": false, "indexName": ""}, err
+	}
+	return map[string]interface{}{"success": true, "indexName": idxName}, nil
+}
+
+// DropFieldIndex drops a previously created field expression index.
+func (r *Resolver) DropFieldIndex(ctx context.Context, collection, field string) (bool, error) {
+	if err := r.repos.Records.DropFieldIndex(ctx, collection, field); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ActivityBuckets returns aggregated activity data for the specified time range.
 func (r *Resolver) ActivityBuckets(ctx context.Context, timeRange string) ([]map[string]interface{}, error) {
 	buckets, err := r.repos.Activity.GetActivityBuckets(ctx, timeRange)

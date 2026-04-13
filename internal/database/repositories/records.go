@@ -627,6 +627,45 @@ func (r *RecordsRepository) GetCollectionCount(ctx context.Context, collection s
 	return count, err
 }
 
+// fieldIndexName generates a deterministic index name from collection and field.
+func fieldIndexName(collection, field string) string {
+	col := strings.ReplaceAll(collection, ".", "_")
+	return fmt.Sprintf("idx_record_%s_%s", col, field)
+}
+
+// CreateFieldIndex creates a partial expression index on a JSON field for a
+// specific collection. Runs outside a transaction (CONCURRENTLY requirement).
+func (r *RecordsRepository) CreateFieldIndex(ctx context.Context, collection, field string) (string, error) {
+	if err := ValidateFieldName(field); err != nil {
+		return "", fmt.Errorf("invalid field name: %w", err)
+	}
+	idxName := fieldIndexName(collection, field)
+	sqlStr := fmt.Sprintf(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS %s ON record ((json->>'%s')) WHERE collection = '%s'`,
+		idxName, field, collection,
+	)
+	slog.Info("Creating field expression index", "index", idxName, "collection", collection, "field", field)
+	if _, err := r.db.DB().ExecContext(ctx, sqlStr); err != nil {
+		return "", fmt.Errorf("failed to create index %s: %w", idxName, err)
+	}
+	slog.Info("Field expression index created", "index", idxName)
+	return idxName, nil
+}
+
+// DropFieldIndex drops a previously created field expression index.
+func (r *RecordsRepository) DropFieldIndex(ctx context.Context, collection, field string) error {
+	if err := ValidateFieldName(field); err != nil {
+		return fmt.Errorf("invalid field name: %w", err)
+	}
+	idxName := fieldIndexName(collection, field)
+	sqlStr := fmt.Sprintf("DROP INDEX CONCURRENTLY IF EXISTS %s", idxName)
+	slog.Info("Dropping field expression index", "index", idxName)
+	if _, err := r.db.DB().ExecContext(ctx, sqlStr); err != nil {
+		return fmt.Errorf("failed to drop index %s: %w", idxName, err)
+	}
+	return nil
+}
+
 // GetCollectionStats returns statistics for all collections.
 func (r *RecordsRepository) GetCollectionStats(ctx context.Context) ([]CollectionStat, error) {
 	sqlStr := "SELECT collection, COUNT(*) as count FROM record GROUP BY collection ORDER BY count DESC"
