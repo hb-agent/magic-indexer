@@ -74,7 +74,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, u.String(), nil)
 	if resp != nil && resp.Body != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	if err != nil {
 		return fmt.Errorf("dial labeler: %w", err)
