@@ -709,9 +709,69 @@ func (b *SchemaBuilder) buildMutationType() *graphql.Object {
 					return b.resolver.DeleteLexicon(p.Context, nsid)
 				},
 			},
+			"createFieldIndex": &graphql.Field{
+				Type:        graphql.NewNonNull(fieldIndexResultType),
+				Description: "Create a partial expression index on a JSON field for a collection. Accelerates comparison/pattern filters (gt, lt, contains, startsWith).",
+				Args: graphql.FieldConfigArgument{
+					"collection": &graphql.ArgumentConfig{
+						Type:        graphql.NewNonNull(graphql.String),
+						Description: "Collection NSID (e.g., org.hypercerts.claim)",
+					},
+					"field": &graphql.ArgumentConfig{
+						Type:        graphql.NewNonNull(graphql.String),
+						Description: "JSON field name to index (e.g., createdAt)",
+					},
+				},
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					if err := requireAdmin(p.Context); err != nil {
+						return nil, err
+					}
+					collection, _ := p.Args["collection"].(string)
+					field, _ := p.Args["field"].(string)
+					return b.resolver.CreateFieldIndex(p.Context, collection, field)
+				},
+			},
+			"dropFieldIndex": &graphql.Field{
+				Type:        graphql.NewNonNull(graphql.Boolean),
+				Description: "Drop a previously created field expression index.",
+				Args: graphql.FieldConfigArgument{
+					"collection": &graphql.ArgumentConfig{
+						Type:        graphql.NewNonNull(graphql.String),
+						Description: "Collection NSID",
+					},
+					"field": &graphql.ArgumentConfig{
+						Type:        graphql.NewNonNull(graphql.String),
+						Description: "JSON field name",
+					},
+				},
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					if err := requireAdmin(p.Context); err != nil {
+						return nil, err
+					}
+					collection, _ := p.Args["collection"].(string)
+					field, _ := p.Args["field"].(string)
+					return b.resolver.DropFieldIndex(p.Context, collection, field)
+				},
+			},
 		},
 	})
 }
+
+// fieldIndexResultType is the GraphQL result type for createFieldIndex.
+var fieldIndexResultType = graphql.NewObject(graphql.ObjectConfig{
+	Name:        "FieldIndexResult",
+	Description: "Result of creating a field expression index",
+	Fields: graphql.Fields{
+		"success": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Boolean),
+			Description: "Whether the index was created successfully",
+		},
+		"indexName": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "The name of the created index",
+		},
+	},
+})
 
 // Context keys for passing auth info to resolvers.
 type contextKey string
