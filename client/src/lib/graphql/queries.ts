@@ -64,6 +64,30 @@ export const GET_RECENT_ACTIVITY = gql`
   }
 `;
 
+// Validation Stats
+export const GET_VALIDATION_STATS = gql`
+  query GetValidationStats($range: TimeRange!) {
+    validationStats(range: $range) {
+      invalidCount
+      invalidByCollection {
+        collection
+        count
+      }
+      recentInvalid {
+        id
+        timestamp
+        operation
+        collection
+        did
+        rkey
+        status
+        errorMessage
+      }
+      lastInvalidAt
+    }
+  }
+`;
+
 // Lexicons
 export const GET_LEXICONS = gql`
   query GetLexicons {

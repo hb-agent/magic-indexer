@@ -298,6 +298,50 @@ var ActivityEntryType = graphql.NewObject(graphql.ObjectConfig{
 			Type:        graphql.String,
 			Description: "Raw event JSON",
 		},
+		"isValid": &graphql.Field{
+			Type:        graphql.Boolean,
+			Description: "Whether the record passed lexicon validation (null if validation not run)",
+		},
+	},
+})
+
+// ValidationStatsType represents aggregated validation statistics.
+var ValidationStatsType = graphql.NewObject(graphql.ObjectConfig{
+	Name:        "ValidationStats",
+	Description: "Aggregated validation statistics",
+	Fields: graphql.Fields{
+		"invalidCount": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Int),
+			Description: "Total number of invalid records in the time range",
+		},
+		"invalidByCollection": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(CollectionValidationCountType))),
+			Description: "Invalid record counts grouped by collection",
+		},
+		"recentInvalid": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(ActivityEntryType))),
+			Description: "Most recent invalid activity entries",
+		},
+		"lastInvalidAt": &graphql.Field{
+			Type:        graphql.String,
+			Description: "Timestamp of the most recent invalid record (ISO 8601)",
+		},
+	},
+})
+
+// CollectionValidationCountType represents a per-collection invalid record count.
+var CollectionValidationCountType = graphql.NewObject(graphql.ObjectConfig{
+	Name:        "CollectionValidationCount",
+	Description: "Invalid record count for a specific collection",
+	Fields: graphql.Fields{
+		"collection": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "Collection NSID",
+		},
+		"count": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Int),
+			Description: "Number of invalid records",
+		},
 	},
 })
 

@@ -396,9 +396,9 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 	}
 
 	// Helper to update activity status
-	updateActivityStatus := func(status string, errMsg *string) {
+	updateActivityStatus := func(status string, errMsg *string, isValid *bool) {
 		if c.activityRepo != nil && activityID > 0 {
-			if err := c.activityRepo.UpdateStatus(ctx, activityID, status, errMsg); err != nil {
+			if err := c.activityRepo.UpdateStatus(ctx, activityID, status, errMsg, isValid); err != nil {
 				slog.Warn("Failed to update activity status", "error", err)
 			}
 		}
@@ -414,10 +414,14 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 				"violations", fmt.Sprintf("%v", result.Violations),
 			)
 			metrics.RecordValidationFailed(commit.Collection)
+			isValid := false
+			violationSummary := fmt.Sprintf("%d violations: %v", len(result.Violations), result.Violations)
 			if c.valMode == "enforce" {
-				updateActivityStatus("rejected", nil)
+				updateActivityStatus("rejected", &violationSummary, &isValid)
 				return nil // skip record
 			}
+			// warn mode: mark as invalid but continue processing
+			updateActivityStatus("success", &violationSummary, &isValid)
 		}
 	}
 
@@ -433,7 +437,7 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 		result, err := c.recordsRepo.Insert(ctx, uri, commit.CID, event.DID, commit.Collection, string(commit.Record))
 		if err != nil {
 			errMsg := err.Error()
-			updateActivityStatus("error", &errMsg)
+			updateActivityStatus("error", &errMsg, nil)
 			return fmt.Errorf("failed to insert record: %w", err)
 		}
 
@@ -455,7 +459,7 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 		}
 		c.pubsub.PublishRecord(eventType, uri, commit.CID, event.DID, commit.Collection, commit.Record)
 
-		updateActivityStatus("success", nil)
+		updateActivityStatus("success", nil, nil)
 
 		slog.Debug("[jetstream] Stored record",
 			"uri", uri,
@@ -466,7 +470,7 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 	case OpDelete:
 		if err := c.recordsRepo.Delete(ctx, uri); err != nil {
 			errMsg := err.Error()
-			updateActivityStatus("error", &errMsg)
+			updateActivityStatus("error", &errMsg, nil)
 			return fmt.Errorf("failed to delete record: %w", err)
 		}
 
@@ -477,7 +481,7 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 		// Publish delete to GraphQL subscriptions
 		c.pubsub.PublishRecord(subscription.EventDelete, uri, commit.CID, event.DID, commit.Collection, nil)
 
-		updateActivityStatus("success", nil)
+		updateActivityStatus("success", nil, nil)
 
 		slog.Debug("Deleted record", "uri", uri)
 	}

@@ -21,6 +21,20 @@ type ActivityEntry struct {
 	Status       string
 	ErrorMessage *string
 	EventJSON    string
+	IsValid      *bool
+}
+
+// ValidationStats holds aggregated validation statistics.
+type ValidationStats struct {
+	InvalidCount       int64
+	InvalidByCollection []CollectionValidationCount
+	LastInvalidAt      *time.Time
+}
+
+// CollectionValidationCount holds a per-collection invalid record count.
+type CollectionValidationCount struct {
+	Collection string
+	Count      int64
 }
 
 // ActivityBucket represents aggregated activity data for a time bucket.
@@ -114,21 +128,23 @@ func (r *JetstreamActivityRepository) LogActivityWithStatus(
 	return result.LastInsertId()
 }
 
-// UpdateStatus updates the status and optional error message of an activity entry.
+// UpdateStatus updates the status, optional error message, and optional validation result of an activity entry.
 func (r *JetstreamActivityRepository) UpdateStatus(
 	ctx context.Context,
 	id int64,
 	status string,
 	errorMessage *string,
+	isValid *bool,
 ) error {
-	sqlStr := fmt.Sprintf(`UPDATE jetstream_activity 
-		SET status = %s, error_message = %s 
+	sqlStr := fmt.Sprintf(`UPDATE jetstream_activity
+		SET status = %s, error_message = %s, is_valid = %s
 		WHERE id = %s`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
 
 	params := []database.Value{
 		database.Text(status),
 		database.NullableText(errorMessage),
+		database.NullableBool(isValid),
 		database.Int(id),
 	}
 
@@ -141,13 +157,13 @@ func (r *JetstreamActivityRepository) GetRecentActivity(ctx context.Context, hou
 	var sqlStr string
 	switch r.db.Dialect() {
 	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`SELECT id, timestamp, operation, collection, did, rkey, status, error_message, event_json
+		sqlStr = fmt.Sprintf(`SELECT id, timestamp, operation, collection, did, rkey, status, error_message, event_json, is_valid
 			FROM jetstream_activity
 			WHERE timestamp >= NOW() - INTERVAL '%d hours'
 			ORDER BY timestamp DESC
 			LIMIT 1000`, hours)
 	default:
-		sqlStr = fmt.Sprintf(`SELECT id, timestamp, operation, collection, did, rkey, status, error_message, event_json
+		sqlStr = fmt.Sprintf(`SELECT id, timestamp, operation, collection, did, rkey, status, error_message, event_json, is_valid
 			FROM jetstream_activity
 			WHERE timestamp >= datetime('now', '-%d hours')
 			ORDER BY timestamp DESC
@@ -307,9 +323,10 @@ func scanActivityEntries(rows *sql.Rows) ([]ActivityEntry, error) {
 		var timestampStr string
 		var rkey sql.NullString
 		var errorMessage sql.NullString
+		var isValid sql.NullBool
 
 		if err := rows.Scan(&entry.ID, &timestampStr, &entry.Operation, &entry.Collection,
-			&entry.DID, &rkey, &entry.Status, &errorMessage, &entry.EventJSON); err != nil {
+			&entry.DID, &rkey, &entry.Status, &errorMessage, &entry.EventJSON, &isValid); err != nil {
 			return nil, err
 		}
 
@@ -323,8 +340,123 @@ func scanActivityEntries(rows *sql.Rows) ([]ActivityEntry, error) {
 		if errorMessage.Valid {
 			entry.ErrorMessage = &errorMessage.String
 		}
+		if isValid.Valid {
+			v := isValid.Bool
+			entry.IsValid = &v
+		}
 		entries = append(entries, entry)
 	}
 
 	return entries, rows.Err()
+}
+
+// GetValidationStats returns aggregated validation statistics for the specified time range.
+func (r *JetstreamActivityRepository) GetValidationStats(ctx context.Context, timeRange string) (*ValidationStats, error) {
+	hours := 24
+	switch timeRange {
+	case "ONE_HOUR":
+		hours = 1
+	case "THREE_HOURS":
+		hours = 3
+	case "SIX_HOURS":
+		hours = 6
+	case "ONE_DAY":
+		hours = 24
+	case "SEVEN_DAYS":
+		hours = 168
+	}
+
+	stats := &ValidationStats{}
+
+	// Get invalid count and last invalid timestamp
+	var countSQL string
+	switch r.db.Dialect() {
+	case database.PostgreSQL:
+		countSQL = fmt.Sprintf(`SELECT COUNT(*), MAX(timestamp)
+			FROM jetstream_activity
+			WHERE is_valid = false AND timestamp >= NOW() - INTERVAL '%d hours'`, hours)
+	default:
+		countSQL = fmt.Sprintf(`SELECT COUNT(*), MAX(timestamp)
+			FROM jetstream_activity
+			WHERE is_valid = 0 AND timestamp >= datetime('now', '-%d hours')`, hours)
+	}
+
+	var lastInvalidStr sql.NullString
+	if err := r.db.DB().QueryContext(ctx, countSQL).Scan(&stats.InvalidCount, &lastInvalidStr); err != nil {
+		return nil, fmt.Errorf("failed to get invalid count: %w", err)
+	}
+	if lastInvalidStr.Valid {
+		t, _ := time.Parse(time.RFC3339, lastInvalidStr.String)
+		if t.IsZero() {
+			t, _ = time.Parse("2006-01-02 15:04:05", lastInvalidStr.String)
+		}
+		if !t.IsZero() {
+			stats.LastInvalidAt = &t
+		}
+	}
+
+	// Get invalid count by collection
+	var byCollSQL string
+	switch r.db.Dialect() {
+	case database.PostgreSQL:
+		byCollSQL = fmt.Sprintf(`SELECT collection, COUNT(*) as cnt
+			FROM jetstream_activity
+			WHERE is_valid = false AND timestamp >= NOW() - INTERVAL '%d hours'
+			GROUP BY collection
+			ORDER BY cnt DESC
+			LIMIT 10`, hours)
+	default:
+		byCollSQL = fmt.Sprintf(`SELECT collection, COUNT(*) as cnt
+			FROM jetstream_activity
+			WHERE is_valid = 0 AND timestamp >= datetime('now', '-%d hours')
+			GROUP BY collection
+			ORDER BY cnt DESC
+			LIMIT 10`, hours)
+	}
+
+	rows, err := r.db.DB().QueryContext(ctx, byCollSQL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get invalid by collection: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var c CollectionValidationCount
+		if err := rows.Scan(&c.Collection, &c.Count); err != nil {
+			return nil, err
+		}
+		stats.InvalidByCollection = append(stats.InvalidByCollection, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return stats, nil
+}
+
+// GetRecentInvalidActivity returns the most recent invalid activity entries.
+func (r *JetstreamActivityRepository) GetRecentInvalidActivity(ctx context.Context, limit int) ([]ActivityEntry, error) {
+	var sqlStr string
+	switch r.db.Dialect() {
+	case database.PostgreSQL:
+		sqlStr = fmt.Sprintf(`SELECT id, timestamp, operation, collection, did, rkey, status, error_message, event_json, is_valid
+			FROM jetstream_activity
+			WHERE is_valid = false
+			ORDER BY timestamp DESC
+			LIMIT %d`, limit)
+	default:
+		sqlStr = fmt.Sprintf(`SELECT id, timestamp, operation, collection, did, rkey, status, error_message, event_json, is_valid
+			FROM jetstream_activity
+			WHERE is_valid = 0
+			ORDER BY timestamp DESC
+			LIMIT %d`, limit)
+	}
+
+	rows, err := r.db.DB().QueryContext(ctx, sqlStr)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanActivityEntries(rows)
 }

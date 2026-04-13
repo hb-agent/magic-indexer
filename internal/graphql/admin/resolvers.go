@@ -738,7 +738,68 @@ func (r *Resolver) RecentActivity(ctx context.Context, hours int) ([]map[string]
 		if entry.ErrorMessage != nil {
 			item["errorMessage"] = *entry.ErrorMessage
 		}
+		if entry.IsValid != nil {
+			item["isValid"] = *entry.IsValid
+		}
 		result = append(result, item)
+	}
+
+	return result, nil
+}
+
+// ValidationStats returns aggregated validation statistics for the specified time range.
+func (r *Resolver) ValidationStats(ctx context.Context, timeRange string) (map[string]interface{}, error) {
+	stats, err := r.repos.Activity.GetValidationStats(ctx, timeRange)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get validation stats: %w", err)
+	}
+
+	// Get recent invalid entries
+	recentInvalid, err := r.repos.Activity.GetRecentInvalidActivity(ctx, 20)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get recent invalid activity: %w", err)
+	}
+
+	// Map recent invalid to GraphQL format
+	recentItems := make([]map[string]interface{}, 0, len(recentInvalid))
+	for _, entry := range recentInvalid {
+		item := map[string]interface{}{
+			"id":         entry.ID,
+			"timestamp":  entry.Timestamp.Format(time.RFC3339),
+			"operation":  entry.Operation,
+			"collection": entry.Collection,
+			"did":        entry.DID,
+			"status":     entry.Status,
+			"eventJson":  entry.EventJSON,
+		}
+		if entry.RKey != nil {
+			item["rkey"] = *entry.RKey
+		}
+		if entry.ErrorMessage != nil {
+			item["errorMessage"] = *entry.ErrorMessage
+		}
+		if entry.IsValid != nil {
+			item["isValid"] = *entry.IsValid
+		}
+		recentItems = append(recentItems, item)
+	}
+
+	// Map invalidByCollection
+	byCollection := make([]map[string]interface{}, 0, len(stats.InvalidByCollection))
+	for _, c := range stats.InvalidByCollection {
+		byCollection = append(byCollection, map[string]interface{}{
+			"collection": c.Collection,
+			"count":      c.Count,
+		})
+	}
+
+	result := map[string]interface{}{
+		"invalidCount":       stats.InvalidCount,
+		"invalidByCollection": byCollection,
+		"recentInvalid":      recentItems,
+	}
+	if stats.LastInvalidAt != nil {
+		result["lastInvalidAt"] = stats.LastInvalidAt.Format(time.RFC3339)
 	}
 
 	return result, nil

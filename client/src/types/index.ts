@@ -59,6 +59,19 @@ export interface OAuthClient {
   createdAt: string;
 }
 
+// Validation Stats
+export interface ValidationStats {
+  invalidCount: number;
+  invalidByCollection: CollectionValidationCount[];
+  recentInvalid: ActivityEntry[];
+  lastInvalidAt?: string;
+}
+
+export interface CollectionValidationCount {
+  collection: string;
+  count: number;
+}
+
 // Time Range
 export type TimeRange = "ONE_HOUR" | "THREE_HOURS" | "SIX_HOURS" | "ONE_DAY" | "SEVEN_DAYS";
 
@@ -93,4 +106,8 @@ export interface OAuthClientsResponse {
 
 export interface IsBackfillingResponse {
   isBackfilling: boolean;
+}
+
+export interface ValidationStatsResponse {
+  validationStats: ValidationStats;
 }
