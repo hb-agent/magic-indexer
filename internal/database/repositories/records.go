@@ -618,6 +618,15 @@ func (r *RecordsRepository) GetCount(ctx context.Context) (int64, error) {
 	return count, err
 }
 
+// GetCollectionCount returns the total number of records in a collection.
+func (r *RecordsRepository) GetCollectionCount(ctx context.Context, collection string) (int64, error) {
+	var count int64
+	err := r.db.QueryRow(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM record WHERE collection = %s", r.db.Placeholder(1)),
+		[]database.Value{database.Text(collection)}, &count)
+	return count, err
+}
+
 // GetCollectionStats returns statistics for all collections.
 func (r *RecordsRepository) GetCollectionStats(ctx context.Context) ([]CollectionStat, error) {
 	sqlStr := "SELECT collection, COUNT(*) as count FROM record GROUP BY collection ORDER BY count DESC"

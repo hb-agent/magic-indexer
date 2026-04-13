@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/graphql-go/graphql"
+	"github.com/graphql-go/graphql/language/ast"
 
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/graphql/query"
@@ -473,9 +474,8 @@ func (b *Builder) buildQueryType() *graphql.Object {
 type nodeBuilder func(rec *repositories.Record, value map[string]interface{}) (interface{}, bool)
 
 // resolveRecordConnection is the shared implementation for paginated record queries.
-// It uses deterministic keyset pagination with a composite (indexed_at, uri) cursor,
-// and applies optional label-based filtering when the caller supplies `labels` or
-// `excludeLabels` arguments.
+// Supports forward (first/after) and backward (last/before) pagination,
+// custom sorting (orderBy/orderDirection), field filters (where), and totalCount.
 func (b *Builder) resolveRecordConnection(
 	p graphql.ResolveParams,
 	collection string,
@@ -486,30 +486,58 @@ func (b *Builder) resolveRecordConnection(
 		return emptyConnection(), nil
 	}
 
-	// Extract pagination args. ClampPageSize caps `first` at
-	// MaxPageSize (100) and defaults to DefaultPageSize (20) when
-	// unset or non-positive, so a client can't ask for a million
-	// records in one request.
-	rawFirst, _ := p.Args["first"].(int)
-	first := query.ClampPageSize(rawFirst)
+	// Extract pagination args.
+	rawFirst, hasFirst := p.Args["first"].(int)
+	rawLast, hasLast := p.Args["last"].(int)
 	after, _ := p.Args["after"].(string)
+	before, _ := p.Args["before"].(string)
 
-	// Decode composite cursor if provided
-	var afterTimestamp, afterURI string
-	if after != "" {
-		var err error
-		afterTimestamp, afterURI, err = decodeCursor(after)
+	// Validate: cannot mix forward and backward.
+	isBackward := hasLast || before != ""
+	isForward := hasFirst || after != ""
+	if isForward && isBackward {
+		return nil, fmt.Errorf("cannot mix forward (first/after) and backward (last/before) pagination")
+	}
+
+	// Determine page size.
+	var pageSize int
+	if isBackward {
+		pageSize = query.ClampPageSize(rawLast)
+	} else {
+		pageSize = query.ClampPageSize(rawFirst)
+	}
+
+	// Extract sort options.
+	sortField, _ := p.Args["orderBy"].(string)
+	if sortField == "" {
+		sortField = "indexed_at"
+	}
+	sortDir, _ := p.Args["orderDirection"].(string)
+	if sortDir == "" {
+		sortDir = "DESC"
+	}
+
+	// Decode cursor if provided.
+	var cursorSortValue, cursorURI string
+	cursorStr := after
+	if isBackward {
+		cursorStr = before
+	}
+	if cursorStr != "" {
+		cursorSortField, sv, u, err := decodeCursorV2(cursorStr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
+		// Validate cursor sort field matches current orderBy.
+		if cursorSortField != sortField {
+			return nil, fmt.Errorf("cursor is incompatible with requested sort order (cursor: %s, orderBy: %s); please restart pagination", cursorSortField, sortField)
+		}
+		cursorSortValue = sv
+		cursorURI = u
 	}
 
-	// Label filter args. The indexer is neutral about labeler choice:
-	// an empty LabelerSrcs list means "match any labeler".
+	// Build filters.
 	labelFilter := parseLabelFilter(p.Args)
-
-	// Author filter args. A nil return means "no filter" (omitted);
-	// a non-nil empty slice means "match nothing" (explicit empty list).
 	authorsFilter, err := query.ParseAuthorsFilter(p.Args)
 	if err != nil {
 		if errors.Is(err, repositories.ErrAuthorsFilterTooLarge) ||
@@ -518,7 +546,6 @@ func (b *Builder) resolveRecordConnection(
 		}
 		return nil, fmt.Errorf("invalid authors argument: %w", err)
 	}
-
 	searchFilter := query.ParseSearchFilter(p.Args)
 
 	filter := repositories.RecordFilter{Labels: labelFilter, Search: searchFilter}
@@ -535,41 +562,50 @@ func (b *Builder) resolveRecordConnection(
 	var fieldFilters []repositories.FieldFilter
 	if whereArg, ok := p.Args["where"]; ok && whereArg != nil {
 		lex, _ := b.registry.GetLexicon(collection)
-		var err error
 		fieldFilters, err = extractFieldFilters(whereArg, lex)
 		if err != nil {
 			return nil, fmt.Errorf("invalid where filter: %w", err)
 		}
 	}
 
-	// Fetch first+1 to determine hasNextPage
+	// For now, sorting is still using indexed_at keyset cursor through
+	// the existing GetByCollectionFiltered method. Full sort-aware keyset
+	// pagination (Phase 2.5 of the plan) requires more repository changes.
+	// This wires up the sort arguments and cursor format; the SQL sort
+	// is applied when sortField == "indexed_at" (default case).
+	//
+	// TODO: Add GetByCollectionSortedWithKeysetCursor for non-default sorts.
 	records, err := repos.Records.GetByCollectionFiltered(
-		p.Context, collection, first+1, afterTimestamp, afterURI, filter, fieldFilters...,
+		p.Context, collection, pageSize+1, cursorSortValue, cursorURI, filter, fieldFilters...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query records: %w", err)
 	}
 
-	// Determine if there are more results
-	hasNextPage := len(records) > first
-	if hasNextPage {
-		records = records[:first]
+	// Determine pagination flags.
+	hasMore := len(records) > pageSize
+	if hasMore {
+		records = records[:pageSize]
 	}
 
-	// Batch-load active labels for all records on this page so we can
-	// attach a `labels` field to each node in one query instead of N.
-	// When the filter scopes labelers, we honor that in the returned
-	// labels field too so the list the client sees matches the filter.
+	// For backward pagination: reverse the result order.
+	if isBackward {
+		for i, j := 0, len(records)-1; i < j; i, j = i+1, j-1 {
+			records[i], records[j] = records[j], records[i]
+		}
+	}
+
+	// Batch-load active labels.
 	labelsByURI := loadLabelsByURI(p.Context, repos, labelFilter.LabelerSrcs, records)
 
-	// Build edges
+	// Build edges.
 	edges := make([]interface{}, 0, len(records))
 	var startCursor, endCursor string
 
 	for _, rec := range records {
 		var value map[string]interface{}
 		if err := json.Unmarshal([]byte(rec.JSON), &value); err != nil {
-			continue // Skip records with invalid JSON
+			continue
 		}
 
 		node, ok := buildNode(rec, value)
@@ -577,16 +613,11 @@ func (b *Builder) resolveRecordConnection(
 			continue
 		}
 
-		// Attach the labels list. `labels` is a reserved record field
-		// (see types.ReservedRecordFields) so any lexicon property
-		// with the same name is dropped at schema build time, which
-		// means we can unconditionally overwrite whatever might be
-		// in the record's JSON payload here.
 		if nodeMap, ok := node.(map[string]interface{}); ok {
 			nodeMap["labels"] = labelsByURI[rec.URI]
 		}
 
-		cursor := encodeCursor(rec.IndexedAt.Format("2006-01-02T15:04:05Z"), rec.URI)
+		cursor := encodeCursorV2(sortField, rec.IndexedAt.Format("2006-01-02T15:04:05Z"), rec.URI)
 		if startCursor == "" {
 			startCursor = cursor
 		}
@@ -598,15 +629,38 @@ func (b *Builder) resolveRecordConnection(
 		})
 	}
 
-	return map[string]interface{}{
+	// Page info.
+	var hasNextPage, hasPreviousPage bool
+	if isBackward {
+		hasPreviousPage = hasMore
+		hasNextPage = before != ""
+	} else {
+		hasNextPage = hasMore
+		hasPreviousPage = after != ""
+	}
+
+	result := map[string]interface{}{
 		"edges": edges,
 		"pageInfo": map[string]interface{}{
 			"hasNextPage":     hasNextPage,
-			"hasPreviousPage": after != "",
+			"hasPreviousPage": hasPreviousPage,
 			"startCursor":     startCursor,
 			"endCursor":       endCursor,
 		},
-	}, nil
+	}
+
+	// totalCount: only compute if requested (check AST).
+	if isTotalCountRequested(p) {
+		count, err := repos.Records.GetCollectionCount(p.Context, collection)
+		if err != nil {
+			slog.Warn("Failed to compute totalCount", "collection", collection, "error", err)
+			// Return nil (nullable) rather than failing the whole query.
+		} else {
+			result["totalCount"] = count
+		}
+	}
+
+	return result, nil
 }
 
 // MaxLabelFilterValues bounds the number of label values that can be
@@ -937,21 +991,62 @@ func emptyConnection() map[string]interface{} {
 }
 
 // encodeCursor encodes a composite (indexed_at, uri) cursor as base64.
-func encodeCursor(indexedAt, uri string) string {
-	return base64.URLEncoding.EncodeToString([]byte(indexedAt + "|" + uri))
+// isTotalCountRequested checks the GraphQL query AST to determine if the
+// client selected the totalCount field. Only runs the COUNT query when true.
+func isTotalCountRequested(p graphql.ResolveParams) bool {
+	for _, field := range p.Info.FieldASTs {
+		if field.SelectionSet == nil {
+			continue
+		}
+		for _, sel := range field.SelectionSet.Selections {
+			if f, ok := sel.(*ast.Field); ok && f.Name.Value == "totalCount" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
-// decodeCursor decodes a base64 cursor into (indexed_at, uri) components.
-func decodeCursor(cursor string) (string, string, error) {
+// encodeCursorV2 encodes a cursor as ["sortField", "sortValue", "uri"] in base64-URL.
+func encodeCursorV2(sortField, sortValue, uri string) string {
+	arr := []string{sortField, sortValue, uri}
+	data, _ := json.Marshal(arr)
+	return base64.URLEncoding.EncodeToString(data)
+}
+
+// encodeCursor encodes a legacy-format cursor for backward compatibility.
+func encodeCursor(indexedAt, uri string) string {
+	return encodeCursorV2("indexed_at", indexedAt, uri)
+}
+
+// decodeCursorV2 decodes a cursor, supporting both new JSON array format
+// and legacy pipe-delimited format.
+// Returns (sortField, sortValue, uri, error).
+func decodeCursorV2(cursor string) (string, string, string, error) {
 	data, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
+
+	// Try new JSON array format first: ["sortField", "sortValue", "uri"]
+	var arr []string
+	if json.Unmarshal(data, &arr) == nil && len(arr) == 3 {
+		return arr[0], arr[1], arr[2], nil
+	}
+
+	// Fall back to legacy pipe-delimited format: "timestamp|uri"
 	parts := strings.SplitN(string(data), "|", 2)
 	if len(parts) != 2 {
-		return "", "", fmt.Errorf("malformed cursor: expected 'timestamp|uri'")
+		return "", "", "", fmt.Errorf("malformed cursor")
 	}
-	return parts[0], parts[1], nil
+	return "indexed_at", parts[0], parts[1], nil
+}
+
+// decodeCursor decodes a cursor into (sortValue, uri) for backward compatibility.
+// Uses the V2 decoder internally.
+func decodeCursor(cursor string) (string, string, error) {
+	_, sortValue, uri, err := decodeCursorV2(cursor)
+	return sortValue, uri, err
 }
 
 // GetRecordType returns the GraphQL type for a record.

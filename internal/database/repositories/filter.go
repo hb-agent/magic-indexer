@@ -52,6 +52,45 @@ const (
 	MinStartsWithLength = 1
 )
 
+// SortDirection represents the sort order.
+type SortDirection string
+
+const (
+	SortASC  SortDirection = "ASC"
+	SortDESC SortDirection = "DESC"
+)
+
+// SortOption describes how to sort query results.
+type SortOption struct {
+	// Field is a lexicon property name or "indexed_at".
+	Field string
+	// Direction is ASC or DESC.
+	Direction SortDirection
+}
+
+// IsDefault returns true if this is the default sort (indexed_at DESC).
+func (s *SortOption) IsDefault() bool {
+	return s == nil || (s.Field == "indexed_at" && s.Direction == SortDESC)
+}
+
+// BuildSortExpr returns the SQL expression for the sort field.
+// Direct columns (indexed_at, uri, etc.) use the column name.
+// JSON fields use json->>'fieldName'.
+func (s *SortOption) BuildSortExpr() (string, error) {
+	if s == nil || s.Field == "indexed_at" {
+		return "indexed_at", nil
+	}
+	switch s.Field {
+	case "uri", "did", "collection", "cid", "rkey":
+		return s.Field, nil
+	default:
+		if err := ValidateFieldName(s.Field); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("json->>'%s'", s.Field), nil
+	}
+}
+
 var fieldNameRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // ValidateFieldName checks that a field name is safe for SQL use.
