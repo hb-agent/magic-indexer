@@ -49,11 +49,25 @@ func buildWhereInputType(lex *lexicon.Lexicon) *graphql.InputObject {
 	fieldName := lexicon.ToFieldName(lex.ID)
 	name := capitalize(fieldName) + "WhereInput"
 
-	return graphql.NewInputObject(graphql.InputObjectConfig{
+	// Create the InputObject first, then add self-referential _and/_or via Thunk.
+	whereInput := graphql.NewInputObject(graphql.InputObjectConfig{
 		Name:        name,
-		Description: fmt.Sprintf("Filter conditions for %s records. All conditions are combined with AND.", lex.ID),
+		Description: fmt.Sprintf("Filter conditions for %s records. Field-level conditions are AND-composed. Use _and/_or for boolean composition (max depth %d).", lex.ID, repositories.MaxFilterDepth),
 		Fields:      fields,
 	})
+
+	// Add _and and _or as self-referential fields using AddFieldConfig
+	// (avoids Thunk complexity — AddFieldConfig resolves after type registration).
+	whereInput.AddFieldConfig("_and", &graphql.InputObjectFieldConfig{
+		Type:        graphql.NewList(whereInput),
+		Description: "All conditions in this list must match (AND). Supports nesting.",
+	})
+	whereInput.AddFieldConfig("_or", &graphql.InputObjectFieldConfig{
+		Type:        graphql.NewList(whereInput),
+		Description: "At least one condition in this list must match (OR). Supports nesting.",
+	})
+
+	return whereInput
 }
 
 // propertyToFilterInput returns the appropriate GraphQL filter input type for
@@ -69,17 +83,47 @@ func propertyToFilterInput(prop lexicon.Property) *graphql.InputObject {
 	return types.FilterInputForLexiconType(prop.Type)
 }
 
-// extractFieldFilters extracts FieldFilter conditions from a GraphQL `where`
-// argument map. The lexicon is used to determine property types for SQL CAST.
-func extractFieldFilters(whereArg interface{}, lex *lexicon.Lexicon) ([]repositories.FieldFilter, error) {
+// extractFieldFilters extracts a FilterGroup from a GraphQL `where` argument map.
+// Supports recursive _and/_or composition with depth limiting.
+func extractFieldFilters(whereArg interface{}, lex *lexicon.Lexicon) (repositories.FilterGroup, error) {
+	return extractFieldFiltersRecursive(whereArg, lex, 0)
+}
+
+func extractFieldFiltersRecursive(whereArg interface{}, lex *lexicon.Lexicon, depth int) (repositories.FilterGroup, error) {
 	whereMap, ok := whereArg.(map[string]interface{})
 	if !ok {
-		return nil, nil
+		return repositories.FilterGroup{Operator: repositories.GroupAND}, nil
 	}
 
-	var filters []repositories.FieldFilter
+	if depth > repositories.MaxFilterDepth {
+		return repositories.FilterGroup{}, fmt.Errorf("filter nesting exceeds maximum depth of %d", repositories.MaxFilterDepth)
+	}
+
+	group := repositories.FilterGroup{Operator: repositories.GroupAND}
 
 	for fieldName, filterInput := range whereMap {
+		// Handle _and/_or composition.
+		if fieldName == "_and" || fieldName == "_or" {
+			list, ok := filterInput.([]interface{})
+			if !ok {
+				continue
+			}
+			childOp := repositories.GroupAND
+			if fieldName == "_or" {
+				childOp = repositories.GroupOR
+			}
+			childGroup := repositories.FilterGroup{Operator: childOp}
+			for _, item := range list {
+				subGroup, err := extractFieldFiltersRecursive(item, lex, depth+1)
+				if err != nil {
+					return repositories.FilterGroup{}, err
+				}
+				childGroup.Children = append(childGroup.Children, subGroup)
+			}
+			group.Children = append(group.Children, childGroup)
+			continue
+		}
+
 		filterMap, ok := filterInput.(map[string]interface{})
 		if !ok {
 			continue
@@ -109,9 +153,9 @@ func extractFieldFilters(whereArg interface{}, lex *lexicon.Lexicon) ([]reposito
 					LexiconType: lexiconType,
 				}
 				if err := f.Validate(); err != nil {
-					return nil, fmt.Errorf("field %q: %w", fieldName, err)
+					return repositories.FilterGroup{}, fmt.Errorf("field %q: %w", fieldName, err)
 				}
-				filters = append(filters, f)
+				group.Filters = append(group.Filters, f)
 				continue
 			}
 			if op == "" {
@@ -127,18 +171,13 @@ func extractFieldFilters(whereArg interface{}, lex *lexicon.Lexicon) ([]reposito
 				LexiconType: lexiconType,
 			}
 			if err := f.Validate(); err != nil {
-				return nil, fmt.Errorf("field %q, op %q: %w", fieldName, opStr, err)
+				return repositories.FilterGroup{}, fmt.Errorf("field %q, op %q: %w", fieldName, opStr, err)
 			}
-			filters = append(filters, f)
+			group.Filters = append(group.Filters, f)
 		}
 	}
 
-	if len(filters) > repositories.MaxFilterConditions {
-		return nil, fmt.Errorf("too many filter conditions (%d), maximum is %d",
-			len(filters), repositories.MaxFilterConditions)
-	}
-
-	return filters, nil
+	return group, nil
 }
 
 // effectiveType returns the lexicon type to use for SQL CAST decisions.

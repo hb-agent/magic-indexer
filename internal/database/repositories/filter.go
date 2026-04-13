@@ -91,6 +91,122 @@ func (s *SortOption) BuildSortExpr() (string, error) {
 	}
 }
 
+// GroupOperator defines how filters within a group are combined.
+type GroupOperator string
+
+const (
+	GroupAND GroupOperator = "AND"
+	GroupOR  GroupOperator = "OR"
+)
+
+// FilterGroup represents a recursive tree of filter conditions.
+// Field-level filters are leaf nodes; children are sub-groups.
+type FilterGroup struct {
+	Operator GroupOperator
+	Filters  []FieldFilter
+	Children []FilterGroup
+}
+
+// IsEmpty returns true if the group has no filters and no children.
+func (g *FilterGroup) IsEmpty() bool {
+	return len(g.Filters) == 0 && len(g.Children) == 0
+}
+
+// CountConditions returns the total number of leaf filter conditions
+// across the entire tree.
+func (g *FilterGroup) CountConditions() int {
+	count := len(g.Filters)
+	for i := range g.Children {
+		count += g.Children[i].CountConditions()
+	}
+	return count
+}
+
+const (
+	// MaxFilterDepth is the maximum nesting depth for _and/_or groups.
+	MaxFilterDepth = 3
+)
+
+// BuildFilterGroupClause builds a SQL WHERE clause fragment from a FilterGroup tree.
+// Returns the clause (without WHERE keyword), parameter values, and any error.
+// paramOffset is the starting parameter number.
+func BuildFilterGroupClause(group FilterGroup, paramOffset int) (string, []interface{}, error) {
+	// Enforce global condition count.
+	totalConditions := group.CountConditions()
+	if totalConditions > MaxFilterConditions {
+		return "", nil, fmt.Errorf("too many filter conditions (%d across all groups), maximum is %d",
+			totalConditions, MaxFilterConditions)
+	}
+
+	return buildFilterGroupRecursive(group, paramOffset, 0)
+}
+
+func buildFilterGroupRecursive(group FilterGroup, paramIdx int, depth int) (string, []interface{}, error) {
+	if depth > MaxFilterDepth {
+		return "", nil, fmt.Errorf("filter nesting exceeds maximum depth of %d", MaxFilterDepth)
+	}
+
+	if group.IsEmpty() {
+		return "", nil, nil
+	}
+
+	var clauses []string
+	var params []interface{}
+
+	// Build leaf filter clauses.
+	for _, f := range group.Filters {
+		if f.IsNull != nil {
+			if err := f.Validate(); err != nil {
+				return "", nil, err
+			}
+			expr := jsonExtract(f.FieldName, f.IsJSON)
+			if *f.IsNull {
+				clauses = append(clauses, expr+" IS NULL")
+			} else {
+				clauses = append(clauses, expr+" IS NOT NULL")
+			}
+			continue
+		}
+
+		clause, newParams, nextIdx, err := buildSingleFilter(f, paramIdx)
+		if err != nil {
+			return "", nil, err
+		}
+		clauses = append(clauses, clause)
+		params = append(params, newParams...)
+		paramIdx = nextIdx
+	}
+
+	// Build child group clauses recursively.
+	for _, child := range group.Children {
+		childClause, childParams, err := buildFilterGroupRecursive(child, paramIdx, depth+1)
+		if err != nil {
+			return "", nil, err
+		}
+		if childClause != "" {
+			clauses = append(clauses, "("+childClause+")")
+			params = append(params, childParams...)
+			paramIdx += len(childParams)
+		}
+	}
+
+	if len(clauses) == 0 {
+		return "", nil, nil
+	}
+
+	// Single clause doesn't need parens or operator.
+	if len(clauses) == 1 {
+		return clauses[0], params, nil
+	}
+
+	joiner := " AND "
+	if group.Operator == GroupOR {
+		joiner = " OR "
+	}
+
+	return strings.Join(clauses, joiner), params, nil
+}
+
 var fieldNameRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // ValidateFieldName checks that a field name is safe for SQL use.

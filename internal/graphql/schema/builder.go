@@ -559,10 +559,10 @@ func (b *Builder) resolveRecordConnection(
 	}
 
 	// Extract field filters from `where` argument.
-	var fieldFilters []repositories.FieldFilter
+	var filterGroup repositories.FilterGroup
 	if whereArg, ok := p.Args["where"]; ok && whereArg != nil {
 		lex, _ := b.registry.GetLexicon(collection)
-		fieldFilters, err = extractFieldFilters(whereArg, lex)
+		filterGroup, err = extractFieldFilters(whereArg, lex)
 		if err != nil {
 			return nil, fmt.Errorf("invalid where filter: %w", err)
 		}
@@ -576,7 +576,7 @@ func (b *Builder) resolveRecordConnection(
 	//
 	// TODO: Add GetByCollectionSortedWithKeysetCursor for non-default sorts.
 	records, err := repos.Records.GetByCollectionFiltered(
-		p.Context, collection, pageSize+1, cursorSortValue, cursorURI, filter, fieldFilters...,
+		p.Context, collection, pageSize+1, cursorSortValue, cursorURI, filter, &filterGroup,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query records: %w", err)
