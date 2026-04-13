@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -15,8 +14,6 @@ import (
 	"github.com/GainForest/hypergoat/internal/database"
 )
 
-// validJSONFieldName matches safe JSON field names to prevent SQL injection.
-var validJSONFieldName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // Executor implements database.Executor for PostgreSQL.
 type Executor struct {
@@ -108,50 +105,6 @@ func (e *Executor) Placeholders(count, startIndex int) string {
 		placeholders[i] = fmt.Sprintf("$%d", startIndex+i)
 	}
 	return strings.Join(placeholders, ", ")
-}
-
-// JSONExtract generates PostgreSQL JSON extraction SQL.
-// The field parameter is validated to prevent SQL injection.
-func (e *Executor) JSONExtract(column, field string) string {
-	if !validJSONFieldName.MatchString(field) {
-		panic(fmt.Sprintf("postgres: invalid JSON field name: %q (must match ^[a-zA-Z_][a-zA-Z0-9_]*$)", field))
-	}
-	return fmt.Sprintf("%s->>'%s'", column, field)
-}
-
-// JSONExtractPath generates PostgreSQL JSON path extraction SQL.
-// All path segments are validated to prevent SQL injection.
-func (e *Executor) JSONExtractPath(column string, path []string) string {
-	if len(path) == 0 {
-		return column
-	}
-	for _, p := range path {
-		if !validJSONFieldName.MatchString(p) {
-			panic(fmt.Sprintf("postgres: invalid JSON path segment: %q (must match ^[a-zA-Z_][a-zA-Z0-9_]*$)", p))
-		}
-	}
-	if len(path) == 1 {
-		return fmt.Sprintf("%s->>'%s'", column, path[0])
-	}
-
-	// Build the path: column->'a'->'b'->>'c'
-	var sb strings.Builder
-	sb.WriteString(column)
-	for i, p := range path[:len(path)-1] {
-		_ = i
-		sb.WriteString("->'")
-		sb.WriteString(p)
-		sb.WriteString("'")
-	}
-	sb.WriteString("->>'")
-	sb.WriteString(path[len(path)-1])
-	sb.WriteString("'")
-	return sb.String()
-}
-
-// Now returns PostgreSQL's current timestamp function.
-func (e *Executor) Now() string {
-	return "NOW()"
 }
 
 // Close closes the database connection.

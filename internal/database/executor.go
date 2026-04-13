@@ -124,17 +124,6 @@ type Executor interface {
 	// Placeholders returns a comma-separated list of placeholders.
 	Placeholders(count, startIndex int) string
 
-	// JSONExtract generates SQL for extracting a JSON field.
-	// PostgreSQL: column->>'field'
-	JSONExtract(column, field string) string
-
-	// JSONExtractPath generates SQL for extracting a nested JSON path.
-	// PostgreSQL: column->'path'->'to'->>'field'
-	JSONExtractPath(column string, path []string) string
-
-	// Now generates SQL for the current timestamp (NOW()).
-	Now() string
-
 	// Close closes the database connection.
 	Close() error
 

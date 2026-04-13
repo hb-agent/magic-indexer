@@ -54,13 +54,11 @@ func (r *ConfigRepository) Get(ctx context.Context, key string) (string, error) 
 func (r *ConfigRepository) Set(ctx context.Context, key, value string) error {
 	p1 := r.db.Placeholder(1)
 	p2 := r.db.Placeholder(2)
-	now := r.db.Now()
-
 	sqlStr := fmt.Sprintf(`INSERT INTO config (key, value, updated_at)
-		VALUES (%s, %s, %s)
+		VALUES (%s, %s, NOW())
 		ON CONFLICT(key) DO UPDATE SET
 			value = EXCLUDED.value,
-			updated_at = %s`, p1, p2, now, now)
+			updated_at = NOW()`, p1, p2)
 
 	_, err := r.db.Exec(ctx, sqlStr, []database.Value{
 		database.Text(key),
