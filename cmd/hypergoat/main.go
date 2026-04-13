@@ -40,6 +40,7 @@ import (
 	"github.com/GainForest/hypergoat/internal/labeler"
 	"github.com/GainForest/hypergoat/internal/lexicon"
 	"github.com/GainForest/hypergoat/internal/metrics"
+	"github.com/GainForest/hypergoat/internal/tap"
 	"github.com/GainForest/hypergoat/internal/oauth"
 	"github.com/GainForest/hypergoat/internal/server"
 	"github.com/GainForest/hypergoat/internal/workers"
@@ -75,6 +76,7 @@ type backgroundServices struct {
 	workersCancel      context.CancelFunc
 	jsConsumer         *jetstream.Consumer
 	jsCancel           context.CancelFunc
+	tapCancel          context.CancelFunc
 
 	// labelerMu guards the slice and the labeler cancel: startLabeler
 	// appends at startup, backgroundServices.Stop iterates at shutdown,
@@ -100,6 +102,9 @@ func (bg *backgroundServices) Stop() {
 	}
 	if bg.jsCancel != nil {
 		bg.jsCancel()
+	}
+	if bg.tapCancel != nil {
+		bg.tapCancel()
 	}
 	// Snapshot labelers under the lock, then release before calling
 	// Stop() on each — Stop blocks on the consumer's final flush and
@@ -891,7 +896,7 @@ func startJetstream(
 		jsURL = jetstream.DefaultJetstreamURL
 	}
 
-	// Build shared record processor for Jetstream consumer.
+	// Build shared record processor for all consumers (Jetstream or Tap).
 	processor := &ingestion.RecordProcessor{
 		Records:   svc.records,
 		Actors:    svc.actors,
@@ -899,6 +904,44 @@ func startJetstream(
 		PubSub:    pubsub,
 		Validator: validator,
 		ValMode:   cfg.ValidationMode,
+	}
+
+	// If Tap is enabled, start the Tap consumer instead of Jetstream.
+	if cfg.TapEnabled {
+		// Build collection allowlist from config.
+		if cfg.TapCollectionFilters != "" {
+			allowedCollections := make(map[string]bool)
+			for _, col := range strings.Split(cfg.TapCollectionFilters, ",") {
+				col = strings.TrimSpace(col)
+				if col != "" {
+					allowedCollections[col] = true
+				}
+			}
+			processor.AllowedCollections = allowedCollections
+		}
+
+		handler := tap.NewIndexHandler(processor, svc.actors)
+		tapConsumer := tap.NewConsumer(tap.ConsumerConfig{
+			TapURL:      cfg.TapURL,
+			DisableAcks: cfg.TapDisableAcks,
+			MaxRetries:  cfg.TapMaxRetries,
+		}, handler)
+
+		tapCtx, tapCancel := context.WithCancel(context.Background())
+		bg.tapCancel = tapCancel
+
+		go func() {
+			slog.Info("Starting Tap consumer",
+				"url", cfg.TapURL,
+				"disable_acks", cfg.TapDisableAcks,
+			)
+			if err := tapConsumer.Start(tapCtx); err != nil {
+				slog.Error("Tap consumer error", "error", err)
+			}
+		}()
+
+		slog.Info("Tap consumer started (Jetstream disabled)")
+		return
 	}
 
 	if len(collections) > 0 {
