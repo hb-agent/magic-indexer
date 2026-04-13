@@ -1,5 +1,65 @@
 # Changelog
 
+## 2026-04-13 — Hyperindex Feature Port
+
+**Scope:** Port key features from GainForest/hyperindex to magic-indexer, based on a 50-reviewer implementation plan.
+
+### Phase 0: Shared Infrastructure Extraction
+- Extract `RecordProcessor` into `internal/ingestion/` — shared by Jetstream and Tap consumers
+- Extract `CursorFlusher` into `internal/cursor/` — atomic.Int64 cursor tracking with skip-on-idle
+- Extract `RunWithReconnect` into `internal/consumer/` — exponential backoff (1s-2min)
+- Jetstream consumer refactored to use shared packages (no behavior change)
+
+### Phase 1: Rich GraphQL Filtering
+- Per-collection `where` argument with per-field filter inputs
+- Operators: eq, neq, gt, lt, gte, lte, in, contains, startsWith, isNull
+- `eq` uses JSONB containment (`@>`) for GIN index support
+- `neq` includes records where field is absent (NULL semantics)
+- `contains`/`startsWith` escape `\`, `%`, `_` correctly
+- `in` uses `= ANY($N::text[])` single array parameter
+- Field name validation via regex (defense-in-depth)
+- Migration 013: GIN jsonb_path_ops index (non-transactional migration support added)
+- Deferred: `_and`/`_or` composition (#38), nested field filtering (#40), expression indexes (#43)
+
+### Phase 2: Sorting / orderBy
+- `orderBy` and `orderDirection` (ASC/DESC) arguments on collection queries
+- `SortOption` type with `BuildSortExpr()` for SQL expression generation
+- Cursor format upgraded to `["sortField", "sortValue", "uri"]` JSON array
+- Backward-compatible cursor decoding (legacy pipe-delimited format accepted)
+- Cursor sort-field mismatch detection with clear error message
+- Deferred: multi-column sort (#39)
+
+### Phase 3: totalCount
+- `totalCount` field on connection types (lazy — only computed when requested via AST check)
+- `GetCollectionCount()` in RecordsRepository
+- Returns null on error (does not fail the query)
+
+### Phase 4: Backward Pagination
+- `last`/`before` arguments for reverse traversal
+- Mixed forward+backward rejected with clear error message
+- Results reversed in-memory to maintain correct edge order
+- `hasPreviousPage`/`hasNextPage` per Relay spec
+
+### Phase 5: Tap Consumer
+- New `internal/tap/` package for crypto-verified event ingestion via Bluesky Tap sidecar
+- Connection/Dialer interfaces for testability
+- Synchronous dispatch (correct backpressure for ack-based delivery)
+- Panic recovery, exponential retry (1s/2s/4s), per-event context timeout
+- IndexHandler delegates to shared RecordProcessor
+- Admin client for Tap HTTP API (health, repos/add, repos/remove)
+- Config: TAP_ENABLED, TAP_URL, TAP_ADMIN_PASSWORD, TAP_DISABLE_ACKS, TAP_COLLECTION_FILTERS, TAP_MAX_RETRIES
+- Migration 014: is_active column on actors table
+- docker-compose.tap.yml for local development
+- Trust boundary: Tap verifies MST inclusion proofs, NOT signing key vs DID document
+- Deferred: signature verification (#41), multi-relay (#42)
+
+### Phase 6: Tap/Jetstream Toggle
+- TAP_ENABLED=true starts Tap consumer instead of Jetstream
+- Collection allowlist enforced via RecordProcessor
+- Jetstream cursor preserved for rollback
+
+---
+
 ## 2026-04-13 — Security & Code Quality Audit
 
 **Scope:** Full codebase security audit covering the Go backend (hypergoat), Next.js admin client, Docker/CI infrastructure, and all dependencies.
