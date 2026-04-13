@@ -381,7 +381,7 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	limit int,
 	afterTimestamp, afterURI string,
 	filter RecordFilter,
-	fieldFilters ...FieldFilter,
+	filterGroup *FilterGroup,
 ) ([]*Record, error) {
 	// Load-bearing empty-authors short-circuit. See RecordFilter.Authors
 	// field doc for why this cannot be collapsed into "no filter".
@@ -411,7 +411,8 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	// Fast path: no filters at all. Delegate to the plain keyset path
 	// to avoid the (cheap but nonzero) overhead of building the shared
 	// filter SQL when no constraints apply.
-	if filter.Labels.IsEmpty() && len(authors) == 0 && filter.Search == "" {
+	hasFieldFilters := filterGroup != nil && !filterGroup.IsEmpty()
+	if filter.Labels.IsEmpty() && len(authors) == 0 && filter.Search == "" && !hasFieldFilters {
 		return r.GetByCollectionWithKeysetCursor(ctx, collection, limit, afterTimestamp, afterURI)
 	}
 
@@ -460,14 +461,14 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 		metrics.RecordSearchApplied()
 	}
 
-	// Field filters from `where` argument.
-	if len(fieldFilters) > 0 {
-		fieldClause, fieldParams, err := BuildFieldFilterClause(fieldFilters, paramIdx)
+	// Field filters from `where` argument (supports _and/_or composition).
+	if filterGroup != nil && !filterGroup.IsEmpty() {
+		fieldClause, fieldParams, err := BuildFilterGroupClause(*filterGroup, paramIdx)
 		if err != nil {
 			return nil, fmt.Errorf("field filter error: %w", err)
 		}
 		if fieldClause != "" {
-			whereClauses = append(whereClauses, fieldClause)
+			whereClauses = append(whereClauses, "("+fieldClause+")")
 			args = append(args, fieldParams...)
 			paramIdx += len(fieldParams)
 		}
@@ -581,7 +582,7 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 	filter LabelFilter,
 ) ([]*Record, error) {
 	return r.GetByCollectionFiltered(ctx, collection, limit, afterTimestamp, afterURI,
-		RecordFilter{Labels: filter})
+		RecordFilter{Labels: filter}, nil)
 }
 
 // GetByDID retrieves records for a specific DID (up to 10 000).
