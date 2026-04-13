@@ -311,13 +311,17 @@ func (b *Bridge) RefreshTokens(ctx context.Context, req RefreshTokensRequest) (*
 
 // fetchTokens performs the token request with DPoP and optional nonce retry.
 func (b *Bridge) fetchTokens(ctx context.Context, tokenURL string, body url.Values, dpopKey *DPoPKeyPair, issuer string, nonce *string) (*TokenResponse, error) {
-	// Add client_assertion if signing key is configured
+	// Add client_assertion if signing key is configured. If assertion
+	// creation fails, propagate the error — a silently missing assertion
+	// would cause the token exchange to fail with a confusing server-side
+	// "invalid_client" error instead of a clear local diagnostic.
 	if b.signingKey != nil {
 		assertion, err := b.createClientAssertion(issuer)
-		if err == nil {
-			body.Set("client_assertion", assertion)
-			body.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+		if err != nil {
+			return nil, &BridgeError{Type: ErrTypeTokenExchange, Message: "failed to create client assertion", Cause: err}
 		}
+		body.Set("client_assertion", assertion)
+		body.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
 	}
 
 	// Create request
