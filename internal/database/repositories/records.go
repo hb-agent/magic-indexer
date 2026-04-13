@@ -379,8 +379,9 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	ctx context.Context,
 	collection string,
 	limit int,
-	afterTimestamp, afterURI string,
+	afterSortValue, afterURI string,
 	filter RecordFilter,
+	sortOpt *SortOption,
 	filterGroup *FilterGroup,
 ) ([]*Record, error) {
 	// Load-bearing empty-authors short-circuit. See RecordFilter.Authors
@@ -413,7 +414,7 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	// filter SQL when no constraints apply.
 	hasFieldFilters := filterGroup != nil && !filterGroup.IsEmpty()
 	if filter.Labels.IsEmpty() && len(authors) == 0 && filter.Search == "" && !hasFieldFilters {
-		return r.GetByCollectionWithKeysetCursor(ctx, collection, limit, afterTimestamp, afterURI)
+		return r.GetByCollectionWithKeysetCursor(ctx, collection, limit, afterSortValue, afterURI)
 	}
 
 	var (
@@ -474,14 +475,36 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 		}
 	}
 
-	// keyset cursor
-	if afterTimestamp != "" || afterURI != "" {
+	// Build sort expression.
+	sortExpr := "r.indexed_at"
+	sortDir := SortDESC
+	if sortOpt != nil {
+		expr, err := sortOpt.BuildSortExpr()
+		if err != nil {
+			return nil, fmt.Errorf("sort expression error: %w", err)
+		}
+		switch sortOpt.Field {
+		case "indexed_at", "uri", "did", "collection", "cid", "rkey":
+			sortExpr = "r." + expr
+		default:
+			sortExpr = "r." + expr
+		}
+		sortDir = sortOpt.Direction
+	}
+
+	// keyset cursor using sort expression.
+	if afterSortValue != "" || afterURI != "" {
 		p1 := ph()
 		p2 := ph()
 		p3 := ph()
-		whereClauses = append(whereClauses,
-			fmt.Sprintf("(r.indexed_at < %s OR (r.indexed_at = %s AND r.uri < %s))", p1, p2, p3))
-		args = append(args, afterTimestamp, afterTimestamp, afterURI)
+		if sortDir == SortDESC {
+			whereClauses = append(whereClauses,
+				fmt.Sprintf("(%s < %s OR (%s = %s AND r.uri < %s))", sortExpr, p1, sortExpr, p2, p3))
+		} else {
+			whereClauses = append(whereClauses,
+				fmt.Sprintf("(%s > %s OR (%s = %s AND r.uri > %s))", sortExpr, p1, sortExpr, p2, p3))
+		}
+		args = append(args, afterSortValue, afterSortValue, afterURI)
 	}
 
 	// labelFilterSub builds an EXISTS / NOT EXISTS subquery for the
@@ -553,10 +576,17 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	}
 	selectCols := strings.Join(prefixed, ", ")
 
+	uriDir := "DESC"
+	if sortDir == SortASC {
+		uriDir = "ASC"
+	}
+	orderBy := fmt.Sprintf("%s %s NULLS LAST, r.uri %s", sortExpr, sortDir, uriDir)
+
 	sqlStr := fmt.Sprintf(
-		"SELECT %s FROM record r WHERE %s ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
+		"SELECT %s FROM record r WHERE %s ORDER BY %s LIMIT %d",
 		selectCols,
 		strings.Join(whereClauses, " AND "),
+		orderBy,
 		limit,
 	)
 
@@ -582,7 +612,7 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 	filter LabelFilter,
 ) ([]*Record, error) {
 	return r.GetByCollectionFiltered(ctx, collection, limit, afterTimestamp, afterURI,
-		RecordFilter{Labels: filter}, nil)
+		RecordFilter{Labels: filter}, nil, nil)
 }
 
 // GetByDID retrieves records for a specific DID (up to 10 000).

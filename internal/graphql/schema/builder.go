@@ -512,10 +512,14 @@ func (b *Builder) resolveRecordConnection(
 	if sortField == "" {
 		sortField = "indexed_at"
 	}
-	// TODO: Wire sortDir into repository query when sort-aware keyset
-	// pagination is implemented for non-default orderBy fields.
-	// sortDir, _ := p.Args["orderDirection"].(string)
-	_ = p.Args["orderDirection"] // acknowledged, wired when repo layer supports it
+	sortDirStr, _ := p.Args["orderDirection"].(string)
+	if sortDirStr == "" {
+		sortDirStr = "DESC"
+	}
+	sortOpt := &repositories.SortOption{
+		Field:     sortField,
+		Direction: repositories.SortDirection(sortDirStr),
+	}
 
 	// Decode cursor if provided.
 	var cursorSortValue, cursorURI string
@@ -576,7 +580,7 @@ func (b *Builder) resolveRecordConnection(
 	//
 	// TODO: Add GetByCollectionSortedWithKeysetCursor for non-default sorts.
 	records, err := repos.Records.GetByCollectionFiltered(
-		p.Context, collection, pageSize+1, cursorSortValue, cursorURI, filter, &filterGroup,
+		p.Context, collection, pageSize+1, cursorSortValue, cursorURI, filter, sortOpt, &filterGroup,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query records: %w", err)

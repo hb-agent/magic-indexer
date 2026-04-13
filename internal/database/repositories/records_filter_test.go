@@ -41,7 +41,7 @@ func TestGetByCollectionFiltered_AuthorsNil_MatchesAll(t *testing.T) {
 	ctx := context.Background()
 
 	got, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
-		repositories.RecordFilter{Authors: nil}, nil)
+		repositories.RecordFilter{Authors: nil}, nil, nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestGetByCollectionFiltered_AuthorsEmpty_ReturnsEmpty(t *testing.T) {
 	ctx := context.Background()
 
 	got, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
-		repositories.RecordFilter{Authors: []string{}}, nil)
+		repositories.RecordFilter{Authors: []string{}}, nil, nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestGetByCollectionFiltered_AuthorsSingleDID(t *testing.T) {
 	ctx := context.Background()
 
 	got, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
-		repositories.RecordFilter{Authors: []string{"did:plc:bob"}}, nil)
+		repositories.RecordFilter{Authors: []string{"did:plc:bob"}}, nil, nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestGetByCollectionFiltered_AuthorsMultipleDIDs(t *testing.T) {
 	ctx := context.Background()
 
 	got, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
-		repositories.RecordFilter{Authors: []string{"did:plc:alice", "did:plc:carol"}}, nil)
+		repositories.RecordFilter{Authors: []string{"did:plc:alice", "did:plc:carol"}}, nil, nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestGetByCollectionFiltered_AuthorsAtCap(t *testing.T) {
 		dids[i] = fmt.Sprintf("did:plc:filler%d", i)
 	}
 	got, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
-		repositories.RecordFilter{Authors: dids}, nil)
+		repositories.RecordFilter{Authors: dids}, nil, nil)
 	if err != nil {
 		t.Fatalf("expected no error at cap, got: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestGetByCollectionFiltered_AuthorsExceedsCap(t *testing.T) {
 		dids[i] = fmt.Sprintf("did:plc:x%d", i)
 	}
 	_, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
-		repositories.RecordFilter{Authors: dids}, nil)
+		repositories.RecordFilter{Authors: dids}, nil, nil)
 	if err == nil {
 		t.Fatal("expected ErrAuthorsFilterTooLarge, got nil")
 	}
@@ -138,7 +138,7 @@ func TestGetByCollectionFiltered_AuthorsDuplicates(t *testing.T) {
 	ctx := context.Background()
 
 	got, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
-		repositories.RecordFilter{Authors: []string{"did:plc:bob", "did:plc:bob", "did:plc:bob"}}, nil)
+		repositories.RecordFilter{Authors: []string{"did:plc:bob", "did:plc:bob", "did:plc:bob"}}, nil, nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestGetByCollectionFiltered_AuthorsCollectionScoping(t *testing.T) {
 	// Alice has records in both col.a and col.b. Querying col.b with
 	// authors=alice should only return col.b records.
 	got, err := db.Records.GetByCollectionFiltered(ctx, "col.b", 100, "", "",
-		repositories.RecordFilter{Authors: []string{"did:plc:alice"}}, nil)
+		repositories.RecordFilter{Authors: []string{"did:plc:alice"}}, nil, nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestGetByCollectionFiltered_KeysetPaginationStability(t *testing.T) {
 	var afterTS, afterURI string
 	pages := 0
 	for {
-		page, err := db.Records.GetByCollectionFiltered(ctx, "col.pag", 3, afterTS, afterURI, filter, nil)
+		page, err := db.Records.GetByCollectionFiltered(ctx, "col.pag", 3, afterTS, afterURI, filter, nil, nil)
 		if err != nil {
 			t.Fatalf("page %d: %v", pages, err)
 		}
@@ -241,7 +241,7 @@ func TestGetByCollectionFiltered_AuthorsWithLabelInclude(t *testing.T) {
 				LabelerSrcs: []string{"did:plc:lab1"},
 				Include:     []string{"approved"},
 			},
-		}, nil)
+		}, nil, nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestGetByCollectionFiltered_AuthorsWithLabelExclude(t *testing.T) {
 				LabelerSrcs: []string{"did:plc:lab2"},
 				Exclude:     []string{"spam"},
 			},
-		}, nil)
+		}, nil, nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestGetByCollectionFiltered_AuthorsCaseSensitive(t *testing.T) {
 	}
 
 	got, err := db.Records.GetByCollectionFiltered(ctx, "col.cs", 100, "", "",
-		repositories.RecordFilter{Authors: []string{"did:plc:abc"}}, nil)
+		repositories.RecordFilter{Authors: []string{"did:plc:abc"}}, nil, nil)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
