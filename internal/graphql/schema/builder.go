@@ -387,6 +387,10 @@ func (b *Builder) buildQueryType() *graphql.Object {
 	for k, v := range query.LabelFilterArgs() {
 		genericRecordsArgs[k] = v
 	}
+	genericRecordsArgs["search"] = &graphql.ArgumentConfig{
+		Type:        graphql.String,
+		Description: "Full-text search across title, shortDescription, description, and workScope.",
+	}
 	fields["records"] = &graphql.Field{
 		Type:        genericRecordConnectionType,
 		Description: "Query records from any collection (useful for collections without lexicon schemas)",
@@ -501,7 +505,9 @@ func (b *Builder) resolveRecordConnection(
 		return nil, fmt.Errorf("invalid authors argument: %w", err)
 	}
 
-	filter := repositories.RecordFilter{Labels: labelFilter}
+	searchFilter := query.ParseSearchFilter(p.Args)
+
+	filter := repositories.RecordFilter{Labels: labelFilter, Search: searchFilter}
 	if authorsFilter != nil {
 		filter.Authors = *authorsFilter
 		if len(*authorsFilter) == 0 {

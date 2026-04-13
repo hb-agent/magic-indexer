@@ -119,6 +119,13 @@ var (
 			Help: "Number of record queries rejected because authors exceeded the maximum size.",
 		},
 	)
+
+	recordsSearchAppliedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "hypergoat_records_search_applied_total",
+			Help: "Number of record queries where a full-text search filter was applied.",
+		},
+	)
 )
 
 func init() {
@@ -134,6 +141,7 @@ func init() {
 		recordsAuthorsFilterSize,
 		recordsAuthorsFilterEmptyBlockedTotal,
 		recordsAuthorsFilterTooLargeTotal,
+		recordsSearchAppliedTotal,
 		recordValidationFailedTotal,
 	)
 }
@@ -203,6 +211,12 @@ func RecordAuthorsFilterEmptyBlocked() {
 // rejected because the authors list exceeded MaxAuthorsFilterSize.
 func RecordAuthorsFilterTooLarge() {
 	recordsAuthorsFilterTooLargeTotal.Inc()
+}
+
+// RecordSearchApplied is incremented when a record query uses a
+// full-text search filter.
+func RecordSearchApplied() {
+	recordsSearchAppliedTotal.Inc()
 }
 
 // --- Record validation metrics ---

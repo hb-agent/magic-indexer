@@ -14,6 +14,7 @@ import (
 
 	"github.com/GainForest/hypergoat/internal/atproto"
 	"github.com/GainForest/hypergoat/internal/database"
+	"github.com/GainForest/hypergoat/internal/metrics"
 )
 
 // Batch size constants for SQL operations.
@@ -354,6 +355,10 @@ func (f LabelFilter) IsEmpty() bool {
 	return len(f.Include) == 0 && len(f.Exclude) == 0
 }
 
+// MaxSearchLength is the server-enforced cap on the length of a full-text
+// search query string. Queries longer than this are truncated.
+const MaxSearchLength = 500
+
 // MaxAuthorsFilterSize is the server-enforced cap on the number of DIDs
 // passed in the Authors filter. Chosen to stay comfortably under SQLite's
 // default 999-parameter limit (even when composed with other filters and
@@ -390,13 +395,17 @@ type RecordFilter struct {
 	// Labels narrows results via the existing label Include/Exclude
 	// semantics, unchanged from the previous LabelFilter path.
 	Labels LabelFilter
+
+	// Search is the full-text search query applied against the record's
+	// search_vector tsvector column.
+	Search string
 }
 
 // IsEmpty reports whether the filter imposes no constraints. A nil
 // Authors slice means "no author filter"; an empty-but-non-nil Authors
 // slice means "match nothing" and does NOT count as empty.
 func (f RecordFilter) IsEmpty() bool {
-	return f.Authors == nil && f.Labels.IsEmpty()
+	return f.Authors == nil && f.Labels.IsEmpty() && f.Search == ""
 }
 
 // GetByCollectionFiltered is the canonical filtered-records query path.
@@ -444,7 +453,7 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	// Fast path: no filters at all. Delegate to the plain keyset path
 	// to avoid the (cheap but nonzero) overhead of building the shared
 	// filter SQL when no constraints apply.
-	if filter.Labels.IsEmpty() && len(authors) == 0 {
+	if filter.Labels.IsEmpty() && len(authors) == 0 && filter.Search == "" {
 		return r.GetByCollectionWithKeysetCursor(ctx, collection, limit, afterTimestamp, afterURI)
 	}
 
@@ -485,6 +494,18 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 		}
 		whereClauses = append(whereClauses,
 			fmt.Sprintf("r.did IN (%s)", strings.Join(didPhs, ", ")))
+	}
+
+	// Full-text search filter.
+	if filter.Search != "" {
+		search := filter.Search
+		if len(search) > MaxSearchLength {
+			search = search[:MaxSearchLength]
+		}
+		whereClauses = append(whereClauses,
+			fmt.Sprintf("r.search_vector @@ plainto_tsquery('english', %s)", ph()))
+		args = append(args, search)
+		metrics.RecordSearchApplied()
 	}
 
 	// keyset cursor
