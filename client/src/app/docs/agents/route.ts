@@ -1,5 +1,14 @@
-const API_ENDPOINT = "https://hypergoat-app-production.up.railway.app";
-const WS_ENDPOINT = "wss://hypergoat-app-production.up.railway.app";
+// Derive endpoints from the public-facing URL at request time so
+// production hostnames are never baked into the source bundle.
+function getEndpoints(requestUrl: string) {
+  const url = new URL(requestUrl);
+  const base = `${url.protocol}//${url.host}`;
+  const wsProtocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return {
+    api: process.env.NEXT_PUBLIC_API_URL || base,
+    ws: process.env.NEXT_PUBLIC_WS_URL || `${wsProtocol}//${url.host}`,
+  };
+}
 
 const agentsMd = `# Hyperindex (hi) API - Complete Integration Guide for AI Agents
 
@@ -39,9 +48,9 @@ The GraphQL schema is **dynamically generated** from uploaded Lexicon definition
 
 | Purpose | URL |
 |---------|-----|
-| GraphQL HTTP | \`POST ${API_ENDPOINT}/graphql\` |
-| GraphQL WebSocket | \`${WS_ENDPOINT}/graphql\` |
-| GraphiQL Explorer | \`${API_ENDPOINT}/graphiql\` |
+| GraphQL HTTP | \`POST __API_ENDPOINT__/graphql\` |
+| GraphQL WebSocket | \`__WS_ENDPOINT__/graphql\` |
+| GraphiQL Explorer | \`__API_ENDPOINT__/graphiql\` |
 
 ---
 
@@ -82,7 +91,7 @@ Content-Type: application/json
 
 \`\`\`javascript
 async function query(graphqlQuery, variables = {}) {
-  const response = await fetch("${API_ENDPOINT}/graphql", {
+  const response = await fetch("__API_ENDPOINT__/graphql", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -125,7 +134,7 @@ const data = await query(\`
 \`\`\`javascript
 import { GraphQLClient, gql } from "graphql-request";
 
-const client = new GraphQLClient("${API_ENDPOINT}/graphql");
+const client = new GraphQLClient("__API_ENDPOINT__/graphql");
 
 const query = gql\`
   query GetRecord($uri: String!) {
@@ -151,7 +160,7 @@ import requests
 
 def query(graphql_query, variables=None):
     response = requests.post(
-        "${API_ENDPOINT}/graphql",
+        "__API_ENDPOINT__/graphql",
         json={
             "query": graphql_query,
             "variables": variables or {}
@@ -189,7 +198,7 @@ from gql import gql, Client
 from gql.transport.requests import RequestsHTTPTransport
 
 transport = RequestsHTTPTransport(
-    url="${API_ENDPOINT}/graphql",
+    url="__API_ENDPOINT__/graphql",
     headers={"Content-Type": "application/json"}
 )
 
@@ -214,12 +223,12 @@ result = client.execute(query, variable_values={"uri": "at://did:plc:xyz/app.exa
 
 \`\`\`bash
 # Basic query
-curl -X POST "${API_ENDPOINT}/graphql" \\
+curl -X POST "__API_ENDPOINT__/graphql" \\
   -H "Content-Type: application/json" \\
   -d '{"query": "{ __typename }"}'
 
 # Query with variables
-curl -X POST "${API_ENDPOINT}/graphql" \\
+curl -X POST "__API_ENDPOINT__/graphql" \\
   -H "Content-Type: application/json" \\
   -d '{
     "query": "query GetRecord($uri: String!) { record(uri: $uri) { uri did collection record } }",
@@ -227,7 +236,7 @@ curl -X POST "${API_ENDPOINT}/graphql" \\
   }'
 
 # Introspection (discover schema)
-curl -X POST "${API_ENDPOINT}/graphql" \\
+curl -X POST "__API_ENDPOINT__/graphql" \\
   -H "Content-Type: application/json" \\
   -d '{"query": "{ __schema { queryType { name } types { name kind fields { name type { name } } } } }"}'
 \`\`\`
@@ -496,7 +505,7 @@ Real-time updates via WebSocket using the \`graphql-transport-ws\` protocol.
 
 ### Connection Setup
 
-1. Connect to: \`${WS_ENDPOINT}/graphql\`
+1. Connect to: \`__WS_ENDPOINT__/graphql\`
 2. Set header: \`Sec-WebSocket-Protocol: graphql-transport-ws\`
 
 ### Protocol Flow
@@ -535,7 +544,7 @@ Client                              Server
 import { createClient } from "graphql-ws";
 
 const client = createClient({
-  url: "${WS_ENDPOINT}/graphql",
+  url: "__WS_ENDPOINT__/graphql",
   connectionParams: {
     // Optional auth params
   },
@@ -587,12 +596,12 @@ import { getMainDefinition } from "@apollo/client/utilities";
 import { createClient } from "graphql-ws";
 
 const httpLink = new HttpLink({
-  uri: "${API_ENDPOINT}/graphql",
+  uri: "__API_ENDPOINT__/graphql",
 });
 
 const wsLink = new GraphQLWsLink(
   createClient({
-    url: "${WS_ENDPOINT}/graphql",
+    url: "__WS_ENDPOINT__/graphql",
   })
 );
 
@@ -623,7 +632,7 @@ from gql.transport.websockets import WebsocketsTransport
 
 async def subscribe():
     transport = WebsocketsTransport(
-        url="${WS_ENDPOINT}/graphql",
+        url="__WS_ENDPOINT__/graphql",
         subprotocols=["graphql-transport-ws"]
     )
     
@@ -648,7 +657,7 @@ asyncio.run(subscribe())
 ### Raw WebSocket (any language)
 
 \`\`\`
-1. Connect to: ${WS_ENDPOINT}/graphql
+1. Connect to: __WS_ENDPOINT__/graphql
    Header: Sec-WebSocket-Protocol: graphql-transport-ws
 
 2. Send: {"type":"connection_init","payload":{}}
@@ -760,7 +769,7 @@ Errors are returned in the \`errors\` array:
 ### Handling Errors in Code
 
 \`\`\`javascript
-const result = await fetch("${API_ENDPOINT}/graphql", {
+const result = await fetch("__API_ENDPOINT__/graphql", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ query, variables }),
@@ -786,7 +795,7 @@ return result.data;
 The schema is dynamic. Before writing queries, discover what's available:
 
 \`\`\`bash
-curl -X POST "${API_ENDPOINT}/graphql" \\
+curl -X POST "__API_ENDPOINT__/graphql" \\
   -H "Content-Type: application/json" \\
   -d '{"query": "{ __schema { types { name kind } } }"}'
 \`\`\`
@@ -847,7 +856,7 @@ async function fetchAllRecords(collection) {
 import { createClient } from "graphql-ws";
 
 const client = createClient({
-  url: "${WS_ENDPOINT}/graphql",
+  url: "__WS_ENDPOINT__/graphql",
   retryAttempts: 5,
   shouldRetry: () => true,
   retryWait: async (retries) => {
@@ -886,7 +895,7 @@ Currently no strict rate limits, but please be respectful:
 ## Useful Links
 
 ### Hyperindex & Hypersphere
-- GraphiQL Explorer: ${API_ENDPOINT}/graphiql
+- GraphiQL Explorer: __API_ENDPOINT__/graphiql
 - Hypersphere Explorer: https://impactindexer.org/
 - Lexicon Reference: https://impactindexer.org/lexicon/
 - Agent Lexicons: https://impactindexer.org/lexicon/agents
@@ -904,7 +913,7 @@ Currently no strict rate limits, but please be respectful:
 ### Minimal Query Example
 
 \`\`\`bash
-curl -X POST ${API_ENDPOINT}/graphql \\
+curl -X POST __API_ENDPOINT__/graphql \\
   -H "Content-Type: application/json" \\
   -d '{"query":"{ __typename }"}'
 \`\`\`
@@ -913,7 +922,7 @@ curl -X POST ${API_ENDPOINT}/graphql \\
 
 \`\`\`javascript
 import { createClient } from "graphql-ws";
-const client = createClient({ url: "${WS_ENDPOINT}/graphql" });
+const client = createClient({ url: "__WS_ENDPOINT__/graphql" });
 client.subscribe(
   { query: "subscription { recordCreated { uri } }" },
   { next: console.log, error: console.error, complete: () => {} }
@@ -921,8 +930,13 @@ client.subscribe(
 \`\`\`
 `;
 
-export async function GET() {
-  return new Response(agentsMd, {
+export async function GET(request: Request) {
+  const { api: API_ENDPOINT, ws: WS_ENDPOINT } = getEndpoints(request.url);
+  // Replace placeholder tokens that were embedded in the template
+  const content = agentsMd
+    .replaceAll("__API_ENDPOINT__", API_ENDPOINT)
+    .replaceAll("__WS_ENDPOINT__", WS_ENDPOINT);
+  return new Response(content, {
     headers: {
       "Content-Type": "text/markdown; charset=utf-8",
       "Cache-Control": "public, max-age=3600",

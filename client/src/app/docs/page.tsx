@@ -3,7 +3,9 @@
 import { useState } from "react";
 import Link from "next/link";
 
-const API_ENDPOINT = "https://hypergoat-app-production.up.railway.app";
+// Derive endpoint from the current browser origin so production hostnames
+// are never baked into the client-side JavaScript bundle.
+const API_ENDPOINT = typeof window !== "undefined" ? window.location.origin : "";
 
 type Tab = "http" | "websocket";
 type Language = "javascript" | "python" | "curl";
