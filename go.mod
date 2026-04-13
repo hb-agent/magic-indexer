@@ -1,6 +1,6 @@
 module github.com/GainForest/hypergoat
 
-go 1.25
+go 1.23.0
 
 // Dependencies will be added as implementation progresses
 

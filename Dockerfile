@@ -1,13 +1,15 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /src
 
 # Install build dependencies
 RUN apk add --no-cache git
 
-# Enable automatic toolchain download for dependencies requiring newer Go
-ENV GOTOOLCHAIN=auto
+# Pin to the local toolchain to ensure reproducible builds.
+# GOTOOLCHAIN=auto would silently download a different Go version at build
+# time, undermining digest pinning and reproducibility.
+ENV GOTOOLCHAIN=local
 
 # Copy go mod files
 COPY go.mod go.sum* ./
@@ -23,7 +25,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -o /hypergoat ./cmd/hypergoat
 
 # Runtime stage
-FROM alpine:3.19
+FROM alpine:3.21
 
 # Install runtime dependencies.
 RUN apk add --no-cache ca-certificates tzdata wget
