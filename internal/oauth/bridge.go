@@ -4,7 +4,6 @@ package oauth
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -393,11 +392,6 @@ func (b *Bridge) createClientAssertion(audience string) (string, error) {
 		return "", errors.New("no signing key configured")
 	}
 
-	ecdsaKey, ok := b.signingKey.PrivateKey.(*ecdsa.PrivateKey)
-	if !ok {
-		return "", errors.New("signing key is not an ECDSA key")
-	}
-
 	now := time.Now()
 	jti, err := generateJTI()
 	if err != nil {
@@ -414,7 +408,7 @@ func (b *Bridge) createClientAssertion(audience string) (string, error) {
 	})
 	token.Header["kid"] = b.signingKey.CalculateJKT()
 
-	return token.SignedString(ecdsaKey)
+	return token.SignedString(b.signingKey.PrivateKey)
 }
 
 // PushAuthorizationRequest sends a Pushed Authorization Request to the server.
