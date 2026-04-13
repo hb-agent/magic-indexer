@@ -6,10 +6,11 @@ WORKDIR /src
 # Install build dependencies
 RUN apk add --no-cache git
 
-# Pin to the local toolchain to ensure reproducible builds.
-# GOTOOLCHAIN=auto would silently download a different Go version at build
-# time, undermining digest pinning and reproducibility.
-ENV GOTOOLCHAIN=local
+# The bluesky-social/indigo dependency requires go 1.25+. GOTOOLCHAIN=auto
+# lets the Go 1.23 base image download the required 1.25 toolchain
+# automatically during `go mod download`. This is the standard Go
+# forward-compatibility mechanism (see go.dev/doc/toolchain).
+ENV GOTOOLCHAIN=auto
 
 # Copy go mod files
 COPY go.mod go.sum* ./
