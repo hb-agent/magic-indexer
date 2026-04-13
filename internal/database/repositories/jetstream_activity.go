@@ -74,36 +74,25 @@ func (r *JetstreamActivityRepository) LogActivityWithStatus(
 	var sqlStr string
 	var timestampStr string
 
-	// event_json is a JSONB NOT NULL column on Postgres. The Jetstream
-	// consumer passes string(commit.Record) which is an empty string
-	// for delete operations (no record body). Postgres rejects empty
-	// strings as invalid JSONB; SQLite stores them silently as TEXT.
-	// Normalise here so both dialects accept the row: replace empty
-	// or whitespace-only payloads with the JSON literal `null`.
+	// event_json is a JSONB NOT NULL column. The Jetstream consumer
+	// passes string(commit.Record) which is an empty string for delete
+	// operations (no record body). Postgres rejects empty strings as
+	// invalid JSONB. Normalise here: replace empty or whitespace-only
+	// payloads with the JSON literal `null`.
 	if strings.TrimSpace(eventJSON) == "" {
 		eventJSON = "null"
 	}
 
 	// Always store in UTC for consistency
 	utcTime := timestamp.UTC()
+	timestampStr = utcTime.Format(time.RFC3339)
 
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		timestampStr = utcTime.Format(time.RFC3339)
-		sqlStr = fmt.Sprintf(`INSERT INTO jetstream_activity 
-			(timestamp, operation, collection, did, rkey, status, event_json)
-			VALUES (%s, %s, %s, %s, %s, %s, %s)
-			RETURNING id`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-			r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7))
-	default:
-		timestampStr = utcTime.Format("2006-01-02 15:04:05")
-		sqlStr = fmt.Sprintf(`INSERT INTO jetstream_activity 
-			(timestamp, operation, collection, did, rkey, status, event_json)
-			VALUES (%s, %s, %s, %s, %s, %s, %s)`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-			r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7))
-	}
+	sqlStr = fmt.Sprintf(`INSERT INTO jetstream_activity
+		(timestamp, operation, collection, did, rkey, status, event_json)
+		VALUES (%s, %s, %s, %s, %s, %s, %s)
+		RETURNING id`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
+		r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7))
 
 	params := []database.Value{
 		database.Text(timestampStr),
@@ -115,17 +104,9 @@ func (r *JetstreamActivityRepository) LogActivityWithStatus(
 		database.Text(eventJSON),
 	}
 
-	if r.db.Dialect() == database.PostgreSQL {
-		var id int64
-		err := r.db.QueryRow(ctx, sqlStr, params, &id)
-		return id, err
-	}
-
-	result, err := r.db.Exec(ctx, sqlStr, params)
-	if err != nil {
-		return 0, err
-	}
-	return result.LastInsertId()
+	var id int64
+	err := r.db.QueryRow(ctx, sqlStr, params, &id)
+	return id, err
 }
 
 // UpdateStatus updates the status, optional error message, and optional validation result of an activity entry.
@@ -154,21 +135,11 @@ func (r *JetstreamActivityRepository) UpdateStatus(
 
 // GetRecentActivity returns activity entries from the last N hours.
 func (r *JetstreamActivityRepository) GetRecentActivity(ctx context.Context, hours int) ([]ActivityEntry, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`SELECT id, timestamp, operation, collection, did, rkey, status, error_message, event_json, is_valid
-			FROM jetstream_activity
-			WHERE timestamp >= NOW() - INTERVAL '%d hours'
-			ORDER BY timestamp DESC
-			LIMIT 1000`, hours)
-	default:
-		sqlStr = fmt.Sprintf(`SELECT id, timestamp, operation, collection, did, rkey, status, error_message, event_json, is_valid
-			FROM jetstream_activity
-			WHERE timestamp >= datetime('now', '-%d hours')
-			ORDER BY timestamp DESC
-			LIMIT 1000`, hours)
-	}
+	sqlStr := fmt.Sprintf(`SELECT id, timestamp, operation, collection, did, rkey, status, error_message, event_json, is_valid
+		FROM jetstream_activity
+		WHERE timestamp >= NOW() - INTERVAL '%d hours'
+		ORDER BY timestamp DESC
+		LIMIT 1000`, hours)
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr)
 	if err != nil {
@@ -181,15 +152,8 @@ func (r *JetstreamActivityRepository) GetRecentActivity(ctx context.Context, hou
 
 // CleanupOldActivity deletes activity entries older than the specified hours.
 func (r *JetstreamActivityRepository) CleanupOldActivity(ctx context.Context, hours int) error {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`DELETE FROM jetstream_activity
-			WHERE timestamp < NOW() - INTERVAL '%d hours'`, hours)
-	default:
-		sqlStr = fmt.Sprintf(`DELETE FROM jetstream_activity
-			WHERE timestamp < datetime('now', '-%d hours')`, hours)
-	}
+	sqlStr := fmt.Sprintf(`DELETE FROM jetstream_activity
+		WHERE timestamp < NOW() - INTERVAL '%d hours'`, hours)
 
 	_, err := r.db.Exec(ctx, sqlStr, nil)
 	return err
@@ -202,21 +166,11 @@ func (r *JetstreamActivityRepository) CleanupOldActivity(ctx context.Context, ho
 // never leaves pending. The background janitor runs this on a ticker so
 // the admin UI's recentActivity view doesn't accumulate zombie rows.
 func (r *JetstreamActivityRepository) OrphanPendingActivity(ctx context.Context, maxAgeMinutes int) (int64, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`UPDATE jetstream_activity
-			SET status = 'orphaned',
-			    error_message = 'activity status never updated within %d minutes'
-			WHERE status = 'pending'
-			  AND timestamp < NOW() - INTERVAL '%d minutes'`, maxAgeMinutes, maxAgeMinutes)
-	default:
-		sqlStr = fmt.Sprintf(`UPDATE jetstream_activity
-			SET status = 'orphaned',
-			    error_message = 'activity status never updated within %d minutes'
-			WHERE status = 'pending'
-			  AND timestamp < datetime('now', '-%d minutes')`, maxAgeMinutes, maxAgeMinutes)
-	}
+	sqlStr := fmt.Sprintf(`UPDATE jetstream_activity
+		SET status = 'orphaned',
+		    error_message = 'activity status never updated within %d minutes'
+		WHERE status = 'pending'
+		  AND timestamp < NOW() - INTERVAL '%d minutes'`, maxAgeMinutes, maxAgeMinutes)
 	res, err := r.db.Exec(ctx, sqlStr, nil)
 	if err != nil {
 		return 0, err
@@ -273,33 +227,17 @@ func (r *JetstreamActivityRepository) GetActivityBuckets(ctx context.Context, ti
 }
 
 func (r *JetstreamActivityRepository) buildBucketQuery(hours, minutes int) string {
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		return fmt.Sprintf(`SELECT 
-			date_trunc('hour', timestamp) + 
-				INTERVAL '%d minutes' * FLOOR(EXTRACT(MINUTE FROM timestamp) / %d) as bucket,
-			COUNT(*) as total,
-			COUNT(*) FILTER (WHERE operation = 'create') as creates,
-			COUNT(*) FILTER (WHERE operation = 'update') as updates,
-			COUNT(*) FILTER (WHERE operation = 'delete') as deletes
-		FROM jetstream_activity
-		WHERE timestamp >= NOW() - INTERVAL '%d hours'
-		GROUP BY bucket
-		ORDER BY bucket ASC`, minutes, minutes, hours)
-	default:
-		// SQLite version
-		return fmt.Sprintf(`SELECT 
-			strftime('%%Y-%%m-%%d %%H:', timestamp) || 
-				printf('%%02d', (CAST(strftime('%%M', timestamp) AS INTEGER) / %d) * %d) || ':00' as bucket,
-			COUNT(*) as total,
-			SUM(CASE WHEN operation = 'create' THEN 1 ELSE 0 END) as creates,
-			SUM(CASE WHEN operation = 'update' THEN 1 ELSE 0 END) as updates,
-			SUM(CASE WHEN operation = 'delete' THEN 1 ELSE 0 END) as deletes
-		FROM jetstream_activity
-		WHERE timestamp >= datetime('now', '-%d hours')
-		GROUP BY bucket
-		ORDER BY bucket ASC`, minutes, minutes, hours)
-	}
+	return fmt.Sprintf(`SELECT
+		date_trunc('hour', timestamp) +
+			INTERVAL '%d minutes' * FLOOR(EXTRACT(MINUTE FROM timestamp) / %d) as bucket,
+		COUNT(*) as total,
+		COUNT(*) FILTER (WHERE operation = 'create') as creates,
+		COUNT(*) FILTER (WHERE operation = 'update') as updates,
+		COUNT(*) FILTER (WHERE operation = 'delete') as deletes
+	FROM jetstream_activity
+	WHERE timestamp >= NOW() - INTERVAL '%d hours'
+	GROUP BY bucket
+	ORDER BY bucket ASC`, minutes, minutes, hours)
 }
 
 // DeleteAll removes all activity entries.
@@ -369,17 +307,9 @@ func (r *JetstreamActivityRepository) GetValidationStats(ctx context.Context, ti
 	stats := &ValidationStats{}
 
 	// Get invalid count and last invalid timestamp
-	var countSQL string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		countSQL = fmt.Sprintf(`SELECT COUNT(*), MAX(timestamp)
-			FROM jetstream_activity
-			WHERE is_valid = false AND timestamp >= NOW() - INTERVAL '%d hours'`, hours)
-	default:
-		countSQL = fmt.Sprintf(`SELECT COUNT(*), MAX(timestamp)
-			FROM jetstream_activity
-			WHERE is_valid = 0 AND timestamp >= datetime('now', '-%d hours')`, hours)
-	}
+	countSQL := fmt.Sprintf(`SELECT COUNT(*), MAX(timestamp)
+		FROM jetstream_activity
+		WHERE is_valid = false AND timestamp >= NOW() - INTERVAL '%d hours'`, hours)
 
 	var lastInvalidStr sql.NullString
 	if err := r.db.DB().QueryRowContext(ctx, countSQL).Scan(&stats.InvalidCount, &lastInvalidStr); err != nil {
@@ -396,23 +326,12 @@ func (r *JetstreamActivityRepository) GetValidationStats(ctx context.Context, ti
 	}
 
 	// Get invalid count by collection
-	var byCollSQL string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		byCollSQL = fmt.Sprintf(`SELECT collection, COUNT(*) as cnt
-			FROM jetstream_activity
-			WHERE is_valid = false AND timestamp >= NOW() - INTERVAL '%d hours'
-			GROUP BY collection
-			ORDER BY cnt DESC
-			LIMIT 10`, hours)
-	default:
-		byCollSQL = fmt.Sprintf(`SELECT collection, COUNT(*) as cnt
-			FROM jetstream_activity
-			WHERE is_valid = 0 AND timestamp >= datetime('now', '-%d hours')
-			GROUP BY collection
-			ORDER BY cnt DESC
-			LIMIT 10`, hours)
-	}
+	byCollSQL := fmt.Sprintf(`SELECT collection, COUNT(*) as cnt
+		FROM jetstream_activity
+		WHERE is_valid = false AND timestamp >= NOW() - INTERVAL '%d hours'
+		GROUP BY collection
+		ORDER BY cnt DESC
+		LIMIT 10`, hours)
 
 	rows, err := r.db.DB().QueryContext(ctx, byCollSQL)
 	if err != nil {
@@ -436,21 +355,11 @@ func (r *JetstreamActivityRepository) GetValidationStats(ctx context.Context, ti
 
 // GetRecentInvalidActivity returns the most recent invalid activity entries.
 func (r *JetstreamActivityRepository) GetRecentInvalidActivity(ctx context.Context, limit int) ([]ActivityEntry, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`SELECT id, timestamp, operation, collection, did, rkey, status, error_message, event_json, is_valid
-			FROM jetstream_activity
-			WHERE is_valid = false
-			ORDER BY timestamp DESC
-			LIMIT %d`, limit)
-	default:
-		sqlStr = fmt.Sprintf(`SELECT id, timestamp, operation, collection, did, rkey, status, error_message, event_json, is_valid
-			FROM jetstream_activity
-			WHERE is_valid = 0
-			ORDER BY timestamp DESC
-			LIMIT %d`, limit)
-	}
+	sqlStr := fmt.Sprintf(`SELECT id, timestamp, operation, collection, did, rkey, status, error_message, event_json, is_valid
+		FROM jetstream_activity
+		WHERE is_valid = false
+		ORDER BY timestamp DESC
+		LIMIT %d`, limit)
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr)
 	if err != nil {

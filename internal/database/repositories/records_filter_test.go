@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/GainForest/hypergoat/internal/database"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/testutil"
 )
@@ -185,20 +184,9 @@ func TestGetByCollectionFiltered_KeysetPaginationStability(t *testing.T) {
 	filter := repositories.RecordFilter{Authors: authors}
 	seen := map[string]bool{}
 
-	// Use the same timestamp format the resolver uses (via encodeCursor).
-	// SQLite stores indexed_at as "2006-01-02 15:04:05" while Postgres
-	// stores it as RFC3339. The keyset comparison is string-based, so we
-	// must pass a timestamp format that is compatible with the stored
-	// representation. We format using both variants and pick based on
-	// dialect, but the simplest fix is to use the format that
-	// ParseTimestamp yields and re-format it for the dialect.
-	//
 	// The real resolver encodes/decodes via base64 cursors using RFC3339.
-	// For this direct-repository test, match the DB's native format.
-	tsFormat := "2006-01-02 15:04:05" // SQLite default
-	if db.Executor.Dialect() == database.PostgreSQL {
-		tsFormat = "2006-01-02T15:04:05.999999Z07:00"
-	}
+	// For this direct-repository test, match the DB's native Postgres format.
+	tsFormat := "2006-01-02T15:04:05.999999Z07:00"
 
 	var afterTS, afterURI string
 	pages := 0

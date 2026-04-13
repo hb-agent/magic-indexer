@@ -71,23 +71,12 @@ func (r *LabelPreferencesRepository) Get(ctx context.Context, did, src, labelVal
 
 // Set creates or updates a label preference scoped to a specific labeler.
 func (r *LabelPreferencesRepository) Set(ctx context.Context, did, src, labelVal string, visibility LabelVisibility) (*LabelPreference, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO actor_label_preference (did, src, label_val, visibility)
-			VALUES (%s, %s, %s, %s)
-			ON CONFLICT (did, src, label_val) DO UPDATE SET
-				visibility = EXCLUDED.visibility,
-				created_at = NOW()`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO actor_label_preference (did, src, label_val, visibility)
-			VALUES (%s, %s, %s, %s)
-			ON CONFLICT (did, src, label_val) DO UPDATE SET
-				visibility = excluded.visibility,
-				created_at = datetime('now')`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
-	}
+	sqlStr := fmt.Sprintf(`INSERT INTO actor_label_preference (did, src, label_val, visibility)
+		VALUES (%s, %s, %s, %s)
+		ON CONFLICT (did, src, label_val) DO UPDATE SET
+			visibility = EXCLUDED.visibility,
+			created_at = NOW()`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
 
 	params := []database.Value{
 		database.Text(did),

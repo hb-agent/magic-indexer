@@ -10,13 +10,12 @@ import (
 	"testing"
 
 	"github.com/GainForest/hypergoat/internal/database"
-	"github.com/GainForest/hypergoat/internal/database/migrations"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
-	"github.com/GainForest/hypergoat/internal/database/sqlite"
 	hgraphql "github.com/GainForest/hypergoat/internal/graphql"
 	"github.com/GainForest/hypergoat/internal/graphql/admin"
 	"github.com/GainForest/hypergoat/internal/graphql/resolver"
 	"github.com/GainForest/hypergoat/internal/lexicon"
+	"github.com/GainForest/hypergoat/internal/testutil"
 
 	"github.com/graphql-go/graphql"
 )
@@ -31,35 +30,20 @@ type testDB struct {
 	OAuthClients *repositories.OAuthClientsRepository
 }
 
-// setupTestDB creates an in-memory SQLite database with migrations applied.
+// setupTestDB creates a Postgres test database with migrations applied.
 func setupTestDB(t *testing.T) *testDB {
 	t.Helper()
 
-	exec, err := sqlite.NewExecutor("sqlite::memory:")
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
+	tdb := testutil.SetupTestDB(t)
+
+	return &testDB{
+		Executor:     tdb.Executor,
+		Records:      tdb.Records,
+		Actors:       tdb.Actors,
+		Config:       tdb.Config,
+		Lexicons:     tdb.Lexicons,
+		OAuthClients: tdb.OAuthClients,
 	}
-
-	ctx := context.Background()
-	if err := migrations.Run(ctx, exec); err != nil {
-		exec.Close()
-		t.Fatalf("Failed to run migrations: %v", err)
-	}
-
-	db := &testDB{
-		Executor:     exec,
-		Records:      repositories.NewRecordsRepository(exec),
-		Actors:       repositories.NewActorsRepository(exec),
-		Config:       repositories.NewConfigRepository(exec),
-		Lexicons:     repositories.NewLexiconsRepository(exec),
-		OAuthClients: repositories.NewOAuthClientsRepository(exec),
-	}
-
-	t.Cleanup(func() {
-		exec.Close()
-	})
-
-	return db
 }
 
 // seedTestData seeds the test database with sample data.

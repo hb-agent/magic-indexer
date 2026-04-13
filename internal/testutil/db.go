@@ -11,7 +11,6 @@ import (
 	"github.com/GainForest/hypergoat/internal/database/migrations"
 	"github.com/GainForest/hypergoat/internal/database/postgres"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
-	"github.com/GainForest/hypergoat/internal/database/sqlite"
 )
 
 // TestDB holds a test database with all migrations applied and
@@ -33,21 +32,14 @@ type TestDB struct {
 // SetupTestDB creates a fresh test database with all migrations applied.
 // The database is automatically closed when the test completes.
 //
-// By default an in-memory SQLite database is used so `go test` works
-// offline with zero configuration and in CI. Developers (or later CI
-// jobs) that want to exercise dialect-specific behaviour like the
-// BOOLEAN neg column can opt in by setting TEST_DATABASE_URL to a
-// postgres:// URL. We deliberately do NOT honour the application's
-// DATABASE_URL env var here — many upstream tests pre-date Postgres
-// testing and compare JSONB output verbatim, which fails when keys
-// are re-ordered. TEST_DATABASE_URL is the explicit opt-in so nobody
-// accidentally trips those failures.
+// When TEST_DATABASE_URL is set, that Postgres URL is used. Otherwise
+// the default local dev URL postgres://hypergoat:hypergoat@localhost:5432/hypergoat_test?sslmode=disable
+// is used.
 //
-// Safety: when TEST_DATABASE_URL is a Postgres URL, this helper runs
-// DELETE FROM on every table (except label_definition, whose seeded
-// rows from migration 003 are needed by FK checks) before returning,
-// so repeated runs start clean. Never point this at a non-throwaway
-// database.
+// Safety: this helper runs DELETE FROM on every table (except
+// label_definition, whose seeded rows from migration 003 are needed
+// by FK checks) before returning, so repeated runs start clean.
+// Never point this at a non-throwaway database.
 func SetupTestDB(t *testing.T) *TestDB {
 	t.Helper()
 
@@ -55,15 +47,26 @@ func SetupTestDB(t *testing.T) *TestDB {
 
 	ctx := context.Background()
 	if err := migrations.Run(ctx, exec); err != nil {
-		exec.Close()
-		t.Fatalf("Failed to run migrations: %v", err)
+		// Migration tests may leave the DB in a dirty state (tables
+		// exist but schema_migrations was dropped). Drop everything
+		// and retry.
+		_, _ = exec.DB().ExecContext(ctx, `
+			DO $$ DECLARE r RECORD;
+			BEGIN
+				FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+					EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
+				END LOOP;
+			END $$;
+		`)
+		if err := migrations.Run(ctx, exec); err != nil {
+			exec.Close()
+			t.Fatalf("Failed to run migrations (even after schema reset): %v", err)
+		}
 	}
 
-	if exec.Dialect() == database.PostgreSQL {
-		// Each test needs an empty slate on Postgres since the database
-		// is shared across invocations.
-		resetBetweenTests(t, exec)
-	}
+	// Each test needs an empty slate since the database is shared
+	// across invocations.
+	resetBetweenTests(t, exec)
 
 	db := &TestDB{
 		Executor:         exec,
@@ -86,33 +89,26 @@ func SetupTestDB(t *testing.T) *TestDB {
 	return db
 }
 
-// newTestExecutor picks SQLite or Postgres based on TEST_DATABASE_URL.
-// An unset or sqlite:// URL yields an in-memory SQLite database; a
-// postgres:// URL yields a pgx executor connected to that database.
-// Note: DATABASE_URL is intentionally NOT consulted here — see the
-// SetupTestDB comment for rationale.
+// newTestExecutor returns a Postgres executor. When TEST_DATABASE_URL
+// is set, that URL is used; otherwise a local default is assumed.
 func newTestExecutor(t *testing.T) database.Executor {
 	t.Helper()
 
 	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" || strings.HasPrefix(url, "sqlite:") {
-		exec, err := sqlite.NewExecutor("sqlite::memory:")
-		if err != nil {
-			t.Fatalf("Failed to create SQLite test database: %v", err)
-		}
-		return exec
+	if url == "" {
+		url = "postgres://hypergoat:hypergoat@localhost:5432/hypergoat_test?sslmode=disable"
+		t.Log("TEST_DATABASE_URL not set, using default:", url)
 	}
 
-	if strings.HasPrefix(url, "postgres://") || strings.HasPrefix(url, "postgresql://") {
-		exec, err := postgres.NewExecutor(url)
-		if err != nil {
-			t.Fatalf("Failed to create Postgres test database at %s: %v", redact(url), err)
-		}
-		return exec
+	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
+		t.Fatalf("Unrecognized TEST_DATABASE_URL %q: expected postgres:// or postgresql:// prefix", url)
 	}
 
-	t.Fatalf("Unrecognized TEST_DATABASE_URL %q: expected sqlite: or postgres: prefix", url)
-	return nil // unreachable
+	exec, err := postgres.NewExecutor(url)
+	if err != nil {
+		t.Fatalf("Failed to create Postgres test database at %s: %v", redact(url), err)
+	}
+	return exec
 }
 
 // resetBetweenTests clears every mutable table in the right order so

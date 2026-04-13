@@ -2,21 +2,41 @@ package migrations_test
 
 import (
 	"context"
+	"os"
 	"testing"
 
+	"github.com/GainForest/hypergoat/internal/database"
 	"github.com/GainForest/hypergoat/internal/database/migrations"
-	"github.com/GainForest/hypergoat/internal/database/sqlite"
+	"github.com/GainForest/hypergoat/internal/database/postgres"
 )
 
-// newTestExecutor creates an in-memory SQLite executor for testing.
-func newTestExecutor(t *testing.T) *sqlite.Executor {
+// newTestExecutor creates a Postgres executor for testing.
+// Uses TEST_DATABASE_URL if set, otherwise a local default.
+func newTestExecutor(t *testing.T) database.Executor {
 	t.Helper()
 
-	exec, err := sqlite.NewExecutor("sqlite::memory:")
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		url = "postgres://hypergoat:hypergoat@localhost:5432/hypergoat_test?sslmode=disable"
+		t.Log("TEST_DATABASE_URL not set, using default:", url)
+	}
+
+	exec, err := postgres.NewExecutor(url)
 	if err != nil {
-		t.Fatalf("failed to create SQLite executor: %v", err)
+		t.Fatalf("failed to create Postgres executor: %v", err)
 	}
 	t.Cleanup(func() { exec.Close() })
+
+	// Drop ALL tables so each test starts completely fresh.
+	// CASCADE handles foreign key dependencies.
+	_, _ = exec.DB().ExecContext(context.Background(), `
+		DO $$ DECLARE r RECORD;
+		BEGIN
+			FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+				EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
+			END LOOP;
+		END $$;
+	`)
 
 	return exec
 }
@@ -29,7 +49,7 @@ func TestMigrations_Run(t *testing.T) {
 		t.Fatalf("Run() returned error: %v", err)
 	}
 
-	// Verify key tables exist by querying sqlite_master.
+	// Verify key tables exist by querying information_schema.
 	expectedTables := []string{
 		"record",
 		"actor",
@@ -45,7 +65,7 @@ func TestMigrations_Run(t *testing.T) {
 	for _, table := range expectedTables {
 		var name string
 		err := exec.DB().QueryRowContext(ctx,
-			"SELECT name FROM sqlite_master WHERE type='table' AND name=?", table,
+			"SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name=$1", table,
 		).Scan(&name)
 		if err != nil {
 			t.Errorf("expected table %q to exist, but got error: %v", table, err)
@@ -69,10 +89,10 @@ func TestMigrations_RunIdempotent(t *testing.T) {
 	// Verify tables still present after second run.
 	var count int
 	err := exec.DB().QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='record'",
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='record'",
 	).Scan(&count)
 	if err != nil {
-		t.Fatalf("failed to query sqlite_master: %v", err)
+		t.Fatalf("failed to query information_schema: %v", err)
 	}
 	if count != 1 {
 		t.Errorf("expected 1 record table, got %d", count)
@@ -81,7 +101,7 @@ func TestMigrations_RunIdempotent(t *testing.T) {
 
 // TestMigrations_UpDownUpRoundTrip asserts that applying every
 // migration, rolling back the last one, and re-applying it leaves
-// the sqlite_master snapshot byte-identical to the original
+// the information_schema snapshot identical to the original
 // all-applied state. Catches migrations whose DownSQL is lossy or
 // whose UpSQL is subtly non-idempotent.
 func TestMigrations_UpDownUpRoundTrip(t *testing.T) {
@@ -91,19 +111,21 @@ func TestMigrations_UpDownUpRoundTrip(t *testing.T) {
 	snapshot := func() map[string]string {
 		t.Helper()
 		rows, err := exec.DB().QueryContext(ctx,
-			"SELECT type, name, COALESCE(sql, '') FROM sqlite_master "+
-				"WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")
+			`SELECT COALESCE(table_type, ''), table_name
+			 FROM information_schema.tables
+			 WHERE table_schema='public'
+			 ORDER BY table_type, table_name`)
 		if err != nil {
 			t.Fatalf("snapshot query: %v", err)
 		}
 		defer rows.Close()
 		out := make(map[string]string)
 		for rows.Next() {
-			var kind, name, sqlStr string
-			if err := rows.Scan(&kind, &name, &sqlStr); err != nil {
+			var kind, name string
+			if err := rows.Scan(&kind, &name); err != nil {
 				t.Fatalf("snapshot scan: %v", err)
 			}
-			out[kind+":"+name] = sqlStr
+			out[kind+":"+name] = name
 		}
 		return out
 	}

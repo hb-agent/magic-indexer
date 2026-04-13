@@ -40,9 +40,8 @@ func TestJetstreamActivity_LogActivity(t *testing.T) {
 // the dialect-parity bug discovered in the live Postgres deployment:
 // the Jetstream consumer passes an empty event_json on delete events
 // (commit.Record is nil), and Postgres rejects empty strings as
-// invalid JSONB while SQLite silently accepts them as TEXT. The
-// LogActivity helper normalises empty payloads to the JSON literal
-// "null" so both dialects accept the row.
+// invalid JSONB. The LogActivity helper normalises empty payloads to
+// the JSON literal "null" so the row is accepted.
 func TestJetstreamActivity_LogActivity_EmptyEventJSON(t *testing.T) {
 	repo := setupActivityTest(t)
 	ctx := context.Background()

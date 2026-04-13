@@ -28,35 +28,18 @@ func (r *OAuthClientsRepository) Insert(ctx context.Context, client *oauth.Clien
 	grantTypesJSON, _ := json.Marshal(grantTypesToStrings(client.GrantTypes))
 	responseTypesJSON, _ := json.Marshal(responseTypesToStrings(client.ResponseTypes))
 
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO oauth_client (
-			client_id, client_secret, client_name, redirect_uris,
-			grant_types, response_types, scope, token_endpoint_auth_method,
-			client_type, created_at, updated_at, metadata,
-			access_token_expiration, refresh_token_expiration,
-			require_redirect_exact, registration_access_token, jwks
-		) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4),
-			r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7), r.db.Placeholder(8),
-			r.db.Placeholder(9), r.db.Placeholder(10), r.db.Placeholder(11), r.db.Placeholder(12),
-			r.db.Placeholder(13), r.db.Placeholder(14), r.db.Placeholder(15), r.db.Placeholder(16),
-			r.db.Placeholder(17))
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO oauth_client (
-			client_id, client_secret, client_name, redirect_uris,
-			grant_types, response_types, scope, token_endpoint_auth_method,
-			client_type, created_at, updated_at, metadata,
-			access_token_expiration, refresh_token_expiration,
-			require_redirect_exact, registration_access_token, jwks
-		) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4),
-			r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7), r.db.Placeholder(8),
-			r.db.Placeholder(9), r.db.Placeholder(10), r.db.Placeholder(11), r.db.Placeholder(12),
-			r.db.Placeholder(13), r.db.Placeholder(14), r.db.Placeholder(15), r.db.Placeholder(16),
-			r.db.Placeholder(17))
-	}
+	sqlStr := fmt.Sprintf(`INSERT INTO oauth_client (
+		client_id, client_secret, client_name, redirect_uris,
+		grant_types, response_types, scope, token_endpoint_auth_method,
+		client_type, created_at, updated_at, metadata,
+		access_token_expiration, refresh_token_expiration,
+		require_redirect_exact, registration_access_token, jwks
+	) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4),
+		r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7), r.db.Placeholder(8),
+		r.db.Placeholder(9), r.db.Placeholder(10), r.db.Placeholder(11), r.db.Placeholder(12),
+		r.db.Placeholder(13), r.db.Placeholder(14), r.db.Placeholder(15), r.db.Placeholder(16),
+		r.db.Placeholder(17))
 
 	params := []database.Value{
 		database.Text(client.ClientID),
@@ -84,23 +67,12 @@ func (r *OAuthClientsRepository) Insert(ctx context.Context, client *oauth.Clien
 
 // Get retrieves an OAuth client by client_id.
 func (r *OAuthClientsRepository) Get(ctx context.Context, clientID string) (*oauth.Client, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`SELECT client_id, client_secret, client_name, redirect_uris,
-			grant_types, response_types, scope, token_endpoint_auth_method,
-			client_type, created_at, updated_at, metadata::text,
-			access_token_expiration, refresh_token_expiration,
-			require_redirect_exact, registration_access_token, jwks::text
-		FROM oauth_client WHERE client_id = %s`, r.db.Placeholder(1))
-	default:
-		sqlStr = fmt.Sprintf(`SELECT client_id, client_secret, client_name, redirect_uris,
-			grant_types, response_types, scope, token_endpoint_auth_method,
-			client_type, created_at, updated_at, metadata,
-			access_token_expiration, refresh_token_expiration,
-			require_redirect_exact, registration_access_token, jwks
-		FROM oauth_client WHERE client_id = %s`, r.db.Placeholder(1))
-	}
+	sqlStr := fmt.Sprintf(`SELECT client_id, client_secret, client_name, redirect_uris,
+		grant_types, response_types, scope, token_endpoint_auth_method,
+		client_type, created_at, updated_at, metadata::text,
+		access_token_expiration, refresh_token_expiration,
+		require_redirect_exact, registration_access_token, jwks::text
+	FROM oauth_client WHERE client_id = %s`, r.db.Placeholder(1))
 
 	var (
 		client            oauth.Client
@@ -163,23 +135,12 @@ func (r *OAuthClientsRepository) Get(ctx context.Context, clientID string) (*oau
 
 // GetAll retrieves all OAuth clients (excluding internal 'admin' client).
 func (r *OAuthClientsRepository) GetAll(ctx context.Context) ([]*oauth.Client, error) {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = `SELECT client_id, client_secret, client_name, redirect_uris,
-			grant_types, response_types, scope, token_endpoint_auth_method,
-			client_type, created_at, updated_at, metadata::text,
-			access_token_expiration, refresh_token_expiration,
-			require_redirect_exact, registration_access_token, jwks::text
-		FROM oauth_client WHERE client_id != 'admin' ORDER BY created_at DESC`
-	default:
-		sqlStr = `SELECT client_id, client_secret, client_name, redirect_uris,
-			grant_types, response_types, scope, token_endpoint_auth_method,
-			client_type, created_at, updated_at, metadata,
-			access_token_expiration, refresh_token_expiration,
-			require_redirect_exact, registration_access_token, jwks
-		FROM oauth_client WHERE client_id != 'admin' ORDER BY created_at DESC`
-	}
+	sqlStr := `SELECT client_id, client_secret, client_name, redirect_uris,
+		grant_types, response_types, scope, token_endpoint_auth_method,
+		client_type, created_at, updated_at, metadata::text,
+		access_token_expiration, refresh_token_expiration,
+		require_redirect_exact, registration_access_token, jwks::text
+	FROM oauth_client WHERE client_id != 'admin' ORDER BY created_at DESC`
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr)
 	if err != nil {
@@ -205,35 +166,18 @@ func (r *OAuthClientsRepository) Update(ctx context.Context, client *oauth.Clien
 	grantTypesJSON, _ := json.Marshal(grantTypesToStrings(client.GrantTypes))
 	responseTypesJSON, _ := json.Marshal(responseTypesToStrings(client.ResponseTypes))
 
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`UPDATE oauth_client SET
-			client_secret = %s, client_name = %s, redirect_uris = %s,
-			grant_types = %s, response_types = %s, scope = %s,
-			token_endpoint_auth_method = %s, updated_at = %s,
-			metadata = %s::jsonb, access_token_expiration = %s,
-			refresh_token_expiration = %s, require_redirect_exact = %s, jwks = %s::jsonb
-		WHERE client_id = %s`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-			r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6),
-			r.db.Placeholder(7), r.db.Placeholder(8), r.db.Placeholder(9),
-			r.db.Placeholder(10), r.db.Placeholder(11), r.db.Placeholder(12),
-			r.db.Placeholder(13), r.db.Placeholder(14))
-	default:
-		sqlStr = fmt.Sprintf(`UPDATE oauth_client SET
-			client_secret = %s, client_name = %s, redirect_uris = %s,
-			grant_types = %s, response_types = %s, scope = %s,
-			token_endpoint_auth_method = %s, updated_at = %s,
-			metadata = %s, access_token_expiration = %s,
-			refresh_token_expiration = %s, require_redirect_exact = %s, jwks = %s
-		WHERE client_id = %s`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-			r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6),
-			r.db.Placeholder(7), r.db.Placeholder(8), r.db.Placeholder(9),
-			r.db.Placeholder(10), r.db.Placeholder(11), r.db.Placeholder(12),
-			r.db.Placeholder(13), r.db.Placeholder(14))
-	}
+	sqlStr := fmt.Sprintf(`UPDATE oauth_client SET
+		client_secret = %s, client_name = %s, redirect_uris = %s,
+		grant_types = %s, response_types = %s, scope = %s,
+		token_endpoint_auth_method = %s, updated_at = %s,
+		metadata = %s::jsonb, access_token_expiration = %s,
+		refresh_token_expiration = %s, require_redirect_exact = %s, jwks = %s::jsonb
+	WHERE client_id = %s`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
+		r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6),
+		r.db.Placeholder(7), r.db.Placeholder(8), r.db.Placeholder(9),
+		r.db.Placeholder(10), r.db.Placeholder(11), r.db.Placeholder(12),
+		r.db.Placeholder(13), r.db.Placeholder(14))
 
 	params := []database.Value{
 		database.NullableText(client.ClientSecret),

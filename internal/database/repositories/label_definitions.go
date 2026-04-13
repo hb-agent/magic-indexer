@@ -135,19 +135,10 @@ func (r *LabelDefinitionsRepository) Get(ctx context.Context, src, val string) (
 // Callers that specifically want to know whether a new row was created
 // vs a pre-existing row won in the race can call Exists() afterwards.
 func (r *LabelDefinitionsRepository) Insert(ctx context.Context, src, val, description string, severity LabelSeverity, defaultVisibility LabelVisibility) error {
-	var sqlStr string
-	switch r.db.Dialect() {
-	case database.PostgreSQL:
-		sqlStr = fmt.Sprintf(`INSERT INTO label_definition (src, val, description, severity, default_visibility)
-			VALUES (%s, %s, %s, %s, %s)
-			ON CONFLICT (src, val) DO NOTHING`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), r.db.Placeholder(5))
-	default:
-		sqlStr = fmt.Sprintf(`INSERT INTO label_definition (src, val, description, severity, default_visibility)
-			VALUES (%s, %s, %s, %s, %s)
-			ON CONFLICT DO NOTHING`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), r.db.Placeholder(5))
-	}
+	sqlStr := fmt.Sprintf(`INSERT INTO label_definition (src, val, description, severity, default_visibility)
+		VALUES (%s, %s, %s, %s, %s)
+		ON CONFLICT (src, val) DO NOTHING`,
+		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), r.db.Placeholder(5))
 
 	params := []database.Value{
 		database.Text(src),

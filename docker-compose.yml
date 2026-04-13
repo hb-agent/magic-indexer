@@ -8,13 +8,30 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=8080
-      - DATABASE_URL=sqlite:/app/data/hypergoat.db
+      - DATABASE_URL=postgres://hypergoat:hypergoat@postgres:5432/hypergoat?sslmode=disable
       - SECRET_KEY_BASE=${SECRET_KEY_BASE:?SECRET_KEY_BASE must be set — generate one with: openssl rand -base64 64}
       - EXTERNAL_BASE_URL=${EXTERNAL_BASE_URL:-http://localhost:8080}
       - OAUTH_LOOPBACK_MODE=${OAUTH_LOOPBACK_MODE:-true}
-    volumes:
-      - hypergoat-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hypergoat
+      POSTGRES_PASSWORD: hypergoat
+      POSTGRES_DB: hypergoat
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: pg_isready -U hypergoat
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
 volumes:
-  hypergoat-data:
+  pgdata:

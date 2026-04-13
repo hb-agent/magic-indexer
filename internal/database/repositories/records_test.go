@@ -728,7 +728,7 @@ func TestRecordsRepository_GetCollectionTimeSeries(t *testing.T) {
 	}
 
 	// First date: 2026-01-15 with 2 records
-	// Postgres returns "2026-01-15T00:00:00Z", SQLite returns "2026-01-15"
+	// Postgres returns "2026-01-15T00:00:00Z" or "2026-01-15"
 	if !strings.HasPrefix(ts.Data[0].Date, "2026-01-15") {
 		t.Errorf("Data[0].Date = %q, want prefix 2026-01-15", ts.Data[0].Date)
 	}
