@@ -239,6 +239,14 @@ func NullableInt(i *int64) Value {
 	return Int(*i)
 }
 
+// NullableBool returns a BoolValue or NullValue.
+func NullableBool(b *bool) Value {
+	if b == nil {
+		return Null()
+	}
+	return Bool(*b)
+}
+
 // ParseDialect determines the dialect from a database URL.
 func ParseDialect(databaseURL string) Dialect {
 	lower := strings.ToLower(databaseURL)

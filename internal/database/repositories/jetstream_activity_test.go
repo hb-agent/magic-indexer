@@ -103,7 +103,7 @@ func TestJetstreamActivity_UpdateStatus(t *testing.T) {
 	}
 
 	errMsg := "something went wrong"
-	err = repo.UpdateStatus(ctx, id, "error", &errMsg)
+	err = repo.UpdateStatus(ctx, id, "error", &errMsg, nil)
 	if err != nil {
 		t.Fatalf("UpdateStatus() error = %v", err)
 	}

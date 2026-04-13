@@ -479,10 +479,10 @@ func truncateUTF8(s string, maxBytes int) string {
 
 // truncateGraphemes truncates a string to at most max grapheme clusters
 // using Unicode UAX #29 segmentation (via rivo/uniseg).
-func truncateGraphemes(s string, max int) string {
+func truncateGraphemes(s string, maxClusters int) string {
 	var result string
 	remaining := s
-	for i := 0; i < max && remaining != ""; i++ {
+	for i := 0; i < maxClusters && remaining != ""; i++ {
 		cluster, rest, _, _ := uniseg.FirstGraphemeClusterInString(remaining, -1)
 		result += cluster
 		remaining = rest

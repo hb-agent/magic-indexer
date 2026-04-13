@@ -147,6 +147,23 @@ func (b *SchemaBuilder) buildQueryType() *graphql.Object {
 					return b.resolver.RecentActivity(p.Context, hours)
 				},
 			},
+			"validationStats": &graphql.Field{
+				Type:        graphql.NewNonNull(ValidationStatsType),
+				Description: "Get validation statistics for a time range (admin only)",
+				Args: graphql.FieldConfigArgument{
+					"range": &graphql.ArgumentConfig{
+						Type:        graphql.NewNonNull(TimeRangeEnum),
+						Description: "Time range for statistics",
+					},
+				},
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					if err := requireAdmin(p.Context); err != nil {
+						return nil, err
+					}
+					timeRange, _ := p.Args["range"].(string)
+					return b.resolver.ValidationStats(p.Context, timeRange)
+				},
+			},
 			"labelDefinitions": &graphql.Field{
 				Type:        graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(LabelDefinitionType))),
 				Description: "Get all label definitions (admin only)",
