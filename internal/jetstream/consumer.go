@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -405,25 +406,43 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 	}
 
 	// Validate record against lexicon schema (ingestion-time, advisory).
+	// Track validation state to persist alongside the final activity status.
+	var validationFailed bool
+	var validationMsg *string
+	var isValidPtr *bool
 	if c.validator != nil && c.valMode != "disabled" && (commit.Operation == OpCreate || commit.Operation == OpUpdate) {
 		result := c.validator.Validate(commit.Collection, commit.Record)
 		if !result.Valid {
+			// Build a readable violation summary
+			parts := make([]string, 0, len(result.Violations))
+			for _, v := range result.Violations {
+				if v.Field != "" {
+					parts = append(parts, fmt.Sprintf("%s: %s", v.Field, v.Message))
+				} else {
+					parts = append(parts, v.Message)
+				}
+			}
+			summary := fmt.Sprintf("%d violation(s): %s", len(result.Violations), strings.Join(parts, "; "))
+
 			slog.Warn("[jetstream] Record failed validation",
 				"uri", uri,
 				"collection", commit.Collection,
-				"violations", fmt.Sprintf("%v", result.Violations),
+				"violations", summary,
 			)
 			metrics.RecordValidationFailed(commit.Collection)
 			isValid := false
-			violationSummary := fmt.Sprintf("%d violations: %v", len(result.Violations), result.Violations)
+			isValidPtr = &isValid
+			validationMsg = &summary
+			validationFailed = true
+
 			if c.valMode == "enforce" {
-				updateActivityStatus("rejected", &violationSummary, &isValid)
+				updateActivityStatus("rejected", &summary, &isValid)
 				return nil // skip record
 			}
-			// warn mode: mark as invalid but continue processing
-			updateActivityStatus("success", &violationSummary, &isValid)
+			// warn mode: continue processing, persist validation state with final status below
 		}
 	}
+	_ = validationFailed // used only to clarify intent
 
 	switch commit.Operation {
 	case OpCreate, OpUpdate:
@@ -437,7 +456,7 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 		result, err := c.recordsRepo.Insert(ctx, uri, commit.CID, event.DID, commit.Collection, string(commit.Record))
 		if err != nil {
 			errMsg := err.Error()
-			updateActivityStatus("error", &errMsg, nil)
+			updateActivityStatus("error", &errMsg, isValidPtr)
 			return fmt.Errorf("failed to insert record: %w", err)
 		}
 
@@ -459,7 +478,7 @@ func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
 		}
 		c.pubsub.PublishRecord(eventType, uri, commit.CID, event.DID, commit.Collection, commit.Record)
 
-		updateActivityStatus("success", nil, nil)
+		updateActivityStatus("success", validationMsg, isValidPtr)
 
 		slog.Debug("[jetstream] Stored record",
 			"uri", uri,

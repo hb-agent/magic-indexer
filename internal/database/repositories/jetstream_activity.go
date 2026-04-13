@@ -382,7 +382,7 @@ func (r *JetstreamActivityRepository) GetValidationStats(ctx context.Context, ti
 	}
 
 	var lastInvalidStr sql.NullString
-	if err := r.db.DB().QueryContext(ctx, countSQL).Scan(&stats.InvalidCount, &lastInvalidStr); err != nil {
+	if err := r.db.DB().QueryRowContext(ctx, countSQL).Scan(&stats.InvalidCount, &lastInvalidStr); err != nil {
 		return nil, fmt.Errorf("failed to get invalid count: %w", err)
 	}
 	if lastInvalidStr.Valid {
