@@ -420,7 +420,7 @@ func TestCreateClientAssertion(t *testing.T) {
 	}
 
 	bridge := NewBridge(BridgeConfig{
-		ClientID:  "test-client",
+		ClientID:   "test-client",
 		SigningKey: keyPair,
 	})
 

@@ -460,4 +460,3 @@ func BuildAuthorizationURL(authEndpoint string, params url.Values) string {
 	}
 	return authEndpoint + "?" + params.Encode()
 }
-
