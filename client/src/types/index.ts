@@ -59,6 +59,13 @@ export interface OAuthClient {
   createdAt: string;
 }
 
+// Collection Overview
+export interface CollectionOverview {
+  collection: string;
+  recordCount: number;
+  invalidCount: number;
+}
+
 // Validation Stats
 export interface ValidationStats {
   invalidCount: number;
@@ -106,6 +113,10 @@ export interface OAuthClientsResponse {
 
 export interface IsBackfillingResponse {
   isBackfilling: boolean;
+}
+
+export interface CollectionOverviewResponse {
+  collectionOverview: CollectionOverview[];
 }
 
 export interface ValidationStatsResponse {

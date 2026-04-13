@@ -88,6 +88,17 @@ export const GET_VALIDATION_STATS = gql`
   }
 `;
 
+// Collection Overview
+export const GET_COLLECTION_OVERVIEW = gql`
+  query GetCollectionOverview {
+    collectionOverview {
+      collection
+      recordCount
+      invalidCount
+    }
+  }
+`;
+
 // Lexicons
 export const GET_LEXICONS = gql`
   query GetLexicons {

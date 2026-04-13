@@ -714,6 +714,23 @@ func (r *Resolver) ActivityBuckets(ctx context.Context, timeRange string) ([]map
 	return result, nil
 }
 
+// CollectionOverview returns per-collection record counts with invalid counts.
+func (r *Resolver) CollectionOverview(ctx context.Context) ([]map[string]interface{}, error) {
+	overview, err := r.repos.Records.GetCollectionOverview(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get collection overview: %w", err)
+	}
+	result := make([]map[string]interface{}, 0, len(overview))
+	for _, c := range overview {
+		result = append(result, map[string]interface{}{
+			"collection":   c.Collection,
+			"recordCount":  c.RecordCount,
+			"invalidCount": c.InvalidCount,
+		})
+	}
+	return result, nil
+}
+
 // RecentActivity returns recent activity entries.
 func (r *Resolver) RecentActivity(ctx context.Context, hours int) ([]map[string]interface{}, error) {
 	entries, err := r.repos.Activity.GetRecentActivity(ctx, hours)

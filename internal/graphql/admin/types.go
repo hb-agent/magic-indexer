@@ -345,6 +345,17 @@ var CollectionValidationCountType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// CollectionOverviewType represents per-collection record and validation counts.
+var CollectionOverviewType = graphql.NewObject(graphql.ObjectConfig{
+	Name:        "CollectionOverview",
+	Description: "Per-collection record count and validation status",
+	Fields: graphql.Fields{
+		"collection":   &graphql.Field{Type: graphql.NewNonNull(graphql.String), Description: "Collection NSID"},
+		"recordCount":  &graphql.Field{Type: graphql.NewNonNull(graphql.Int), Description: "Total number of records"},
+		"invalidCount": &graphql.Field{Type: graphql.NewNonNull(graphql.Int), Description: "Number of invalid records"},
+	},
+})
+
 // LexiconType represents a lexicon schema definition.
 var LexiconType = graphql.NewObject(graphql.ObjectConfig{
 	Name:        "Lexicon",

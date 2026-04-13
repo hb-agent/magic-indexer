@@ -106,6 +106,16 @@ func (b *SchemaBuilder) buildQueryType() *graphql.Object {
 					return b.resolver.OAuthClients(p.Context)
 				},
 			},
+			"collectionOverview": &graphql.Field{
+				Type:        graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(CollectionOverviewType))),
+				Description: "Get per-collection record counts with validation status (admin only)",
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					if err := requireAdmin(p.Context); err != nil {
+						return nil, err
+					}
+					return b.resolver.CollectionOverview(p.Context)
+				},
+			},
 			"activityBuckets": &graphql.Field{
 				Type:        graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(ActivityBucketType))),
 				Description: "Get aggregated activity data for a time range (admin only)",

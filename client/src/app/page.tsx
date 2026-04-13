@@ -3,15 +3,16 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { graphqlClient } from "@/lib/graphql/client";
-import { GET_STATISTICS, GET_ACTIVITY_BUCKETS, GET_RECENT_ACTIVITY, GET_SETTINGS, GET_VALIDATION_STATS } from "@/lib/graphql/queries";
+import { GET_STATISTICS, GET_ACTIVITY_BUCKETS, GET_RECENT_ACTIVITY, GET_SETTINGS, GET_VALIDATION_STATS, GET_COLLECTION_OVERVIEW } from "@/lib/graphql/queries";
 import { POPULATE_ACTIVITY } from "@/lib/graphql/mutations";
 import { StatsCards } from "@/components/dashboard/StatsCards";
 import { ActivityChart } from "@/components/dashboard/ActivityChart";
 import { RecentActivity } from "@/components/dashboard/RecentActivity";
+import { CollectionOverview } from "@/components/dashboard/CollectionOverview";
 import { Alert } from "@/components/ui";
 import Link from "next/link";
 import { formatRelative } from "@/lib/utils";
-import type { StatisticsResponse, ActivityBucketsResponse, RecentActivityResponse, SettingsResponse, ValidationStatsResponse, TimeRange } from "@/types";
+import type { StatisticsResponse, ActivityBucketsResponse, RecentActivityResponse, SettingsResponse, ValidationStatsResponse, CollectionOverviewResponse, TimeRange } from "@/types";
 
 export default function Dashboard() {
   const [timeRange, setTimeRange] = useState<TimeRange>("ONE_DAY");
@@ -21,6 +22,7 @@ export default function Dashboard() {
   const { data: activityData, isLoading: activityLoading } = useQuery({ queryKey: ["activityBuckets", timeRange], queryFn: () => graphqlClient.request<ActivityBucketsResponse>(GET_ACTIVITY_BUCKETS, { range: timeRange }) });
   const { data: recentData, isLoading: recentLoading } = useQuery({ queryKey: ["recentActivity"], queryFn: () => graphqlClient.request<RecentActivityResponse>(GET_RECENT_ACTIVITY, { hours: 24 }) });
   const { data: validationData } = useQuery({ queryKey: ["validationStats", timeRange], queryFn: () => graphqlClient.request<ValidationStatsResponse>(GET_VALIDATION_STATS, { range: timeRange }) });
+  const { data: overviewData, isLoading: overviewLoading } = useQuery({ queryKey: ["collectionOverview"], queryFn: () => graphqlClient.request<CollectionOverviewResponse>(GET_COLLECTION_OVERVIEW) });
   const populateActivity = useMutation({
     mutationFn: () => graphqlClient.request<{ populateActivity: number }>(POPULATE_ACTIVITY),
     onSuccess: (data) => { queryClient.invalidateQueries({ queryKey: ["recentActivity"] }); queryClient.invalidateQueries({ queryKey: ["activityBuckets"] }); alert(`Populated ${data.populateActivity} activity entries`); },
@@ -67,6 +69,7 @@ export default function Dashboard() {
         </Alert>
       )}
 
+      <CollectionOverview collections={overviewData?.collectionOverview ?? []} isLoading={overviewLoading} />
       <ActivityChart data={activityData?.activityBuckets ?? []} timeRange={timeRange} onTimeRangeChange={setTimeRange} isLoading={activityLoading} />
       <RecentActivity entries={recentData?.recentActivity ?? []} isLoading={recentLoading} />
       <div className="flex justify-center">

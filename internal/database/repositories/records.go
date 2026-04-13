@@ -695,6 +695,34 @@ func (r *RecordsRepository) GetCollectionTimeSeries(ctx context.Context, collect
 	}, nil
 }
 
+// CollectionOverview holds per-collection record and validation counts.
+type CollectionOverview struct {
+	Collection   string
+	RecordCount  int64
+	InvalidCount int64
+}
+
+// GetCollectionOverview returns record counts per collection with invalid counts from activity.
+func (r *RecordsRepository) GetCollectionOverview(ctx context.Context) ([]CollectionOverview, error) {
+	sqlStr := `SELECT r.collection, COUNT(*) as record_count, COALESCE(inv.invalid_count, 0) as invalid_count FROM record r LEFT JOIN (SELECT collection, COUNT(*) as invalid_count FROM jetstream_activity WHERE is_valid = false GROUP BY collection) inv ON inv.collection = r.collection GROUP BY r.collection ORDER BY record_count DESC`
+
+	rows, err := r.db.DB().QueryContext(ctx, sqlStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get collection overview: %w", err)
+	}
+	defer rows.Close()
+
+	var results []CollectionOverview
+	for rows.Next() {
+		var c CollectionOverview
+		if err := rows.Scan(&c.Collection, &c.RecordCount, &c.InvalidCount); err != nil {
+			return nil, err
+		}
+		results = append(results, c)
+	}
+	return results, rows.Err()
+}
+
 // GetCIDsByURIs returns a map of URI -> CID for records that exist.
 // Used for deduplication before batch insert.
 func (r *RecordsRepository) GetCIDsByURIs(ctx context.Context, uris []string) (map[string]string, error) {
