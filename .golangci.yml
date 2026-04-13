@@ -84,6 +84,16 @@ linters:
       - linters:
           - gosec
         text: "G304"
+      # G104: rows.Close() errors — the return value is safe to discard
+      # because the caller checks rows.Err() immediately after.
+      - linters:
+          - gosec
+        text: "G104.*Errors unhandled.*rows\\.Close"
+      # G101: Hardcoded test DB credentials in testutil/db.go — these are
+      # ephemeral CI-only credentials, not production secrets.
+      - path: 'internal/testutil/'
+        linters:
+          - gosec
 
 formatters:
   enable:
