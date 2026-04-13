@@ -1071,7 +1071,7 @@ func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
 // BACKFILL_ON_START is set. The goroutine gets a tracked cancel so
 // graceful shutdown can interrupt an in-progress backfill instead of
 // hanging indefinitely on bg.Stop.
-func startBackfill(cfg *config.Config, svc *services, bg *backgroundServices, validator *lexicon.Validator) {
+func startBackfill(cfg *config.Config, svc *services, bg *backgroundServices, _ *lexicon.Validator) {
 	if !cfg.BackfillOnStart {
 		return
 	}

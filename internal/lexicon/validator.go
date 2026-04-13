@@ -245,8 +245,8 @@ func sanitizeObject(props []PropertyEntry, registry *Registry, data map[string]i
 			continue
 		}
 
-		switch {
-		case prop.Type == TypeString || prop.Type == "":
+		switch prop.Type {
+		case TypeString, "":
 			s, ok := val.(string)
 			if !ok {
 				data[field] = nil
@@ -262,7 +262,7 @@ func sanitizeObject(props []PropertyEntry, registry *Registry, data map[string]i
 			}
 			data[field] = truncateString(s, prop.MaxLength, prop.MaxGraphemes)
 
-		case prop.Type == TypeArray:
+		case TypeArray:
 			arr, ok := val.([]interface{})
 			if !ok {
 				data[field] = nil
@@ -277,12 +277,12 @@ func sanitizeObject(props []PropertyEntry, registry *Registry, data map[string]i
 				sanitizeArrayItems(prop.Items, registry, arr, lexiconCtx, depth)
 			}
 
-		case prop.Type == TypeRef:
+		case TypeRef:
 			if obj, ok := val.(map[string]interface{}); ok && registry != nil {
 				sanitizeRefObject(prop.Ref, registry, obj, lexiconCtx, depth)
 			}
 
-		case prop.Type == TypeUnion:
+		case TypeUnion:
 			if obj, ok := val.(map[string]interface{}); ok && registry != nil {
 				sanitizeUnionObject(prop.Refs, registry, obj, lexiconCtx, depth)
 			}
@@ -441,9 +441,9 @@ func validateFormat(value, format string) bool {
 	case FormatDID:
 		return strings.HasPrefix(value, "did:")
 	case FormatHandle:
-		return len(value) > 0 && strings.Contains(value, ".")
+		return value != "" && strings.Contains(value, ".")
 	case FormatCID, FormatNSID, FormatLanguage, FormatRecordKey, FormatTID:
-		return len(value) > 0 // basic non-empty check for less common formats
+		return value != "" // basic non-empty check for less common formats
 	default:
 		return true // unknown formats pass
 	}
