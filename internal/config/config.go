@@ -44,6 +44,14 @@ type Config struct {
 	JetstreamCollections   string // Comma-separated collections to subscribe to
 	JetstreamDisableCursor bool   // Disable cursor-based resume
 
+	// Tap (alternative to Jetstream — crypto-verified events)
+	TapEnabled           bool   // Use Tap instead of Jetstream
+	TapURL               string // Tap WebSocket URL (default wss://localhost:2480)
+	TapAdminPassword     string // Password for Tap admin API
+	TapDisableAcks       bool   // Fire-and-forget mode
+	TapCollectionFilters string // Comma-separated collection NSIDs
+	TapMaxRetries        int    // Per-event retry limit (default 3)
+
 	// Backfill
 	BackfillOnStart           bool   // Run backfill on server start
 	BackfillCollections       string // Comma-separated collections to backfill (defaults to JetstreamCollections)
@@ -103,6 +111,14 @@ func Load() (*Config, error) {
 		JetstreamURL:           getEnv("JETSTREAM_URL", ""),
 		JetstreamCollections:   getEnv("JETSTREAM_COLLECTIONS", ""),
 		JetstreamDisableCursor: getEnvBool("JETSTREAM_DISABLE_CURSOR", false),
+
+		// Tap
+		TapEnabled:           getEnvBool("TAP_ENABLED", false),
+		TapURL:               getEnv("TAP_URL", "wss://localhost:2480"),
+		TapAdminPassword:     getEnv("TAP_ADMIN_PASSWORD", ""),
+		TapDisableAcks:       getEnvBool("TAP_DISABLE_ACKS", false),
+		TapCollectionFilters: getEnv("TAP_COLLECTION_FILTERS", ""),
+		TapMaxRetries:        getEnvInt("TAP_MAX_RETRIES", 3),
 
 		// Backfill
 		BackfillOnStart:           getEnvBool("BACKFILL_ON_START", false),

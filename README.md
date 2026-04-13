@@ -72,8 +72,10 @@ Or place lexicon JSON files in a directory and set `LEXICON_DIR` environment var
 ### 2. Start Indexing
 
 Once lexicons are registered, Magic Indexer automatically:
-- **Connects to Jetstream** for real-time events
+- **Connects to Jetstream** (default) or **Tap** (crypto-verified) for real-time events
 - **Indexes matching records** to your database
+
+**Tap mode** (recommended for production): Set `TAP_ENABLED=true` to use the Bluesky Tap sidecar for cryptographically verified events with per-repo ordering and ack-based delivery. See `docker-compose.tap.yml` for local setup.
 
 To backfill historical data, use the admin API:
 
@@ -118,7 +120,49 @@ query {
     }
   }
 }
+
+# Field filtering (where clause)
+query {
+  orgHypercertsClaimActivity(
+    where: {
+      status: { eq: "active" }
+      priority: { gte: 3 }
+      title: { contains: "forest" }
+    }
+  ) {
+    edges { node { uri title status priority } }
+  }
+}
+
+# Sorting
+query {
+  orgHypercertsClaimActivity(
+    orderBy: "createdAt"
+    orderDirection: DESC
+    first: 20
+  ) {
+    edges { node { uri createdAt } }
+  }
+}
+
+# Backward pagination
+query {
+  orgHypercertsClaimActivity(last: 10, before: "cursor...") {
+    edges { node { uri } }
+    pageInfo { hasPreviousPage hasNextPage startCursor endCursor }
+  }
+}
+
+# Total count (lazy — only computed when selected)
+query {
+  orgHypercertsClaimActivity {
+    totalCount
+    edges { node { uri } }
+  }
+}
 ```
+
+**Filter operators:** `eq`, `neq`, `gt`, `lt`, `gte`, `lte`, `in`, `contains` (min 3 chars), `startsWith`, `isNull`. All conditions are combined with AND.
 
 ## Endpoints
 

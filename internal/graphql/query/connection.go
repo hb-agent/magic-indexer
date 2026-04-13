@@ -85,17 +85,52 @@ func LabelFilterArgs() graphql.FieldConfigArgument {
 	}
 }
 
-// ConnectionArgs returns standard Relay connection arguments for forward pagination,
-// plus label-based and author-based filtering arguments used by record collection queries.
+// SortDirectionEnum defines ASC/DESC for ordering.
+var SortDirectionEnum = graphql.NewEnum(graphql.EnumConfig{
+	Name:        "SortDirection",
+	Description: "Sort direction",
+	Values: graphql.EnumValueConfigMap{
+		"ASC": &graphql.EnumValueConfig{
+			Value:       "ASC",
+			Description: "Ascending order",
+		},
+		"DESC": &graphql.EnumValueConfig{
+			Value:       "DESC",
+			Description: "Descending order (default)",
+		},
+	},
+})
+
+// ConnectionArgs returns standard Relay connection arguments for forward and backward
+// pagination, plus label-based and author-based filtering arguments used by record
+// collection queries.
 func ConnectionArgs() graphql.FieldConfigArgument {
 	args := graphql.FieldConfigArgument{
 		"first": &graphql.ArgumentConfig{
 			Type:        graphql.Int,
-			Description: "Number of items to return (default 20)",
+			Description: "Number of items to return (default 20, max 100)",
 		},
 		"after": &graphql.ArgumentConfig{
 			Type:        graphql.String,
 			Description: "Cursor to start after (forward pagination)",
+		},
+		"last": &graphql.ArgumentConfig{
+			Type:        graphql.Int,
+			Description: "Number of items to return from the end (backward pagination, max 100)",
+		},
+		"before": &graphql.ArgumentConfig{
+			Type:        graphql.String,
+			Description: "Cursor to start before (backward pagination)",
+		},
+		"orderBy": &graphql.ArgumentConfig{
+			Type:         graphql.String,
+			DefaultValue: "indexed_at",
+			Description:  "Field to sort by (default: indexed_at). Use field names from the record schema.",
+		},
+		"orderDirection": &graphql.ArgumentConfig{
+			Type:         SortDirectionEnum,
+			DefaultValue: "DESC",
+			Description:  "Sort direction (default: DESC)",
 		},
 		"search": &graphql.ArgumentConfig{
 			Type:        graphql.String,

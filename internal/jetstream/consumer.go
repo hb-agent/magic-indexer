@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/GainForest/hypergoat/internal/consumer"
+	"github.com/GainForest/hypergoat/internal/cursor"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
-	"github.com/GainForest/hypergoat/internal/graphql/subscription"
-	"github.com/GainForest/hypergoat/internal/lexicon"
+	"github.com/GainForest/hypergoat/internal/ingestion"
 	"github.com/GainForest/hypergoat/internal/metrics"
 )
 
@@ -32,22 +32,14 @@ type ConsumerConfig struct {
 
 // Consumer consumes events from Jetstream and stores them in the database.
 type Consumer struct {
-	config       ConsumerConfig
-	client       *Client
-	recordsRepo  *repositories.RecordsRepository
-	actorsRepo   *repositories.ActorsRepository
-	configRepo   *repositories.ConfigRepository
-	activityRepo *repositories.JetstreamActivityRepository
-	validator    *lexicon.Validator
-	valMode      string // "disabled", "warn", "enforce"
+	config     ConsumerConfig
+	client     *Client
+	configRepo *repositories.ConfigRepository
+	processor  *ingestion.RecordProcessor
 
-	// Pub/sub for GraphQL subscriptions
-	pubsub *subscription.PubSub
-
-	// Cursor tracking
-	cursor     int64
-	cursorMu   sync.Mutex
-	cursorDone chan struct{}
+	// Cursor tracking (uses shared cursor.Flusher)
+	cursorFlusher *cursor.Flusher
+	cursorDone    chan struct{}
 
 	// Stats
 	stats      Stats
@@ -71,33 +63,32 @@ type Stats struct {
 }
 
 // NewConsumer creates a new Jetstream consumer.
-// validator and validationMode are optional — pass nil/"disabled" to skip validation.
 func NewConsumer(
 	config ConsumerConfig,
-	recordsRepo *repositories.RecordsRepository,
-	actorsRepo *repositories.ActorsRepository,
+	processor *ingestion.RecordProcessor,
 	configRepo *repositories.ConfigRepository,
-	activityRepo *repositories.JetstreamActivityRepository,
-	pubsub *subscription.PubSub,
-	validator *lexicon.Validator,
-	validationMode string,
 ) *Consumer {
 	if config.CursorFlushInterval == 0 {
 		config.CursorFlushInterval = 5 * time.Second
 	}
 
-	return &Consumer{
-		config:       config,
-		recordsRepo:  recordsRepo,
-		actorsRepo:   actorsRepo,
-		configRepo:   configRepo,
-		activityRepo: activityRepo,
-		pubsub:       pubsub,
-		validator:    validator,
-		valMode:      validationMode,
-		cursorDone:   make(chan struct{}),
-		statsStart:   time.Now(),
+	c := &Consumer{
+		config:     config,
+		configRepo: configRepo,
+		processor:  processor,
+		cursorDone: make(chan struct{}),
+		statsStart: time.Now(),
 	}
+
+	c.cursorFlusher = cursor.NewFlusher(
+		func(ctx context.Context, cur int64) error {
+			return c.saveCursor(ctx, cur)
+		},
+		config.CursorFlushInterval,
+		"jetstream",
+	)
+
+	return c
 }
 
 // Start begins consuming events from Jetstream with automatic reconnection.
@@ -107,59 +98,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 	c.running = true
 	c.clientMu.Unlock()
 
-	// Reconnection loop with exponential backoff
-	backoff := time.Second
-	maxBackoff := 2 * time.Minute
-
-	for {
-		connStart := time.Now()
-		err := c.startInternal(c.ctx)
-
-		// Check if we should stop (context cancelled)
-		select {
-		case <-c.ctx.Done():
-			return c.ctx.Err()
-		default:
-		}
-
-		// Reset backoff if the connection was stable for a while.
-		if time.Since(connStart) > 30*time.Second {
-			backoff = time.Second
-		}
-
-		if err != nil {
-			slog.Error("Jetstream connection lost, will reconnect",
-				"error", err,
-				"backoff", backoff,
-			)
-		} else {
-			slog.Warn("Jetstream connection closed unexpectedly, will reconnect",
-				"backoff", backoff,
-			)
-		}
-
-		// Wait before reconnecting
-		select {
-		case <-c.ctx.Done():
-			return c.ctx.Err()
-		case <-time.After(backoff):
-		}
-
-		// Exponential backoff with cap
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
-
-		// Reset cursorDone channel for new connection. Must be
-		// done under clientMu so a concurrent Stop() can't race
-		// the pointer swap with the old flusher's select.
-		c.clientMu.Lock()
-		c.cursorDone = make(chan struct{})
-		c.clientMu.Unlock()
-
-		slog.Info("Attempting to reconnect to Jetstream...")
-	}
+	return consumer.RunWithReconnect(c.ctx, c.startInternal, consumer.BackoffOpts{})
 }
 
 // startInternal does the actual connection and event processing.
@@ -173,11 +112,11 @@ func (c *Consumer) startInternal(ctx context.Context) error {
 	c.clientMu.Unlock()
 
 	// Load cursor from database (fresh load on each connection attempt)
-	cursor, err := c.loadCursor(ctx)
+	cur, err := c.loadCursor(ctx)
 	if err != nil {
 		slog.Warn("Failed to load cursor, starting from live", "error", err)
-	} else if cursor > 0 {
-		slog.Info("Resuming from cursor", "cursor", cursor)
+	} else if cur > 0 {
+		slog.Info("Resuming from cursor", "cursor", cur)
 	}
 
 	// Create client
@@ -185,7 +124,7 @@ func (c *Consumer) startInternal(ctx context.Context) error {
 	c.client = NewClient(ClientConfig{
 		URL:           c.config.JetstreamURL,
 		Collections:   c.config.Collections,
-		Cursor:        cursor,
+		Cursor:        cur,
 		DisableCursor: c.config.DisableCursor,
 	})
 	c.clientMu.Unlock()
@@ -197,11 +136,10 @@ func (c *Consumer) startInternal(ctx context.Context) error {
 
 	// Start cursor flusher
 	if !c.config.DisableCursor {
-		go c.cursorFlusher(ctx)
+		go c.cursorFlusher.Run(ctx)
 	}
 
-	// Start event processor — pass client explicitly to avoid a data
-	// race on c.client during reconnection (matches labeler pattern).
+	// Start event processor
 	go c.processEvents(ctx, c.client)
 
 	// Run client (blocking)
@@ -229,10 +167,6 @@ func (c *Consumer) Stop() {
 }
 
 // UpdateCollections updates the subscribed collections and reconnects.
-// The parent context must be the same graceful-shutdown context used
-// to Start the consumer so that Stop on the parent tears this instance
-// down cleanly — passing context.Background here would silently
-// detach the reconnected consumer from shutdown and leak a goroutine.
 func (c *Consumer) UpdateCollections(parent context.Context, collections []string) error {
 	c.clientMu.Lock()
 	wasRunning := c.running
@@ -240,9 +174,6 @@ func (c *Consumer) UpdateCollections(parent context.Context, collections []strin
 	c.clientMu.Unlock()
 
 	if !wasRunning {
-		// Just update config, will be used on next Start. Take
-		// clientMu so startInternal isn't reading c.config
-		// concurrently.
 		c.clientMu.Lock()
 		c.config.Collections = collections
 		c.clientMu.Unlock()
@@ -257,10 +188,6 @@ func (c *Consumer) UpdateCollections(parent context.Context, collections []strin
 		oldClient.Stop()
 	}
 
-	// Update config, swap cursorDone, and rotate the cancellable
-	// context under a single lock. c.config and c.cursorDone are
-	// both read from other goroutines (startInternal, Stop,
-	// cursorFlusher), so all mutations must be under clientMu.
 	c.clientMu.Lock()
 	c.config.Collections = collections
 	c.cursorDone = make(chan struct{})
@@ -271,45 +198,9 @@ func (c *Consumer) UpdateCollections(parent context.Context, collections []strin
 	ctx := c.ctx
 	c.clientMu.Unlock()
 
-	// Start in background with reconnection loop (same as Start).
+	// Start in background with shared reconnection logic.
 	go func() {
-		backoff := time.Second
-		maxBackoff := 2 * time.Minute
-
-		for {
-			err := c.startInternal(ctx)
-
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			if err != nil {
-				slog.Error("Jetstream connection lost after collection update, will reconnect",
-					"error", err, "backoff", backoff)
-			} else {
-				slog.Warn("Jetstream connection closed after collection update, will reconnect",
-					"backoff", backoff)
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-			}
-
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-
-			c.clientMu.Lock()
-			c.cursorDone = make(chan struct{})
-			c.clientMu.Unlock()
-
-			slog.Info("Attempting to reconnect to Jetstream after collection update...")
-		}
+		_ = consumer.RunWithReconnect(ctx, c.startInternal, consumer.BackoffOpts{})
 	}()
 
 	return nil
@@ -348,11 +239,22 @@ func (c *Consumer) processEvents(ctx context.Context, client *Client) {
 				"total_events", eventCount,
 			)
 			metrics.RecordJetstreamEvent(event.Commit.Collection, string(event.Commit.Operation))
-			if err := c.handleCommit(ctx, event); err != nil {
+
+			commit := event.Commit
+			err := c.processor.ProcessRecord(ctx, ingestion.ProcessOp{
+				DID:        event.DID,
+				URI:        commit.URI(event.DID),
+				Collection: commit.Collection,
+				RKey:       commit.RKey,
+				CID:        commit.CID,
+				Operation:  ingestion.Operation(commit.Operation),
+				Record:     commit.Record,
+			})
+			if err != nil {
 				slog.Warn("Failed to handle commit",
 					"error", err,
 					"did", event.DID,
-					"collection", event.Commit.Collection,
+					"collection", commit.Collection,
 				)
 				metrics.RecordJetstreamError()
 				c.statsMu.Lock()
@@ -360,210 +262,22 @@ func (c *Consumer) processEvents(ctx context.Context, client *Client) {
 				c.statsMu.Unlock()
 				continue // Don't advance cursor on failure
 			}
+
+			// Update local stats
+			c.statsMu.Lock()
+			switch commit.Operation {
+			case OpCreate:
+				c.stats.RecordsCreated++
+			case OpUpdate:
+				c.stats.RecordsUpdated++
+			case OpDelete:
+				c.stats.RecordsDeleted++
+			}
+			c.statsMu.Unlock()
 		}
 
 		// Update cursor only after successful processing
-		c.cursorMu.Lock()
-		c.cursor = event.TimeUS
-		c.cursorMu.Unlock()
-	}
-}
-
-// handleCommit processes a commit event.
-func (c *Consumer) handleCommit(ctx context.Context, event *Event) error {
-	commit := event.Commit
-	uri := commit.URI(event.DID)
-
-	// Use current time for activity logging (when we processed the event)
-	// The event's original timestamp is stored in the event_json
-	processedAt := time.Now()
-
-	// Log activity if repository is available
-	var activityID int64
-	if c.activityRepo != nil {
-		var err error
-		activityID, err = c.activityRepo.LogActivity(
-			ctx,
-			processedAt,
-			string(commit.Operation),
-			commit.Collection,
-			event.DID,
-			commit.RKey,
-			string(commit.Record),
-		)
-		if err != nil {
-			slog.Warn("Failed to log activity", "error", err)
-		}
-	}
-
-	// Helper to update activity status
-	updateActivityStatus := func(status string, errMsg *string, isValid *bool) {
-		if c.activityRepo != nil && activityID > 0 {
-			if err := c.activityRepo.UpdateStatus(ctx, activityID, status, errMsg, isValid); err != nil {
-				slog.Warn("Failed to update activity status", "error", err)
-			}
-		}
-	}
-
-	// Validate record against lexicon schema (ingestion-time, advisory).
-	// Track validation state to persist alongside the final activity status.
-	var validationFailed bool
-	var validationMsg *string
-	var isValidPtr *bool
-	if c.validator != nil && c.valMode != "disabled" && (commit.Operation == OpCreate || commit.Operation == OpUpdate) {
-		result := c.validator.Validate(commit.Collection, commit.Record)
-		if !result.Valid {
-			// Build a readable violation summary
-			parts := make([]string, 0, len(result.Violations))
-			for _, v := range result.Violations {
-				if v.Field != "" {
-					parts = append(parts, fmt.Sprintf("%s: %s", v.Field, v.Message))
-				} else {
-					parts = append(parts, v.Message)
-				}
-			}
-			summary := fmt.Sprintf("%d violation(s): %s", len(result.Violations), strings.Join(parts, "; "))
-
-			slog.Warn("[jetstream] Record failed validation",
-				"uri", uri,
-				"collection", commit.Collection,
-				"violations", summary,
-			)
-			metrics.RecordValidationFailed(commit.Collection)
-			isValid := false
-			isValidPtr = &isValid
-			validationMsg = &summary
-			validationFailed = true
-
-			if c.valMode == "enforce" {
-				updateActivityStatus("rejected", &summary, &isValid)
-				return nil // skip record
-			}
-			// warn mode: continue processing, persist validation state with final status below
-		}
-	}
-	_ = validationFailed // used only to clarify intent
-
-	switch commit.Operation {
-	case OpCreate, OpUpdate:
-		// Ensure actor exists (just store the DID, no resolution)
-		if err := c.ensureActor(ctx, event.DID); err != nil {
-			slog.Warn("Failed to ensure actor", "did", event.DID, "error", err)
-			// Continue anyway - record storage is more important
-		}
-
-		// Store the record
-		result, err := c.recordsRepo.Insert(ctx, uri, commit.CID, event.DID, commit.Collection, string(commit.Record))
-		if err != nil {
-			errMsg := err.Error()
-			updateActivityStatus("error", &errMsg, isValidPtr)
-			return fmt.Errorf("failed to insert record: %w", err)
-		}
-
-		c.statsMu.Lock()
-		if result == repositories.Inserted {
-			if commit.Operation == OpCreate {
-				c.stats.RecordsCreated++
-			} else {
-				c.stats.RecordsUpdated++
-			}
-			metrics.RecordInserted(commit.Collection)
-		}
-		c.statsMu.Unlock()
-
-		// Publish to GraphQL subscriptions
-		eventType := subscription.EventCreate
-		if commit.Operation == OpUpdate {
-			eventType = subscription.EventUpdate
-		}
-		c.pubsub.PublishRecord(eventType, uri, commit.CID, event.DID, commit.Collection, commit.Record)
-
-		updateActivityStatus("success", validationMsg, isValidPtr)
-
-		slog.Debug("[jetstream] Stored record",
-			"uri", uri,
-			"collection", commit.Collection,
-			"operation", commit.Operation,
-		)
-
-	case OpDelete:
-		if err := c.recordsRepo.Delete(ctx, uri); err != nil {
-			errMsg := err.Error()
-			updateActivityStatus("error", &errMsg, nil)
-			return fmt.Errorf("failed to delete record: %w", err)
-		}
-
-		c.statsMu.Lock()
-		c.stats.RecordsDeleted++
-		c.statsMu.Unlock()
-
-		// Publish delete to GraphQL subscriptions
-		c.pubsub.PublishRecord(subscription.EventDelete, uri, commit.CID, event.DID, commit.Collection, nil)
-
-		updateActivityStatus("success", nil, nil)
-
-		slog.Debug("Deleted record", "uri", uri)
-	}
-
-	return nil
-}
-
-// ensureActor ensures the actor exists in the database.
-// Uses Upsert (INSERT ON CONFLICT) directly — no pre-check SELECT.
-func (c *Consumer) ensureActor(ctx context.Context, did string) error {
-	return c.actorsRepo.Upsert(ctx, did, "")
-}
-
-// cursorFlusher periodically flushes the cursor to the database.
-func (c *Consumer) cursorFlusher(ctx context.Context) {
-	ticker := time.NewTicker(c.config.CursorFlushInterval)
-	defer ticker.Stop()
-
-	// finalFlush uses a bounded context so shutdown can't hang
-	// indefinitely on a slow DB. 5s is enough for a tiny single-row
-	// write even under moderate pressure.
-	finalFlush := func() {
-		fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		c.flushCursor(fctx)
-	}
-
-	var lastFlushed int64
-
-	for {
-		select {
-		case <-ctx.Done():
-			finalFlush()
-			return
-		case <-c.cursorDone:
-			finalFlush()
-			return
-		case <-ticker.C:
-			c.cursorMu.Lock()
-			cursor := c.cursor
-			c.cursorMu.Unlock()
-
-			if cursor > lastFlushed {
-				if err := c.saveCursor(ctx, cursor); err != nil {
-					slog.Warn("Failed to save cursor", "error", err)
-				} else {
-					lastFlushed = cursor
-				}
-			}
-		}
-	}
-}
-
-// flushCursor flushes the current cursor immediately.
-func (c *Consumer) flushCursor(ctx context.Context) {
-	c.cursorMu.Lock()
-	cursor := c.cursor
-	c.cursorMu.Unlock()
-
-	if cursor > 0 {
-		if err := c.saveCursor(ctx, cursor); err != nil {
-			slog.Warn("Failed to flush cursor", "error", err)
-		}
+		c.cursorFlusher.SetCurrent(event.TimeUS)
 	}
 }
 
@@ -577,16 +291,16 @@ func (c *Consumer) loadCursor(ctx context.Context) (int64, error) {
 		return 0, nil
 	}
 
-	var cursor int64
-	if err := json.Unmarshal([]byte(value), &cursor); err != nil {
+	var cur int64
+	if err := json.Unmarshal([]byte(value), &cur); err != nil {
 		return 0, err
 	}
-	return cursor, nil
+	return cur, nil
 }
 
 // saveCursor saves the cursor to the config table.
-func (c *Consumer) saveCursor(ctx context.Context, cursor int64) error {
-	value, err := json.Marshal(cursor)
+func (c *Consumer) saveCursor(ctx context.Context, cur int64) error {
+	value, err := json.Marshal(cur)
 	if err != nil {
 		return err
 	}

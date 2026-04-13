@@ -381,6 +381,7 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	limit int,
 	afterTimestamp, afterURI string,
 	filter RecordFilter,
+	fieldFilters ...FieldFilter,
 ) ([]*Record, error) {
 	// Load-bearing empty-authors short-circuit. See RecordFilter.Authors
 	// field doc for why this cannot be collapsed into "no filter".
@@ -457,6 +458,19 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 			fmt.Sprintf("r.search_vector @@ plainto_tsquery('english', %s)", ph()))
 		args = append(args, search)
 		metrics.RecordSearchApplied()
+	}
+
+	// Field filters from `where` argument.
+	if len(fieldFilters) > 0 {
+		fieldClause, fieldParams, err := BuildFieldFilterClause(fieldFilters, paramIdx)
+		if err != nil {
+			return nil, fmt.Errorf("field filter error: %w", err)
+		}
+		if fieldClause != "" {
+			whereClauses = append(whereClauses, fieldClause)
+			args = append(args, fieldParams...)
+			paramIdx += len(fieldParams)
+		}
 	}
 
 	// keyset cursor
@@ -601,6 +615,15 @@ func (r *RecordsRepository) DeleteAll(ctx context.Context) error {
 func (r *RecordsRepository) GetCount(ctx context.Context) (int64, error) {
 	var count int64
 	err := r.db.QueryRow(ctx, "SELECT COUNT(*) FROM record", nil, &count)
+	return count, err
+}
+
+// GetCollectionCount returns the total number of records in a collection.
+func (r *RecordsRepository) GetCollectionCount(ctx context.Context, collection string) (int64, error) {
+	var count int64
+	err := r.db.QueryRow(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM record WHERE collection = %s", r.db.Placeholder(1)),
+		[]database.Value{database.Text(collection)}, &count)
 	return count, err
 }
 
