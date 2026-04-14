@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -242,7 +243,7 @@ func (r *Repository) List(ctx context.Context, did string, reasons []string, fir
 	var lastSeen sql.NullTime
 	err = conn.QueryRowContext(ctx,
 		`SELECT last_seen_notifs FROM actor_state WHERE did = $1`, did).Scan(&lastSeen)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return ListResult{}, fmt.Errorf("load actor_state: %w", err)
 	}
 	watermark := time.Time{}
@@ -386,4 +387,3 @@ func (r *Repository) TryAdvisoryLock(ctx context.Context, key int64) (bool, func
 	}
 	return true, unlock, nil
 }
-

@@ -9,9 +9,9 @@ import (
 
 // SchemaBuilder builds the admin GraphQL schema.
 type SchemaBuilder struct {
-	resolver        *Resolver
-	extraQueries    graphql.Fields
-	extraMutations  graphql.Fields
+	resolver       *Resolver
+	extraQueries   graphql.Fields
+	extraMutations graphql.Fields
 }
 
 // NewSchemaBuilder creates a new admin schema builder.

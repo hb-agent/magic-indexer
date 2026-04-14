@@ -3,7 +3,6 @@ package notifications
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/graphql-go/graphql"
@@ -17,17 +16,6 @@ type Resolver struct {
 // NewResolver creates a new Resolver.
 func NewResolver(repo *Repository) *Resolver {
 	return &Resolver{repo: repo}
-}
-
-// notificationContextKey is the graphql context key for the isRead watermark.
-type notificationContextKey struct{}
-
-// watermarkFromContext retrieves the lastSeenNotifs time stashed on the context.
-func watermarkFromContext(ctx context.Context) time.Time {
-	if v, ok := ctx.Value(notificationContextKey{}).(time.Time); ok {
-		return v
-	}
-	return time.Time{}
 }
 
 // ListNotifications is the resolver for `Query.notifications(did, reasons, first, after)`.
@@ -94,7 +82,7 @@ func (r *Resolver) UnreadCount(ctx context.Context, did string) (map[string]inte
 }
 
 // UpdateSeen is the resolver for `Mutation.updateNotificationsSeen(did, seenAt)`.
-func (r *Resolver) UpdateSeen(ctx context.Context, did string, seenAtStr string) (bool, error) {
+func (r *Resolver) UpdateSeen(ctx context.Context, did, seenAtStr string) (bool, error) {
 	if did == "" {
 		return false, fmt.Errorf("did is required")
 	}
@@ -237,10 +225,4 @@ func (r *Resolver) MutationFields() graphql.Fields {
 			},
 		},
 	}
-}
-
-// atoi is a small helper to convert a string to int64.
-func atoi(s string) int64 {
-	n, _ := strconv.ParseInt(s, 10, 64)
-	return n
 }

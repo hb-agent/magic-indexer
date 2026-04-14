@@ -4,7 +4,7 @@ import "sync"
 
 // Registry maps collection NSID to the Notifier responsible for it.
 type Registry struct {
-	mu    sync.RWMutex
+	mu     sync.RWMutex
 	byNSID map[string]Notifier
 }
 
