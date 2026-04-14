@@ -851,6 +851,14 @@ area.
 - **[#13 — GDPR hard-delete endpoint](https://github.com/hb-agent/magic-indexer/issues/13)**.
   Re-open when there's a real erasure request or a legal
   obligation.
+- **#26 Deploy 2 (sortAt exposure).** The April-2026 bundled PR
+  shipped Deploy 1: migration 017 + `ingestion.ComputeSortAt`
+  writes `sort_at` on every new insert. Deploy 2 — backfill
+  existing rows, `NOT NULL` flip, `sortAt` GraphQL field, and
+  `ORDER BY COALESCE(sort_at, indexed_at)` queries — stays
+  deferred until Deploy 1 has been live long enough that the
+  NULL tail is small. Check `SELECT count(*) FROM record WHERE
+  sort_at IS NULL` before scheduling it.
 
 Other things that came up in review and were intentionally
 **not** changed:

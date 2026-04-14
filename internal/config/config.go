@@ -30,6 +30,13 @@ type Config struct {
 	ExternalBaseURL   string
 	OAuthSigningKey   string
 	OAuthLoopbackMode bool
+	// OAuthLegacyDPoPJKTCutoff is the Unix timestamp past which refresh tokens
+	// without a DPoP JKT binding are rejected on refresh (issue #24). Set this
+	// to the deploy time of the binding feature so existing tokens issued
+	// before then keep working until they expire, while any token issued
+	// after this point must be JKT-bound. Required — the server refuses to
+	// start without it (fail-closed).
+	OAuthLegacyDPoPJKTCutoff int64
 
 	// Admin
 	AdminDIDs   string // Comma-separated list of admin DIDs
@@ -98,9 +105,10 @@ func Load() (*Config, error) {
 		AllowedOrigins: getEnv("ALLOWED_ORIGINS", ""),
 
 		// OAuth
-		ExternalBaseURL:   getEnv("EXTERNAL_BASE_URL", ""),
-		OAuthSigningKey:   getEnv("OAUTH_SIGNING_KEY", ""),
-		OAuthLoopbackMode: getEnvBool("OAUTH_LOOPBACK_MODE", false),
+		ExternalBaseURL:          getEnv("EXTERNAL_BASE_URL", ""),
+		OAuthSigningKey:          getEnv("OAUTH_SIGNING_KEY", ""),
+		OAuthLoopbackMode:        getEnvBool("OAUTH_LOOPBACK_MODE", false),
+		OAuthLegacyDPoPJKTCutoff: getEnvInt64("OAUTH_LEGACY_DPOP_JKT_CUTOFF", 0),
 
 		// Admin
 		AdminDIDs:   getEnv("ADMIN_DIDS", ""),
@@ -189,6 +197,17 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("PORT must be between 1 and 65535")
 	}
 
+	// OAuth DPoP JKT binding cutoff (issue #24) — fail-closed. If unset or
+	// non-positive the server can't tell legacy tokens from post-binding
+	// tokens, so refuse to start rather than silently accepting unbound
+	// refresh attempts.
+	if c.OAuthLegacyDPoPJKTCutoff <= 0 {
+		return fmt.Errorf(
+			"OAUTH_LEGACY_DPOP_JKT_CUTOFF must be set to the Unix timestamp of the DPoP-binding deploy; " +
+				"refresh tokens issued before this cutoff are accepted unbound, tokens after must be JKT-bound",
+		)
+	}
+
 	return nil
 }
 
@@ -258,6 +277,20 @@ func getEnvInt(key string, defaultValue int) int {
 		// default used to make "why is my config ignored?" hard
 		// to diagnose. Log at Warn so operators see it on boot.
 		slog.Warn("Malformed integer env var; using default",
+			"key", key, "value", value, "default", defaultValue, "error", err)
+		return defaultValue
+	}
+	return intVal
+}
+
+func getEnvInt64(key string, defaultValue int64) int64 {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	intVal, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		slog.Warn("Malformed int64 env var; using default",
 			"key", key, "value", value, "default", defaultValue, "error", err)
 		return defaultValue
 	}

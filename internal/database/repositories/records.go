@@ -38,6 +38,11 @@ type Record struct {
 	JSON       string
 	IndexedAt  time.Time
 	RKey       string
+	// SortAt is the feed-ordering timestamp (issue #26). Nullable while the
+	// Deploy-1 column rollout is in progress — rows written before the
+	// migration have no sort_at yet. A nil pointer here means NULL in the
+	// database; resolvers fall back to IndexedAt when presenting.
+	SortAt *time.Time
 }
 
 // CollectionStat represents statistics for a collection.
@@ -84,31 +89,71 @@ func (r *RecordsRepository) recordColumns() string {
 	return "uri, cid, did, collection, json::text, indexed_at::text, rkey"
 }
 
+// InsertParams carries the full parameter set for a record insert. It's a
+// struct instead of a long positional arg list so new optional fields (like
+// SortAt for issue #26) can be added without rewriting every call site.
+type InsertParams struct {
+	URI        string
+	CID        string
+	DID        string
+	Collection string
+	JSONData   string
+	// SortAt is the clock-skew-clamped feed-ordering timestamp. Nil means
+	// "don't set it" — the column stays NULL until the Deploy-2 backfill.
+	SortAt *time.Time
+}
+
 // Insert inserts or updates a record in the database.
 // Skips the update if the CID is unchanged (content identical).
+//
+// Kept as the thin positional wrapper for historical callers; new code
+// should use InsertWithParams so SortAt can flow through.
 func (r *RecordsRepository) Insert(ctx context.Context, uri, cid, did, collection, jsonData string) (InsertResult, error) {
+	return r.InsertWithParams(ctx, InsertParams{
+		URI: uri, CID: cid, DID: did, Collection: collection, JSONData: jsonData,
+	})
+}
+
+// InsertWithParams is the canonical insert path. SortAt, when non-nil, is
+// written verbatim — callers are responsible for computing the clock-skew
+// clamp (see ingestion.ComputeSortAt). An update preserves the first
+// non-null sort_at unless the caller sends a new one; see the ON CONFLICT
+// clause below.
+func (r *RecordsRepository) InsertWithParams(ctx context.Context, p InsertParams) (InsertResult, error) {
 	p1 := r.db.Placeholder(1)
 	p2 := r.db.Placeholder(2)
 	p3 := r.db.Placeholder(3)
 	p4 := r.db.Placeholder(4)
 	p5 := r.db.Placeholder(5)
+	p6 := r.db.Placeholder(6)
 
 	// ON CONFLICT … WHERE filters out same-CID re-inserts so that
-	// RowsAffected == 0 when content is unchanged.
-	sqlStr := fmt.Sprintf(`INSERT INTO record (uri, cid, did, collection, json)
-		VALUES (%s, %s, %s, %s, %s::jsonb)
+	// RowsAffected == 0 when content is unchanged. sort_at uses
+	// COALESCE(EXCLUDED.sort_at, record.sort_at) so a subsequent insert
+	// that doesn't supply a sort_at doesn't wipe an existing one.
+	sqlStr := fmt.Sprintf(`INSERT INTO record (uri, cid, did, collection, json, sort_at)
+		VALUES (%s, %s, %s, %s, %s::jsonb, %s)
 		ON CONFLICT(uri) DO UPDATE SET
 			cid = EXCLUDED.cid,
 			json = EXCLUDED.json,
-			indexed_at = NOW()
-		WHERE record.cid IS DISTINCT FROM EXCLUDED.cid`, p1, p2, p3, p4, p5)
+			indexed_at = NOW(),
+			sort_at = COALESCE(EXCLUDED.sort_at, record.sort_at)
+		WHERE record.cid IS DISTINCT FROM EXCLUDED.cid`, p1, p2, p3, p4, p5, p6)
+
+	var sortAtVal database.Value
+	if p.SortAt != nil {
+		sortAtVal = database.Timestamptz(*p.SortAt)
+	} else {
+		sortAtVal = database.Null()
+	}
 
 	res, err := r.db.Exec(ctx, sqlStr, []database.Value{
-		database.Text(uri),
-		database.Text(cid),
-		database.Text(did),
-		database.Text(collection),
-		database.Text(jsonData),
+		database.Text(p.URI),
+		database.Text(p.CID),
+		database.Text(p.DID),
+		database.Text(p.Collection),
+		database.Text(p.JSONData),
+		sortAtVal,
 	})
 	if err != nil {
 		return Skipped, err

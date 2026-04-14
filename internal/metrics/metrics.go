@@ -143,6 +143,9 @@ func init() {
 		recordsAuthorsFilterTooLargeTotal,
 		recordsSearchAppliedTotal,
 		recordValidationFailedTotal,
+		oauthRefreshJKTMismatchTotal,
+		oauthRefreshLegacyNullJKTTotal,
+		oauthRefreshLegacyExpiredTotal,
 	)
 }
 
@@ -232,6 +235,49 @@ var recordValidationFailedTotal = prometheus.NewCounterVec(
 // RecordValidationFailed increments the validation failure counter.
 func RecordValidationFailed(collection string) {
 	recordValidationFailedTotal.WithLabelValues(collection).Inc()
+}
+
+// --- OAuth refresh token DPoP binding metrics (issue #24) ---
+
+var (
+	oauthRefreshJKTMismatchTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "hypergoat_oauth_refresh_jkt_mismatch_total",
+			Help: "Refresh requests rejected because the DPoP proof JKT does not match the refresh token's bound JKT.",
+		},
+	)
+	oauthRefreshLegacyNullJKTTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "hypergoat_oauth_refresh_legacy_null_jkt_total",
+			Help: "Refresh requests served for a legacy (unbound) refresh token inside the sunset window.",
+		},
+	)
+	oauthRefreshLegacyExpiredTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "hypergoat_oauth_refresh_legacy_expired_total",
+			Help: "Refresh requests rejected for a legacy (unbound) refresh token past the sunset cutoff.",
+		},
+	)
+)
+
+// OAuthRefreshJKTMismatch increments when a refresh attempt presents a DPoP
+// proof whose JKT does not match the refresh token's bound JKT (or when the
+// proof is missing entirely on a bound token).
+func OAuthRefreshJKTMismatch() {
+	oauthRefreshJKTMismatchTotal.Inc()
+}
+
+// OAuthRefreshLegacyNullJKT increments when a legacy (unbound) refresh token
+// is accepted under the sunset window. Watch this go to zero before removing
+// the legacy path.
+func OAuthRefreshLegacyNullJKT() {
+	oauthRefreshLegacyNullJKTTotal.Inc()
+}
+
+// OAuthRefreshLegacyExpired increments when a legacy (unbound) refresh token
+// is rejected because it was issued after the LegacyDPoPJKTCutoff.
+func OAuthRefreshLegacyExpired() {
+	oauthRefreshLegacyExpiredTotal.Inc()
 }
 
 // httpStatusString converts an int status code into a stable

@@ -1,0 +1,11 @@
+-- Deploy 1 of the 2-step rollout for issue #26 (Bluesky-style sortAt
+-- ordering). Adds a nullable sort_at column so existing rows can remain
+-- untouched; the processor writes a value on every new insert. The
+-- accompanying CONCURRENTLY-built keyset index is a separate migration
+-- (018) because CREATE INDEX CONCURRENTLY cannot run in the same
+-- statement batch as ALTER TABLE — pgx wraps multi-statement ExecContext
+-- in an implicit transaction.
+--
+-- Deploy 2 (later) will backfill existing rows and flip sort_at to NOT
+-- NULL once the NULL tail is small enough.
+ALTER TABLE record ADD COLUMN IF NOT EXISTS sort_at TIMESTAMP WITH TIME ZONE;

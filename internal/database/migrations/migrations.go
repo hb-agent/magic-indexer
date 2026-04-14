@@ -180,6 +180,13 @@ func Rollback(ctx context.Context, exec database.Executor) error {
 
 	slog.Info("Rolling back migration", "version", version, "name", migration.Name)
 
+	// Non-transactional downs (e.g. DROP INDEX CONCURRENTLY) must run
+	// outside a transaction — the sentinel on the down file opts into
+	// that path, mirroring the up-migration behavior.
+	if isNonTransactional(migration.DownSQL) {
+		return rollbackMigrationNoTx(ctx, exec, *migration)
+	}
+
 	// Roll back DownSQL and the schema_migrations delete in a
 	// single transaction so a crash in the middle cannot leave the
 	// two out of sync (matching the Run/applyMigrationTx path).
@@ -212,6 +219,30 @@ func Rollback(ctx context.Context, exec database.Executor) error {
 	committed = true
 
 	slog.Info("Migration rolled back successfully", "version", version)
+	return nil
+}
+
+// rollbackMigrationNoTx rolls back a migration whose DownSQL opts out of
+// transactions (e.g. DROP INDEX CONCURRENTLY). Mirrors applyMigrationNoTx
+// — the DDL runs first, then the schema_migrations row is removed. If the
+// delete fails after the DDL succeeded the operator must clean up
+// manually; the inconsistency is logged and returned as an error.
+func rollbackMigrationNoTx(ctx context.Context, exec database.Executor, m Migration) error {
+	slog.Warn("Rolling back migration outside transaction (non-transactional)", "version", m.Version)
+
+	if _, err := exec.DB().ExecContext(ctx, m.DownSQL); err != nil {
+		return fmt.Errorf("failed to rollback non-transactional migration %s: %w", m.Version, err)
+	}
+
+	deleteSQL := fmt.Sprintf(
+		"DELETE FROM schema_migrations WHERE version = %s",
+		exec.Placeholder(1),
+	)
+	if _, err := exec.DB().ExecContext(ctx, deleteSQL, m.Version); err != nil {
+		return fmt.Errorf("migration %s rollback DDL succeeded but failed to remove schema_migrations row (manual fix needed): %w", m.Version, err)
+	}
+
+	slog.Info("Migration rolled back successfully", "version", m.Version)
 	return nil
 }
 

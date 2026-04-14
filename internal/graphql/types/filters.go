@@ -63,16 +63,18 @@ var BooleanFilterInput = graphql.NewInputObject(graphql.InputObjectConfig{
 })
 
 // DateTimeFilterInput provides datetime comparison operators.
+// Uses DateTimeScalar for ISO-8601 validation at the GraphQL layer; malformed
+// datetimes are rejected at query parse instead of at SQL cast.
 var DateTimeFilterInput = graphql.NewInputObject(graphql.InputObjectConfig{
 	Name:        "DateTimeFilterInput",
 	Description: "Filter conditions for datetime fields",
 	Fields: graphql.InputObjectConfigFieldMap{
-		"eq":     {Type: graphql.String, Description: "Equal to (ISO-8601)"},
-		"neq":    {Type: graphql.String, Description: "Not equal to"},
-		"gt":     {Type: graphql.String, Description: "After (ISO-8601)"},
-		"lt":     {Type: graphql.String, Description: "Before (ISO-8601)"},
-		"gte":    {Type: graphql.String, Description: "At or after (ISO-8601)"},
-		"lte":    {Type: graphql.String, Description: "At or before (ISO-8601)"},
+		"eq":     {Type: DateTimeScalar, Description: "Equal to (ISO-8601)"},
+		"neq":    {Type: DateTimeScalar, Description: "Not equal to"},
+		"gt":     {Type: DateTimeScalar, Description: "After (ISO-8601)"},
+		"lt":     {Type: DateTimeScalar, Description: "Before (ISO-8601)"},
+		"gte":    {Type: DateTimeScalar, Description: "At or after (ISO-8601)"},
+		"lte":    {Type: DateTimeScalar, Description: "At or before (ISO-8601)"},
 		"isNull": {Type: graphql.Boolean, Description: "Is null / is not null"},
 	},
 })
