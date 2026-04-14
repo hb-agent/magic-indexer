@@ -864,7 +864,16 @@ type CollectionOverview struct {
 
 // GetCollectionOverview returns record counts per collection with invalid counts from activity.
 func (r *RecordsRepository) GetCollectionOverview(ctx context.Context) ([]CollectionOverview, error) {
-	sqlStr := `SELECT r.collection, COUNT(*) as record_count, COALESCE(inv.invalid_count, 0) as invalid_count FROM record r LEFT JOIN (SELECT collection, COUNT(*) as invalid_count FROM jetstream_activity WHERE is_valid = false GROUP BY collection) inv ON inv.collection = r.collection GROUP BY r.collection ORDER BY record_count DESC`
+	// Aggregate both sides to collection first, then join. Joining the raw
+	// record table to a pre-aggregated inv subquery and GROUP BY'ing only
+	// `r.collection` fails on strict Postgres with "inv.invalid_count must
+	// appear in GROUP BY or aggregate" — non-primary-key grouping keys
+	// don't satisfy the functional-dependency rule.
+	sqlStr := `SELECT rec.collection, rec.record_count, COALESCE(inv.invalid_count, 0) AS invalid_count
+		FROM (SELECT collection, COUNT(*) AS record_count FROM record GROUP BY collection) rec
+		LEFT JOIN (SELECT collection, COUNT(*) AS invalid_count FROM jetstream_activity WHERE is_valid = false GROUP BY collection) inv
+			ON inv.collection = rec.collection
+		ORDER BY rec.record_count DESC`
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr)
 	if err != nil {
