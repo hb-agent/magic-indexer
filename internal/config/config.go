@@ -208,7 +208,27 @@ func (c *Config) Validate() error {
 		)
 	}
 
+	// DOMAIN_DID gates the /notifications/graphql service-auth endpoint
+	// (issue #57). Unset is allowed — the endpoint simply stays
+	// unmounted — but a malformed value is fatal: it's the `aud` every
+	// token is checked against, so typoing it silently would 404 every
+	// honest caller.
+	if c.DomainDID != "" && !looksLikeDID(c.DomainDID) {
+		return fmt.Errorf(
+			"DOMAIN_DID = %q is not a valid DID (must start with did:plc: or did:web:)",
+			c.DomainDID,
+		)
+	}
+
 	return nil
+}
+
+// looksLikeDID is a cheap syntactic check we can run at config load. A
+// stricter check lives in oauth.IsValidDID but that's in a downstream
+// package and importing it here would create a cycle. Adequate for the
+// "typo the env var" case.
+func looksLikeDID(s string) bool {
+	return strings.HasPrefix(s, "did:plc:") || strings.HasPrefix(s, "did:web:")
 }
 
 // labelerDIDsCount returns the number of non-empty entries in a
