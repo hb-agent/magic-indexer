@@ -562,6 +562,65 @@ Nested JSON paths are supported at the SQL layer via the `__` separator (e.g., `
 
 ---
 
+## Notifications
+
+Enable per-service via Railway env var:
+```
+NOTIFICATIONS_ENABLED=true
+```
+
+When enabled:
+- A `RecordHook` is attached to `RecordProcessor.RecordHooks` with `HookLogContinue` policy. A failing extractor cannot stall firehose ingestion.
+- Three GraphQL fields are merged into `/admin/graphql`: `notifications`, `unreadNotificationCount`, `updateNotificationsSeen`.
+- Migration 015 creates `notification`, `notification_participant`, `actor_state`.
+
+### Reason catalog (v1)
+
+| Reason | Collection | Recipient | Aggregation |
+|---|---|---|---|
+| `endorsement` | `app.certified.temp.graph.endorsement` | `subject.did` | Yes — collapse by `endorsement:<subject.uri>` |
+| `activity-contributor` | `org.hypercerts.claim.activity` | each `contributors[].contributorIdentity` if it's a DID string | No — each activity is a distinct notification per contributor |
+
+### Caps and limits
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `MaxFanOutPerRecord` | 100 | Maximum notifications from a single record |
+| `UnreadCountCap` | 50 | Unread badge shows "50+" above this |
+| `SortAtMaxPast` | 7 days | `sort_at` clamped if record's `createdAt` is older |
+| `MaxRecordBytesForNotifications` | 1 MiB | Records above this size are not processed for notifications |
+| `MaxReasonSubjectBytes` | 512 | Cap on `reason_subject` value |
+| `MaxContributorsBeforeReject` | 200 | Shallow JSON scan rejects before full unmarshal |
+
+### Rollout
+
+1. Merge the feature and deploy. Flag defaults to false — nothing happens.
+2. Flip `NOTIFICATIONS_ENABLED=true` in the **staging** Railway service.
+3. Monitor for 1 hour:
+   - `hypergoat_notifications_hook_errors_total` rate stays low
+   - `hypergoat_notifications_hook_panics_total` stays zero
+   - Manual spot-check: create a test endorsement, verify a notification row appears via admin GraphQL
+4. After 24-hour staging soak, flip the flag in the **prod** Railway service.
+5. Run `ANALYZE notification` after first significant insert volume to populate planner stats for the partial unique index.
+
+### Retention
+
+Notifications older than 90 days are deleted hourly by a background worker. The worker uses a Postgres advisory lock (`pg_try_advisory_lock(7392745193)`) so only one indexer pod runs the cleanup at a time.
+
+### Known limitations
+
+- No per-notification mark-as-read (watermark only).
+- No push / email / preferences / activity subscriptions.
+- No historical backfill — the launch-day feed is empty until new records are indexed.
+- `contributorIdentity` as a strongRef (not a plain DID) is not handled; only string DIDs produce notifications.
+- Hook runs in a separate connection from record insert — a record can be indexed without its notification landing if the hook fails. Idempotent replay (unique `(record_uri, recipient_did)` on participant) makes this self-healing on re-ingestion.
+
+### Client integration
+
+See `hypercerts-org/certs-social#66` for the `/notifications` UI implementation plan.
+
+---
+
 ## Endorsement lexicon
 
 The `app.certified.temp.graph.endorsement` lexicon has been uploaded
@@ -592,6 +651,19 @@ Issues with deliberate deferral reasoning attached:
 - **[#42 — Multi-relay Tap](https://github.com/hb-agent/magic-indexer/issues/42)**.
   Defer until ATProto has multiple production relays; run multiple
   magic-indexer instances sharing one Postgres as the workaround.
+
+### Notifications follow-ups
+
+- Per-notification mark-as-read (`dismissed_at` column)
+- Push notifications (mobile + web)
+- Email digests
+- Per-user preferences / muting
+- Activity subscriptions ("notify me when X posts")
+- Same-transaction hook (requires repo tx refactor)
+- Count-drift reconciler
+- Top-N authors (`latest_authors text[]`) for "Alice, Bob, and 3 others" rendering
+- Public-endpoint migration when OAuth auth lands on `/graphql`
+- `contributorIdentity` strongRef resolution
 
 Everything else from the review process either landed in the codebase
 or is recorded as a closed issue with a fix commit reference.
