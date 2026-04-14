@@ -99,6 +99,17 @@ type RefreshToken struct {
 	CreatedAt        int64
 	ExpiresAt        *int64
 	Revoked          bool
+
+	// DPoPJKT is the SHA-256 thumbprint of the DPoP key this refresh token is
+	// bound to. Empty string means "legacy token, unbound." New tokens created
+	// after the binding feature shipped always have this populated. Checked on
+	// refresh against the incoming proof's JKT via constant-time compare.
+	DPoPJKT string
+
+	// OriginalIssuedAt is the creation time of the first token in this rotation
+	// chain. Rotated tokens carry this forward unchanged so the legacy-token
+	// sunset cutoff keeps working across rotations (where CreatedAt advances).
+	OriginalIssuedAt int64
 }
 
 // IsExpired returns true if the token has expired (if it has an expiry).

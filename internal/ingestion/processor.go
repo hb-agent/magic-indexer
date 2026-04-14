@@ -171,8 +171,20 @@ func (p *RecordProcessor) ProcessRecord(ctx context.Context, op ProcessOp) error
 			slog.Warn("Failed to ensure actor", "did", op.DID, "error", err)
 		}
 
+		// Compute sort_at (issue #26) from the record's self-reported
+		// createdAt, clamped against clock skew. A nil/zero result from
+		// ExtractCreatedAt falls back to processedAt inside ComputeSortAt.
+		sortAt := ComputeSortAt(ExtractCreatedAt(op.Record), processedAt)
+
 		// Store record.
-		result, err := p.Records.Insert(ctx, op.URI, op.CID, op.DID, op.Collection, string(op.Record))
+		result, err := p.Records.InsertWithParams(ctx, repositories.InsertParams{
+			URI:        op.URI,
+			CID:        op.CID,
+			DID:        op.DID,
+			Collection: op.Collection,
+			JSONData:   string(op.Record),
+			SortAt:     &sortAt,
+		})
 		if err != nil {
 			errMsg := err.Error()
 			updateStatus("error", &errMsg, isValidPtr)

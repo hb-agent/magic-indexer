@@ -4,7 +4,9 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/GainForest/hypergoat/internal/database"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
+	"github.com/GainForest/hypergoat/internal/metrics"
 	"github.com/GainForest/hypergoat/internal/oauth"
 )
 
@@ -36,6 +39,12 @@ type OAuthHandlerConfig struct {
 	RefreshTokenExpiration int64
 	// AuthorizationCodeExpiration is the auth code lifetime in seconds.
 	AuthorizationCodeExpiration int64
+	// LegacyDPoPJKTCutoff is the Unix timestamp past which refresh tokens
+	// without a DPoPJKT binding are rejected on refresh. Tokens issued before
+	// this cutoff are accepted (sunset window for legacy tokens from before
+	// the binding feature shipped — issue #24). Must be set explicitly; the
+	// server refuses to start without it.
+	LegacyDPoPJKTCutoff int64
 }
 
 // OAuthHandlers provides HTTP handlers for OAuth endpoints.
@@ -712,6 +721,12 @@ func (h *OAuthHandlers) handleAuthorizationCodeGrant(w http.ResponseWriter, r *h
 		CreatedAt:        now,
 		ExpiresAt:        refreshExpiresAt,
 		Revoked:          false,
+		OriginalIssuedAt: now,
+	}
+	// Bind the refresh token to the DPoP key from the auth code exchange, so
+	// that refresh attempts from a different key are rejected (issue #24).
+	if dpopJKT != nil {
+		refreshToken.DPoPJKT = *dpopJKT
 	}
 	if err := h.refreshTokens.Insert(ctx, refreshToken); err != nil {
 		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store refresh token")
@@ -798,6 +813,13 @@ func (h *OAuthHandlers) handleRefreshTokenGrant(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// DPoP key-binding check (issue #24). Prevents an attacker with a stolen
+	// refresh token from rebinding it to their own key on refresh.
+	if err := h.checkRefreshTokenDPoPBinding(oldRefreshToken, dpopJKT); err != nil {
+		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
+		return
+	}
+
 	// Rotate order: generate + store the new tokens FIRST, and
 	// only revoke the old refresh token after both new tokens
 	// are safely in the database. If we revoked first and then
@@ -864,6 +886,12 @@ func (h *OAuthHandlers) handleRefreshTokenGrant(w http.ResponseWriter, r *http.R
 		CreatedAt:        now,
 		ExpiresAt:        refreshExpiresAt,
 		Revoked:          false,
+		// Carry forward the original-issued timestamp so the legacy cutoff
+		// still applies across rotations (issue #24).
+		OriginalIssuedAt: oldRefreshToken.OriginalIssuedAt,
+		// Carry forward the DPoP binding. Legacy tokens stay legacy (empty JKT)
+		// unless explicitly upgraded — out of scope for v1.
+		DPoPJKT: oldRefreshToken.DPoPJKT,
 	}
 	if err := h.refreshTokens.Insert(ctx, newRefreshToken); err != nil {
 		h.writeOAuthError(w, http.StatusInternalServerError, "server_error", "Failed to store refresh token")
@@ -998,6 +1026,46 @@ func (h *OAuthHandlers) validateDPoP(ctx context.Context, r *http.Request, clien
 }
 
 // isValidRedirectURI checks if the redirect URI is valid for the client.
+// checkRefreshTokenDPoPBinding enforces the DPoP key-binding invariant on
+// refresh (issue #24). Behavior:
+//
+//   - If the stored refresh token has a DPoPJKT, the incoming proof must carry
+//     the same JKT (constant-time compare).
+//   - If the stored refresh token has an empty DPoPJKT (legacy token predating
+//     the binding feature), it's accepted only if OriginalIssuedAt is before
+//     the LegacyDPoPJKTCutoff configured at startup. Tokens issued after the
+//     cutoff without a JKT are rejected — this is the sunset window.
+//
+// The cutoff is required config; if unset, the server fails to start.
+func (h *OAuthHandlers) checkRefreshTokenDPoPBinding(token *oauth.RefreshToken, incomingJKT *string) error {
+	stored := token.DPoPJKT
+	var incoming string
+	if incomingJKT != nil {
+		incoming = *incomingJKT
+	}
+
+	if stored != "" {
+		// Bound token: require matching incoming JKT.
+		if incoming == "" {
+			metrics.OAuthRefreshJKTMismatch()
+			return errors.New("DPoP key binding required but proof missing or invalid")
+		}
+		if subtle.ConstantTimeCompare([]byte(stored), []byte(incoming)) != 1 {
+			metrics.OAuthRefreshJKTMismatch()
+			return errors.New("DPoP key binding mismatch")
+		}
+		return nil
+	}
+
+	// Unbound (legacy) token: check sunset window.
+	if token.OriginalIssuedAt < h.config.LegacyDPoPJKTCutoff {
+		metrics.OAuthRefreshLegacyNullJKT()
+		return nil
+	}
+	metrics.OAuthRefreshLegacyExpired()
+	return errors.New("legacy unbound refresh token past sunset cutoff")
+}
+
 // Always uses exact matching to prevent open-redirect attacks via path
 // extension (e.g. registered "https://a.com/cb" matching "https://a.com/cb.evil.com").
 func (h *OAuthHandlers) isValidRedirectURI(uri string, registeredURIs []string, _ bool) bool {

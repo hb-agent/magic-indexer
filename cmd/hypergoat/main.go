@@ -12,6 +12,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -34,6 +35,7 @@ import (
 	hgraphql "github.com/GainForest/hypergoat/internal/graphql"
 	"github.com/GainForest/hypergoat/internal/graphql/admin"
 	"github.com/GainForest/hypergoat/internal/graphql/resolver"
+	"github.com/GainForest/hypergoat/internal/graphql/schema"
 	"github.com/GainForest/hypergoat/internal/graphql/subscription"
 	"github.com/GainForest/hypergoat/internal/ingestion"
 	"github.com/GainForest/hypergoat/internal/jetstream"
@@ -50,6 +52,14 @@ import (
 
 func main() {
 	if err := run(); err != nil {
+		if errors.Is(err, errRestartRequested) {
+			// Exit non-zero so the supervising orchestrator restarts
+			// us. 42 is a distinctive code for "restart requested,
+			// not a crash" — useful to distinguish in logs and in
+			// any future retry/backoff policy.
+			slog.Info("Exiting for orchestrator restart", "code", 42)
+			os.Exit(42)
+		}
 		slog.Error("Server failed", "error", err)
 		os.Exit(1)
 	}
@@ -89,6 +99,13 @@ type backgroundServices struct {
 	labelerCancel    context.CancelFunc
 
 	backfillCancel context.CancelFunc
+
+	// restartCh signals serve() to gracefully shut down and have main
+	// exit with a non-zero code so the orchestrator restarts the
+	// process. Used for issue #22 — a successful lexicon upload needs
+	// a fresh boot to rebuild the GraphQL schema. Nil until
+	// configureLexiconUploadHooks wires it.
+	restartCh chan string
 }
 
 // Stop cleanly shuts down all background services.
@@ -182,11 +199,18 @@ func run() error {
 
 	// Load lexicons and set up public GraphQL + subscriptions
 	pubsub := subscription.NewPubSub()
-	collections, validator := setupGraphQL(r, cfg, svc, pubsub)
+	collections, validator, registry := setupGraphQL(r, cfg, svc, pubsub)
 
 	// Configure backfill callbacks now that the validator exists.
 	if adminHandler != nil {
 		configureBackfillCallbacks(adminHandler, cfg, svc, validator)
+		// Wire up issue #22: pre-commit schema validation + process
+		// restart on successful lexicon upload. The validator builds
+		// a disposable registry from the current lexicons plus the
+		// proposed ones and asks the schema builder to compile it; the
+		// restart callback signals serve() to gracefully shut down so
+		// the new schema is picked up on the next boot.
+		configureLexiconUploadHooks(adminHandler, registry, bg)
 	}
 
 	// Start background workers (activity cleanup)
@@ -598,6 +622,7 @@ func setupOAuth(r *chi.Mux, cfg *config.Config, svc *services, bg *backgroundSer
 		AccessTokenExpiration:       3600,    // 1 hour
 		RefreshTokenExpiration:      1209600, // 14 days
 		AuthorizationCodeExpiration: 600,     // 10 minutes
+		LegacyDPoPJKTCutoff:         cfg.OAuthLegacyDPoPJKTCutoff,
 	}, svc.db)
 
 	// Discovery endpoints
@@ -800,10 +825,68 @@ func configureBackfillCallbacks(adminHandler *admin.Handler, cfg *config.Config,
 	slog.Info("Backfill callbacks configured for admin UI")
 }
 
+// configureLexiconUploadHooks wires the two issue #22 callbacks onto the
+// admin resolver:
+//
+//   - SchemaValidate runs before any DB write. It builds a disposable
+//     registry from the current live registry plus the proposed uploads,
+//     then asks schema.Builder to compile it. If compilation fails the
+//     upload is rejected wholesale and the server stays on its current
+//     schema. Crucially we copy the lexicon pointers out of the live
+//     registry into a fresh one so this check never mutates shared state.
+//   - ProcessRestart signals serve() via bg.restartCh. serve() performs a
+//     graceful HTTP shutdown and returns a sentinel error that main
+//     converts into a non-zero exit code, triggering the orchestrator
+//     (Railway, Docker, …) to restart us with the new lexicons in DB.
+func configureLexiconUploadHooks(adminHandler *admin.Handler, registry *lexicon.Registry, bg *backgroundServices) {
+	if adminHandler == nil {
+		return
+	}
+	bg.restartCh = make(chan string, 1)
+
+	adminHandler.Resolver().SetSchemaValidateCallback(func(proposed map[string]string) error {
+		// Snapshot current lexicons and overlay the proposed ones (by ID)
+		// into a fresh registry so the live one stays untouched.
+		current := registry.GetAllLexicons()
+		tentative := lexicon.NewRegistry()
+		for _, lex := range current {
+			if _, ok := proposed[lex.ID]; ok {
+				// skip — the upload replaces this one
+				continue
+			}
+			tentative.Register(lex)
+		}
+		for id, body := range proposed {
+			if _, err := tentative.ParseAndRegister(body); err != nil {
+				return fmt.Errorf("lexicon %s: %w", id, err)
+			}
+		}
+		if _, err := schema.NewBuilder(tentative).Build(); err != nil {
+			return fmt.Errorf("schema build: %w", err)
+		}
+		return nil
+	})
+
+	adminHandler.Resolver().SetProcessRestartCallback(func(reason string) {
+		// Non-blocking: only the first restart request in a window wins.
+		// Subsequent uploads before restart completes are no-ops on the
+		// signal path — they still persist to DB and will be picked up
+		// on boot.
+		select {
+		case bg.restartCh <- reason:
+			slog.Warn("Process restart queued", "reason", reason)
+		default:
+			slog.Info("Process restart already pending; ignoring duplicate signal", "reason", reason)
+		}
+	})
+
+	slog.Info("Lexicon upload hooks configured (schema validation + process restart)")
+}
+
 // setupGraphQL loads lexicons from disk and database, creates the public GraphQL
 // handler with WebSocket subscriptions, and returns the resolved collection list
 // for Jetstream configuration.
-func setupGraphQL(r *chi.Mux, cfg *config.Config, svc *services, pubsub *subscription.PubSub) ([]string, *lexicon.Validator) {
+func setupGraphQL(r *chi.Mux, cfg *config.Config, svc *services, pubsub *subscription.PubSub) ([]string, *lexicon.Validator, *lexicon.Registry) {
 	// Load lexicons from filesystem
 	registry := lexicon.NewRegistry()
 	lexiconDir := cfg.LexiconDir
@@ -880,7 +963,7 @@ func setupGraphQL(r *chi.Mux, cfg *config.Config, svc *services, pubsub *subscri
 		}
 	}
 
-	return collections, lexicon.NewValidator(registry)
+	return collections, lexicon.NewValidator(registry), registry
 }
 
 // startWorkers launches background worker goroutines (activity cleanup).
@@ -1208,17 +1291,32 @@ func serve(r *chi.Mux, cfg *config.Config, bg *backgroundServices) error {
 		close(serverErr)
 	}()
 
-	// Wait for interrupt signal or server error
+	// Wait for interrupt signal, restart request (issue #22), or server
+	// error.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
+	// If the admin wiring did not set up a restart channel (e.g. admin
+	// disabled), use a nil channel so the select arm is dead — reading
+	// from a nil channel blocks forever, which is the intent.
+	var restartCh <-chan string
+	if bg.restartCh != nil {
+		restartCh = bg.restartCh
+	}
+
+	var restartReason string
 	select {
 	case err := <-serverErr:
 		return err
 	case <-quit:
+	case reason := <-restartCh:
+		restartReason = reason
+		slog.Warn("Shutting down server to restart", "reason", reason)
 	}
 
-	slog.Info("Shutting down server...")
+	if restartReason == "" {
+		slog.Info("Shutting down server...")
+	}
 
 	// Drain in-flight HTTP requests first so the server stops
 	// accepting new work. Background services are still up at this
@@ -1234,9 +1332,20 @@ func serve(r *chi.Mux, cfg *config.Config, bg *backgroundServices) error {
 		return httpErr
 	}
 
+	if restartReason != "" {
+		slog.Info("Server stopped gracefully; exiting for restart", "reason", restartReason)
+		return errRestartRequested
+	}
+
 	slog.Info("Server stopped gracefully")
 	return nil
 }
+
+// errRestartRequested is returned by serve when shutdown was triggered by an
+// admin action (currently: lexicon upload, issue #22). main converts this
+// into a non-zero exit code so the orchestrator restarts the process — a
+// fresh boot reloads lexicons from the DB and rebuilds the GraphQL schema.
+var errRestartRequested = errors.New("restart requested")
 
 // parseDIDs splits a comma-separated list of DIDs and trims whitespace.
 func parseDIDs(commaSeparated string) []string {

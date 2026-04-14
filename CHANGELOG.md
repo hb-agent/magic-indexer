@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-04-13 — Issues #22, #24, #26, #33, #53 bundled PR
+
+Single PR closing five open indexer issues. Three rounds of 5-reviewer plan review and two rounds of 3-reviewer implementation review informed the design.
+
+### #24 — OAuth refresh token DPoP key binding (`internal/oauth`, `internal/server`, `internal/database`)
+- `oauth.RefreshToken` gains `DPoPJKT` (SHA-256 JWK thumbprint) and `OriginalIssuedAt` (rotation-stable issuance time). New refresh tokens are bound to the DPoP key used at issuance; refresh requests must present a matching JKT (constant-time compare).
+- Legacy (pre-binding) tokens are accepted only if `OriginalIssuedAt` predates the `OAUTH_LEGACY_DPOP_JKT_CUTOFF` env var — this is the sunset window. Tokens issued after the cutoff without a JKT are rejected.
+- `OAUTH_LEGACY_DPOP_JKT_CUTOFF` is **required**; startup fails closed if unset or non-positive.
+- Migration 016 adds `dpop_jkt` and `original_issued_at` columns with a backfill (legacy rows inherit `created_at`).
+- Metrics: `hypergoat_oauth_refresh_jkt_mismatch_total`, `hypergoat_oauth_refresh_legacy_null_jkt_total`, `hypergoat_oauth_refresh_legacy_expired_total`. Watch the legacy counter fall to zero before shortening the window.
+
+### #22 — Schema restart on lexicon upload (`internal/graphql/admin`, `cmd/hypergoat`)
+- `UploadLexicons` now stages every entry, runs a pre-commit schema build over a cloned registry (`SchemaValidateCallback`), and only writes to the DB if the resulting GraphQL schema compiles. Malformed uploads are rejected wholesale.
+- On successful upload, `ProcessRestartCallback` signals `serve()` to gracefully shut down; `main` exits with code 42 so the orchestrator (Railway) restarts the process. The new schema is picked up on boot.
+- Replaced an earlier hot-swap design with this exit-on-success flow after review — the hot-swap required atomic pointer juggling and introspection invalidation, while Railway already handles restarts cheaply.
+
+### #26 — Bluesky-style `sortAt` feed ordering (Deploy 1 of 2) (`internal/ingestion`, `internal/database`)
+- Migration 017 adds a nullable `sort_at timestamptz` column and a `CONCURRENTLY`-built `(collection, sort_at DESC NULLS LAST, uri DESC)` keyset index.
+- `ingestion.ComputeSortAt(createdAt, now)` returns `min(createdAt, now + 5m)`, falling back to `now` when `createdAt` is absent or unparseable. Matches Bluesky's clock-skew clamp so a misconfigured client can't pin itself to the top of the feed.
+- `RecordsRepository.InsertWithParams` takes an `InsertParams` struct (forward-compatible) with an optional `SortAt *time.Time`. `RecordProcessor` extracts `createdAt` from the record JSON envelope and writes the clamped value on every create/update.
+- Deploy 2 (follow-up) will backfill existing rows, flip the column to NOT NULL, and expose a `sortAt` GraphQL field plus `ORDER BY COALESCE(sort_at, indexed_at)` queries.
+
+### #33 — ActivityChart dark-mode colors (`client/`)
+- Six `--chart-creates|updates|deletes-{stroke,fill}` CSS variables in `globals.css`, overridden under `[data-theme="dark"]`. `ActivityChart.tsx` reads them via `var(--…)` — the theme swap no longer triggers React re-renders.
+
+### #53 — Filter tests + `DateTimeScalar` in datetime filters (`internal/graphql/types`)
+- `DateTimeFilterInput.{eq,neq,gt,lt,gte,lte}` now use `DateTimeScalar` instead of `graphql.String`, so clients get ISO-8601 validation at the GraphQL boundary.
+- New `filters_test.go` covers field presence, scalar wiring, and lexicon-type dispatch.
+
+### Config
+- `OAUTH_LEGACY_DPOP_JKT_CUTOFF` (new, required) — Unix timestamp of the DPoP-binding deploy. Set to roughly the time of this release.
+
 ## 2026-04-14 — Notifications subsystem (v1)
 
 Bluesky-pattern notification system for certs.social, built after 3 rounds of

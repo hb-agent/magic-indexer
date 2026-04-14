@@ -255,40 +255,62 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "valid config",
 			config: Config{
-				SecretKeyBase: "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
-				Port:          8080,
+				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                     8080,
+				OAuthLegacyDPoPJKTCutoff: 1744416000,
 			},
 			wantErr: false,
 		},
 		{
 			name: "secret key too short",
 			config: Config{
-				SecretKeyBase: "short_key",
-				Port:          8080,
+				SecretKeyBase:            "short_key",
+				Port:                     8080,
+				OAuthLegacyDPoPJKTCutoff: 1744416000,
 			},
 			wantErr: true,
 		},
 		{
 			name: "port too low",
 			config: Config{
-				SecretKeyBase: "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
-				Port:          0,
+				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                     0,
+				OAuthLegacyDPoPJKTCutoff: 1744416000,
 			},
 			wantErr: true,
 		},
 		{
 			name: "port too high",
 			config: Config{
-				SecretKeyBase: "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
-				Port:          70000,
+				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                     70000,
+				OAuthLegacyDPoPJKTCutoff: 1744416000,
 			},
 			wantErr: true,
 		},
 		{
 			name: "dev placeholder secret rejected",
 			config: Config{
-				SecretKeyBase: devSecretKeyBase,
+				SecretKeyBase:            devSecretKeyBase,
+				Port:                     8080,
+				OAuthLegacyDPoPJKTCutoff: 1744416000,
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing OAUTH_LEGACY_DPOP_JKT_CUTOFF rejected (fail-closed)",
+			config: Config{
+				SecretKeyBase: "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
 				Port:          8080,
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative OAUTH_LEGACY_DPOP_JKT_CUTOFF rejected",
+			config: Config{
+				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                     8080,
+				OAuthLegacyDPoPJKTCutoff: -1,
 			},
 			wantErr: true,
 		},

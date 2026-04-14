@@ -107,14 +107,31 @@ type FullBackfillCallback func(ctx context.Context) error
 // LexiconChangeCallback is called when lexicons are added or removed.
 type LexiconChangeCallback func(collections []string) error
 
+// SchemaValidateCallback is called before a lexicon upload is committed to
+// check whether the proposed set of lexicons (current registry + new/updated
+// ones) would produce a valid GraphQL schema. A non-nil error aborts the
+// upload — nothing is written to the database. This is the pre-commit guard
+// for issue #22: catch schema-breaking uploads before they take down the
+// server on restart.
+type SchemaValidateCallback func(proposed map[string]string) error
+
+// ProcessRestartCallback is fired when an admin action (currently: successful
+// lexicon upload) requires the server to restart to pick up the new schema.
+// The implementation is expected to gracefully shut down and then exit the
+// process with a non-zero status so the supervising orchestrator (e.g.
+// Railway, Docker) can restart it. See issue #22.
+type ProcessRestartCallback func(reason string)
+
 // Resolver provides methods for resolving admin GraphQL queries and mutations.
 type Resolver struct {
-	repos                 *Repositories
-	backfillActive        atomic.Bool
-	domainDID             string // The DID of this labeler instance
-	backfillCallback      BackfillCallback
-	fullBackfillCallback  FullBackfillCallback
-	lexiconChangeCallback LexiconChangeCallback
+	repos                  *Repositories
+	backfillActive         atomic.Bool
+	domainDID              string // The DID of this labeler instance
+	backfillCallback       BackfillCallback
+	fullBackfillCallback   FullBackfillCallback
+	lexiconChangeCallback  LexiconChangeCallback
+	schemaValidateCallback SchemaValidateCallback
+	processRestartCallback ProcessRestartCallback
 }
 
 // NewResolver creates a new admin resolver.
@@ -138,6 +155,18 @@ func (r *Resolver) SetFullBackfillCallback(cb FullBackfillCallback) {
 // SetLexiconChangeCallback sets the callback for lexicon changes.
 func (r *Resolver) SetLexiconChangeCallback(cb LexiconChangeCallback) {
 	r.lexiconChangeCallback = cb
+}
+
+// SetSchemaValidateCallback sets the pre-commit schema-build check fired
+// before a lexicon upload is persisted. See SchemaValidateCallback (issue #22).
+func (r *Resolver) SetSchemaValidateCallback(cb SchemaValidateCallback) {
+	r.schemaValidateCallback = cb
+}
+
+// SetProcessRestartCallback sets the callback that asks the supervising
+// orchestrator to restart this process. See ProcessRestartCallback (issue #22).
+func (r *Resolver) SetProcessRestartCallback(cb ProcessRestartCallback) {
+	r.processRestartCallback = cb
 }
 
 // notifyLexiconChange calls the lexicon change callback with current collections.
@@ -322,58 +351,78 @@ func (r *Resolver) UploadLexicons(ctx context.Context, zipBase64 string) (int, e
 			len(zipReader.File), maxLexiconFileCount)
 	}
 
-	// Process each file
-	count := 0
+	// Stage 1: parse every entry into memory (id -> json). We can't upsert
+	// as we go any more — issue #22 requires validating that the resulting
+	// schema builds before any DB writes land.
+	proposed := make(map[string]string, len(zipReader.File))
 	for _, file := range zipReader.File {
-		// Skip directories and non-JSON files
 		if file.FileInfo().IsDir() || !strings.HasSuffix(file.Name, ".json") {
 			continue
 		}
-
-		// Check individual uncompressed file size
 		if file.UncompressedSize64 > maxLexiconFileSize {
-			return count, fmt.Errorf("file %s too large: %d bytes exceeds %d byte limit",
+			return 0, fmt.Errorf("file %s too large: %d bytes exceeds %d byte limit",
 				file.Name, file.UncompressedSize64, maxLexiconFileSize)
 		}
-
-		// Open and read file with size limit
 		rc, err := file.Open()
 		if err != nil {
 			continue
 		}
-
 		data, err := io.ReadAll(io.LimitReader(rc, maxLexiconFileSize+1))
 		_ = rc.Close()
 		if err != nil {
 			continue
 		}
 		if len(data) > maxLexiconFileSize {
-			return count, fmt.Errorf("file %s exceeds %d byte limit after decompression",
+			return 0, fmt.Errorf("file %s exceeds %d byte limit after decompression",
 				file.Name, maxLexiconFileSize)
 		}
 
-		// Parse JSON to extract lexicon ID
 		var lexEntry struct {
 			ID string `json:"id"`
 		}
 		if err := json.Unmarshal(data, &lexEntry); err != nil {
 			continue
 		}
-
 		if lexEntry.ID == "" {
 			continue
 		}
+		proposed[lexEntry.ID] = string(data)
+	}
 
-		// Upsert lexicon
-		if err := r.repos.Lexicons.Upsert(ctx, lexEntry.ID, string(data)); err != nil {
-			return count, fmt.Errorf("failed to save lexicon %s: %w", lexEntry.ID, err)
+	if len(proposed) == 0 {
+		return 0, nil
+	}
+
+	// Stage 2: pre-commit schema validation (issue #22). If the proposed set
+	// wouldn't produce a valid GraphQL schema, reject the whole upload so
+	// the server stays up on its current schema.
+	if r.schemaValidateCallback != nil {
+		if err := r.schemaValidateCallback(proposed); err != nil {
+			return 0, fmt.Errorf("lexicon upload rejected: schema validation failed: %w", err)
+		}
+	}
+
+	// Stage 3: commit. Validation already passed; upsert failures here are
+	// DB errors and leave the upload partially applied — caller sees how
+	// many were saved before the failure.
+	count := 0
+	for id, body := range proposed {
+		if err := r.repos.Lexicons.Upsert(ctx, id, body); err != nil {
+			return count, fmt.Errorf("failed to save lexicon %s: %w", id, err)
 		}
 		count++
 	}
 
-	// Notify Jetstream consumer of collection changes
+	// Notify Jetstream consumer of collection changes.
 	if count > 0 {
 		r.notifyLexiconChange(ctx)
+	}
+
+	// Restart so the new schema is picked up on boot (issue #22). Fired
+	// after notifyLexiconChange so any synchronous work it kicks off still
+	// runs, but the orchestrator takes over from here.
+	if count > 0 && r.processRestartCallback != nil {
+		r.processRestartCallback(fmt.Sprintf("lexicon upload applied %d lexicon(s); restarting to rebuild schema", count))
 	}
 
 	return count, nil

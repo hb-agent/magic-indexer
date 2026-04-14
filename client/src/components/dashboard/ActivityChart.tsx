@@ -27,9 +27,9 @@ export function ActivityChart({ data, timeRange, onTimeRangeChange, isLoading }:
                 <XAxis dataKey="timestamp" tickFormatter={(v) => format(new Date(v), timeRange === "SEVEN_DAYS" ? "MMM d" : "HH:mm")} fontSize={11} stroke="var(--fg-muted)" tickLine={false} axisLine={false} />
                 <YAxis fontSize={11} stroke="var(--fg-muted)" tickLine={false} axisLine={false} />
                 <Tooltip contentStyle={{ backgroundColor: "var(--bg-elevated)", border: "1px solid var(--border-default)", borderRadius: "2px", fontSize: "12px", boxShadow: "var(--shadow-md)", color: "var(--fg-secondary)" }} labelFormatter={(v) => format(new Date(v), "MMM d, yyyy HH:mm")} />
-                <Area type="monotone" dataKey="creates" stackId="1" stroke="#111111" fill="#111111" fillOpacity={0.15} name="Creates" />
-                <Area type="monotone" dataKey="updates" stackId="1" stroke="#7e7576" fill="#7e7576" fillOpacity={0.12} name="Updates" />
-                <Area type="monotone" dataKey="deletes" stackId="1" stroke="#ba1a1a" fill="#ba1a1a" fillOpacity={0.08} name="Deletes" />
+                <Area type="monotone" dataKey="creates" stackId="1" stroke="var(--chart-creates-stroke)" fill="var(--chart-creates-fill)" name="Creates" />
+                <Area type="monotone" dataKey="updates" stackId="1" stroke="var(--chart-updates-stroke)" fill="var(--chart-updates-fill)" name="Updates" />
+                <Area type="monotone" dataKey="deletes" stackId="1" stroke="var(--chart-deletes-stroke)" fill="var(--chart-deletes-fill)" name="Deletes" />
               </AreaChart>
             </ResponsiveContainer>
           </div>
