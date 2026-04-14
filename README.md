@@ -189,6 +189,33 @@ mutation {
 }
 ```
 
+## Notifications
+
+Enable with `NOTIFICATIONS_ENABLED=true`. When enabled, the indexer materializes a Bluesky-style notification feed per DID as records are indexed. Two types are supported in v1:
+
+- **`endorsement`** — `app.certified.temp.graph.endorsement` records generate a notification for the subject's DID (aggregated: repeated endorsements of the same subject collapse into one row with `count`).
+- **`activity-contributor`** — `org.hypercerts.claim.activity` records generate a notification for each contributor DID (non-aggregated).
+
+GraphQL is exposed on the admin endpoint:
+
+```graphql
+query {
+  notifications(did: "did:plc:...", first: 50) {
+    edges {
+      node { reason reasonSubject sortAt count latestAuthor isRead }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+  unreadNotificationCount(did: "did:plc:...") { count more }
+}
+
+mutation {
+  updateNotificationsSeen(did: "did:plc:...", seenAt: "2026-04-14T00:00:00Z")
+}
+```
+
+See [docs/RUNBOOK.md](docs/RUNBOOK.md#notifications) for the full reason catalog, fan-out caps, and rollout procedure.
+
 ## Endpoints
 
 | Endpoint | Description |

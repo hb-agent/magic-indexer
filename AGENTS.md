@@ -449,6 +449,8 @@ internal/
   labeler/              # ATProto labeler subscribeLabels + queryLabels client
   lexicon/              # Lexicon parsing, registry, NSID utilities
   metrics/              # Prometheus counters + /metrics HTTP handler
+  notifications/        # Bluesky-pattern notifications: per-collection extractors, aggregation, seen watermark
+  notifications/extractors/  # Per-collection notifier implementations (endorsement, activity-contributor)
   oauth/                # OAuth 2.0 + DPoP + PKCE + did:plc / did:web resolution
   server/               # HTTP handlers, security headers, CORS, GraphiQL UI
   tap/                  # Tap sidecar consumer (crypto-verified events, ack-based delivery) — alternative to Jetstream via TAP_ENABLED
@@ -547,6 +549,44 @@ correct signal for ack-based protocols). Panic-recovered, exponential retry
 (1s/2s/4s) per event, then skip. `Connection` / `Dialer` interfaces abstract
 gorilla/websocket for testability. Trust boundary: Tap verifies MST inclusion
 proofs but not signing key vs DID document (#41 deferred).
+
+### Notifications subsystem (`internal/notifications/`)
+Bluesky-pattern notification system. Enabled via `NOTIFICATIONS_ENABLED=true`.
+
+- **Data model**: `notification` (envelope, one row per displayed notification,
+  optionally aggregated by `group_key`), `notification_participant` (one row
+  per source record that contributed — unique on `(record_uri, recipient_did)`
+  for idempotent replay and correct tombstone cascade), `actor_state`
+  (per-user seen watermark, same as Bluesky).
+- **Hook**: registered as a `RecordHook` on `RecordProcessor.RecordHooks`,
+  policy `HookLogContinue`. A malformed record cannot stall firehose ingestion —
+  hook errors are logged but don't abort the record insert. Panic-recovered
+  per invocation. Runs on insert/update/delete.
+- **Extractors** (`internal/notifications/extractors/`): one Go file per
+  collection. Currently: `endorsement` (aggregates on subject URI) and
+  `activity-contributor` (non-aggregating, fans out per contributor DID up to
+  `MaxFanOutPerRecord=100`).
+- **Idempotency**: the participant table's UNIQUE `(record_uri, recipient_did)`
+  is the replay boundary. Re-processing the same record is a no-op.
+- **Tombstone cascade**: record delete → `DeleteByRecordURI` removes
+  participants, decrements envelope count, deletes the envelope at count 0,
+  recomputes `latest_*` from remaining participants when the removed
+  participant was the latest.
+- **Update path**: delete-then-re-extract, to handle activity contributor
+  list changes correctly.
+- **Defense-in-depth**: `isValidDID` syntactic validation, `clampSortAt` bounds
+  timestamps to `[now-7d, now]`, `MaxReasonSubjectBytes` caps subject URIs,
+  `MaxContributorsBeforeReject` short-circuits oversized records via a shallow
+  JSON scan before full unmarshal.
+- **GraphQL (admin endpoint)**: `notifications(did, reasons, first, after)`,
+  `unreadNotificationCount(did)` (capped at 50+), `updateNotificationsSeen(did, seenAt)`.
+  Fields are merged into the admin schema via `admin.WithExtraQueries` and
+  `admin.WithExtraMutations` options — no cyclic import between packages.
+- **Cursor V1** for notifications: base64-URL JSON `["v1:notif", sort_at_iso, id]`.
+- **Trust boundary**: public `/graphql` is unauthenticated, so notifications
+  live on the admin endpoint and accept `did` as an argument. The certs-social
+  proxy is the trust boundary (resolves session DID and forwards it). Public-
+  endpoint migration is deferred until OAuth auth lands on `/graphql`.
 
 ### Labeler subsystem (`internal/labeler/`)
 Mirrors `internal/jetstream/` but speaks the ATProto labeler
