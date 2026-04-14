@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-14 — Fix: `collectionOverview` rejected by strict Postgres (#59)
+
+`GetCollectionOverview` joined the raw `record` table to a pre-aggregated invalid-count subquery and grouped only by `r.collection`. Postgres strict mode rejects this because `inv.invalid_count` isn't in `GROUP BY` and `r.collection` isn't a primary key, so the functional-dependency rule doesn't cover the joined column. Surfaced as **"No collections found"** in the admin UI after the #57 deploy rebuilt the container.
+
+Fix: aggregate both sides to `collection` first, then `LEFT JOIN`. Same result shape, no ambiguous columns. No schema or API change.
+
 ## 2026-04-14 — AT Protocol service-auth for notifications (#57)
 
 Replaces the shared-secret `INDEXER_ADMIN_API_KEY` + `X-User-DID` path for the notifications API with AT Protocol service-auth JWTs (spec: https://atproto.com/specs/xrpc). Any ATProto client can now query its own user's notifications directly — no shared admin secret in the request path. Landed after 4 rounds of 8-reviewer plan review and 1 round of 5-reviewer implementation review.

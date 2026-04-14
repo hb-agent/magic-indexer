@@ -617,7 +617,63 @@ Notifications older than 90 days are deleted hourly by a background worker. The 
 
 ### Client integration
 
-See `hypercerts-org/certs-social#66` for the `/notifications` UI implementation plan.
+See `hypercerts-org/certs-social#66` for the `/notifications` UI implementation plan. `hypercerts-org/certs-social#68` ported the client to AT Protocol service-auth (issue #57) and removed the admin-key path on that side.
+
+---
+
+## Service-auth on `/notifications/graphql` (issue #57)
+
+### What it is
+
+`/notifications/graphql` is mounted when `DOMAIN_DID` is set. Every request carries a per-user AT Protocol service-auth JWT; the indexer reads the acting DID from `iss` instead of a GraphQL arg. No shared admin key on this path.
+
+### Switching it on
+
+1. Set `DOMAIN_DID` on Railway (e.g. `did:web:magic-indexer-dev.up.railway.app`).
+2. `railway up` to redeploy. Watch boot log for `Notifications XRPC endpoint enabled`.
+3. Smoke test: `curl https://<host>/.well-known/atproto-did` returns the DID as `text/plain` (did:web: only; did:plc: publishes via PLC directory, not us).
+4. Mint a synthetic JWT and hit the endpoint once — watch `hypergoat_service_auth_verified_total{lxm="com.hypergoat.notification.query"}` tick.
+
+### Switching it off (rollback)
+
+Unset `DOMAIN_DID` and redeploy — the endpoint unmounts. Clients fall back to `/admin/graphql`.
+
+### Diagnosing a 401 spike
+
+The `hypergoat_service_auth_rejected_total{reason,lxm}` metric carries one of the 18 reasons below. Map to operator action:
+
+| `reason` | Likely cause | Action |
+|---|---|---|
+| `missing_header`, `malformed_header` | Client isn't attaching `Authorization: Bearer …` or mangled the header | Check the client; not our bug |
+| `expired`, `future_iat` | Client/server clock skew > 30s | Check PDS / client clock; tolerance is tight |
+| `bad_audience` | `DOMAIN_DID` mismatch | Client minted with wrong `aud`; confirm the client's env var matches our deploy |
+| `bad_lxm` | Client minted without or with wrong `lxm` | Client bug — must pass `lxm: com.hypergoat.notification.query` to `getServiceAuth` |
+| `missing_jti` | Token has neither `jti` nor `iat` | Client minter too minimal; one of the two is required |
+| `unsupported_alg`, `unsupported_did_method`, `verification_method_not_found`, `malformed_multibase`, `key_parse_failed` | Key discovery / crypto mismatch | Usually a rotated key or non-standard DID doc; inspect `iss` DID doc |
+| `did_resolve_timeout`, `did_resolve_network`, `did_resolve_not_found` | PLC / did:web upstream issue | Check PLC status page and the specific `iss` DID's PDS |
+| `did_resolve_unavailable` | Reserved for the deferred serve-stale path | Not fired in current impl |
+| `bad_signature` | Forged or corrupted token, OR key rotated since cache last refreshed | Correlate to one `iss` — frequent single-DID hits suggest rotation, broad spray suggests abuse |
+| `replay` | Same `(iss, jti)` seen twice inside the 60s window | Either a legit retry inside the window, or a replay attack — check call patterns |
+| `throttled` | Reserved for the deferred resolver throttle | Not fired in current impl |
+| `too_large` | Token > 8 KiB | Client bug — service-auth JWTs should be well under 2 KiB |
+| `other` | Catch-all for unexpected errors | Page on-call; grep logs for `service-auth rejected` with the timestamp |
+
+### Rejection log
+
+Every 401 emits a `slog.Warn` with `reason`, `lxm`, and the wrapped error message (never the token body). Log search:
+
+```
+jsonPayload.message:"service-auth rejected"
+```
+
+### Deferred hardening (not yet wired, sentinels exist)
+
+- Per-`iss` + client-IP token-bucket throttle on DID resolution
+- Negative cache (5s network / 30s not-found)
+- Serve-stale on PLC outage (60s cap, disabled after bad-signature bust)
+- Key-rotation retry on `bad_signature`
+- `caller_hash` metric label on `notifications_request_total`
+- Persistent `jti` store before scaling past one replica
 
 ---
 

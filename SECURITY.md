@@ -20,6 +20,8 @@ first is missing; the rest are validated inside `config.Validate()`.
 | `EXTERNAL_BASE_URL` | Public-facing `https://…` URL | HSTS is only emitted when this starts with `https://`. |
 | `ALLOWED_ORIGINS` | CORS allow-list | Do **not** leave unset in production — the default "allow all" is for local dev only. |
 | `LABELER_DIDS` | Comma-separated labeler DIDs | Empty disables labeler ingestion. |
+| `DOMAIN_DID` | Indexer's own DID (`did:web:<host>` or `did:plc:…`) | Required to enable the `/notifications/graphql` service-auth endpoint (issue #57). Malformed values fail `Validate()` at startup; unset means the endpoint stays unmounted. Every service-auth JWT is validated against this as the `aud` claim. |
+| `OAUTH_LEGACY_DPOP_JKT_CUTOFF` | Unix timestamp of the DPoP binding deploy | Required. Refresh tokens issued before this timestamp are accepted unbound; tokens after must carry a matching DPoP JKT. |
 
 ## Rate limiting (**must** be handled at the reverse proxy)
 
@@ -78,6 +80,18 @@ right thing.
 
 Never run Magic Indexer on a public port without TLS — the OAuth flow,
 admin API, and DPoP proofs all assume a trusted transport.
+
+## Service-auth surface (`/notifications/graphql`, issue #57)
+
+When `DOMAIN_DID` is set, `/notifications/graphql` is mounted behind a service-auth JWT middleware. There is no shared secret on this path — every request carries a per-user JWT minted by the caller's PDS.
+
+- `alg` allowlist is `ES256` and `ES256K`. `alg=none` and HS256 are rejected before key resolution.
+- `aud` must equal `DOMAIN_DID`. `lxm` must equal `com.hypergoat.notification.query`. Tokens missing both `jti` and `iat` are rejected (replay-key construction requires at least one).
+- `exp` cannot be more than 60s past `now`; `iat` cannot be more than 30s in the future.
+- Replay cache is bounded (100k entries) and evicts by nearest-expiry under pressure. Documented trade-off: a sustained burst beyond capacity can reopen a narrow replay window for an already-seen token. Move to Postgres-backed storage before scaling past one replica.
+- `WWW-Authenticate: Bearer error="invalid_token"` is returned on failure. No `error_description` — rejection reasons are exposed only via the `hypergoat_service_auth_rejected_total{reason,lxm}` metric.
+- `/.well-known/atproto-did` is served only when `DOMAIN_DID` is `did:web:<ourHost>`; did:plc publishes to the PLC directory, not here.
+- Deferred: resolver throttle, negative cache, serve-stale on PLC outage, bad-signature retry. Sentinels and metric helpers exist but aren't wired yet — see AGENTS.md.
 
 ## Admin surface
 
