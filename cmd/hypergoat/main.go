@@ -40,6 +40,8 @@ import (
 	"github.com/GainForest/hypergoat/internal/labeler"
 	"github.com/GainForest/hypergoat/internal/lexicon"
 	"github.com/GainForest/hypergoat/internal/metrics"
+	"github.com/GainForest/hypergoat/internal/notifications"
+	notifextractors "github.com/GainForest/hypergoat/internal/notifications/extractors"
 	"github.com/GainForest/hypergoat/internal/oauth"
 	"github.com/GainForest/hypergoat/internal/server"
 	"github.com/GainForest/hypergoat/internal/tap"
@@ -666,7 +668,17 @@ func setupAdmin(r *chi.Mux, cfg *config.Config, svc *services) *admin.Handler {
 		domainDID = "did:web:" + cfg.Host
 	}
 
-	adminHandler, err := admin.NewHandler(adminRepos, authMiddleware, svc.config, domainDID, cfg.AdminAPIKey)
+	var adminOpts []admin.HandlerOption
+	if cfg.NotificationsEnabled {
+		notifRepo := notifications.NewRepository(svc.db)
+		notifResolver := notifications.NewResolver(notifRepo)
+		adminOpts = append(adminOpts,
+			admin.WithExtraQueries(notifResolver.QueryFields()),
+			admin.WithExtraMutations(notifResolver.MutationFields()),
+		)
+	}
+
+	adminHandler, err := admin.NewHandler(adminRepos, authMiddleware, svc.config, domainDID, cfg.AdminAPIKey, adminOpts...)
 	if err != nil {
 		slog.Error("Failed to create admin GraphQL handler", "error", err)
 		return nil
@@ -904,6 +916,17 @@ func startJetstream(
 		PubSub:    pubsub,
 		Validator: validator,
 		ValMode:   cfg.ValidationMode,
+	}
+
+	// Attach notifications hook if enabled.
+	if cfg.NotificationsEnabled {
+		notifRepo := notifications.NewRepository(svc.db)
+		notifService := notifications.NewService(notifRepo)
+		notifService.Register(notifextractors.NewEndorsementNotifier())
+		notifService.Register(notifextractors.NewActivityContributorNotifier())
+		processor.RecordHooks = append(processor.RecordHooks, notifService.Hook())
+		slog.Info("Notifications subsystem enabled",
+			"extractors", []string{"endorsement", "activity-contributor"})
 	}
 
 	// If Tap is enabled, start the Tap consumer instead of Jetstream.

@@ -9,18 +9,58 @@ import (
 
 // SchemaBuilder builds the admin GraphQL schema.
 type SchemaBuilder struct {
-	resolver *Resolver
+	resolver       *Resolver
+	extraQueries   graphql.Fields
+	extraMutations graphql.Fields
 }
 
 // NewSchemaBuilder creates a new admin schema builder.
 func NewSchemaBuilder(resolver *Resolver) *SchemaBuilder {
-	return &SchemaBuilder{resolver: resolver}
+	return &SchemaBuilder{
+		resolver:       resolver,
+		extraQueries:   graphql.Fields{},
+		extraMutations: graphql.Fields{},
+	}
+}
+
+// AddQueryFields merges additional query fields into the admin Query type.
+// Called before Build(). Used by the notifications subsystem to register
+// did-based lookup queries without cyclic imports.
+func (b *SchemaBuilder) AddQueryFields(fields graphql.Fields) {
+	for k, v := range fields {
+		b.extraQueries[k] = v
+	}
+}
+
+// AddMutationFields merges additional mutation fields into the admin Mutation type.
+func (b *SchemaBuilder) AddMutationFields(fields graphql.Fields) {
+	for k, v := range fields {
+		b.extraMutations[k] = v
+	}
 }
 
 // Build creates the complete admin GraphQL schema.
 func (b *SchemaBuilder) Build() (*graphql.Schema, error) {
 	queryType := b.buildQueryType()
 	mutationType := b.buildMutationType()
+
+	// Merge extra fields registered via AddQueryFields / AddMutationFields.
+	for k, v := range b.extraQueries {
+		queryType.AddFieldConfig(k, &graphql.Field{
+			Type:        v.Type,
+			Args:        v.Args,
+			Description: v.Description,
+			Resolve:     v.Resolve,
+		})
+	}
+	for k, v := range b.extraMutations {
+		mutationType.AddFieldConfig(k, &graphql.Field{
+			Type:        v.Type,
+			Args:        v.Args,
+			Description: v.Description,
+			Resolve:     v.Resolve,
+		})
+	}
 
 	schema, err := graphql.NewSchema(graphql.SchemaConfig{
 		Query:    queryType,
