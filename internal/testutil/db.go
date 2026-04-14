@@ -121,6 +121,9 @@ func resetBetweenTests(t *testing.T, exec database.Executor) {
 	t.Helper()
 	tables := []string{
 		// Children first (FK order), parents last.
+		"notification_participant",
+		"notification",
+		"actor_state",
 		"oauth_authorization_code",
 		"oauth_access_token",
 		"oauth_refresh_token",

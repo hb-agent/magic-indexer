@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-04-14 — Fix: notifications aggregated upsert fails with SQLSTATE 42P10 (#61)
+
+The aggregated-envelope upsert in `internal/notifications/repo.go` omitted the partial-index predicate on `ON CONFLICT`, so every call failed with Postgres error 42P10 (`invalid_column_reference`). No notifications were ever persisted, and `/notifications/graphql` always returned an empty feed.
+
+Fix: add `WHERE group_key IS NOT NULL` to the `ON CONFLICT` clause so it matches the partial unique index `notification_group_idx` defined in migration 015. Mirrors the working pattern already used in `internal/database/repositories/labels.go:90`.
+
+Also adds `internal/notifications/repo_test.go` with 9 Postgres integration tests covering the fix and surrounding aggregation behaviour (new envelope, cross-record aggregation, in-batch replay, cross-call replay, older-SortAt preservation, non-aggregated path, non-aggregated replay cleanup, cross-DID isolation, null `reason_subject`). Extends `testutil.resetBetweenTests` to include the `notification`, `notification_participant`, and `actor_state` tables from migration 015.
+
 ## 2026-04-14 — Fix: `collectionOverview` rejected by strict Postgres (#59)
 
 `GetCollectionOverview` joined the raw `record` table to a pre-aggregated invalid-count subquery and grouped only by `r.collection`. Postgres strict mode rejects this because `inv.invalid_count` isn't in `GROUP BY` and `r.collection` isn't a primary key, so the functional-dependency rule doesn't cover the joined column. Surfaced as **"No collections found"** in the admin UI after the #57 deploy rebuilt the container.
