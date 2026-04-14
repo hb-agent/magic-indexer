@@ -61,13 +61,17 @@ func (r *Repository) applyOne(ctx context.Context, n Notification) error {
 	var notificationID int64
 	if n.GroupKey != "" {
 		// Aggregated: upsert the envelope, returning existing or new id.
-		// ON CONFLICT triggers on the partial unique index (did, group_key)
-		// where group_key is not null — no WHERE clause on ON CONFLICT itself.
+		// The target is the partial unique index notification_group_idx
+		// (did, group_key) WHERE group_key IS NOT NULL. Postgres requires
+		// the index predicate to appear on the ON CONFLICT clause for
+		// partial-index inference — without it the statement fails with
+		// SQLSTATE 42P10. Mirrors the pattern in labels.go:90.
 		err := conn.QueryRowContext(ctx, `
 			INSERT INTO notification (did, reason, reason_subject, group_key, sort_at,
 			                          count, latest_record_uri, latest_record_cid, latest_author)
 			VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8)
-			ON CONFLICT (did, group_key) DO UPDATE SET sort_at = notification.sort_at
+			ON CONFLICT (did, group_key) WHERE group_key IS NOT NULL
+			DO UPDATE SET sort_at = notification.sort_at
 			RETURNING id
 		`, n.Recipient, n.Reason, nullIfEmpty(n.ReasonSubject), n.GroupKey, n.SortAt,
 			n.RecordURI, n.RecordCID, n.Author).Scan(&notificationID)
