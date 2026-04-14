@@ -160,9 +160,34 @@ query {
     edges { node { uri } }
   }
 }
+
+# Boolean composition with _and / _or
+query {
+  orgHypercertsClaimActivity(
+    where: {
+      _or: [
+        { title: { contains: "forest" } }
+        { title: { contains: "water" } }
+      ]
+    }
+  ) {
+    edges { node { title } }
+  }
+}
 ```
 
-**Filter operators:** `eq`, `neq`, `gt`, `lt`, `gte`, `lte`, `in`, `contains` (min 3 chars), `startsWith`, `isNull`. All conditions are combined with AND.
+**Filter operators:** `eq`, `neq`, `gt`, `lt`, `gte`, `lte`, `in`, `contains` (min 3 chars), `startsWith`, `isNull`. Top-level field conditions are combined with AND; use `_and` / `_or` for boolean composition (max depth 3, max 20 total conditions).
+
+**Performance tip:** `eq` uses JSONB containment (`@>`) which hits the GIN index. Comparison and pattern operators (`gt`, `lt`, `contains`, `startsWith`) do not — for frequently-filtered fields, create a partial expression index via the admin API:
+
+```graphql
+mutation {
+  createFieldIndex(collection: "org.hypercerts.claim", field: "createdAt") {
+    success
+    indexName
+  }
+}
+```
 
 ## Endpoints
 

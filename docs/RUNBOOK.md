@@ -533,6 +533,35 @@ to specific author DIDs. Usage:
 
 ---
 
+## Field filters, sorting, and pagination
+
+Typed collection queries support:
+
+- **`where`** argument with per-field filter inputs generated from the lexicon's scalar properties. Operators: `eq`, `neq`, `gt`, `lt`, `gte`, `lte`, `in`, `contains` (min 3 chars), `startsWith`, `isNull`.
+- **`_and` / `_or`** boolean composition inside `where`. Max nesting depth 3, global cap of 20 total conditions across the whole tree.
+- **`orderBy`** (field name string) and **`orderDirection`** (`ASC` or `DESC`, default `DESC`). Works for scalar lexicon properties and the built-in `indexed_at` column. `NULLS LAST` is applied; URI appended as tiebreaker.
+- **Forward pagination** via `first` + `after`, **backward pagination** via `last` + `before`. Mixed modes are rejected.
+- **`totalCount`** — lazy, only computed when the client selects it.
+
+Cursors are base64-URL-encoded JSON arrays (`["sortField", "sortValue", "uri"]`). The decoder accepts the legacy pipe-delimited format for backward compatibility but only when `orderBy` is the default `indexed_at`.
+
+**Performance note:** `eq` uses JSONB containment (`@>`) which is served by the GIN `jsonb_path_ops` index. Comparison (`gt`/`lt`/etc.) and pattern (`contains`/`startsWith`) operators use `json->>'field'` extraction which is **not** GIN-indexed — they do sequential scans. For hot filter fields, create a partial expression index:
+
+```graphql
+mutation {
+  createFieldIndex(collection: "org.hypercerts.claim", field: "createdAt") {
+    success
+    indexName   # e.g. "idx_record_org_hypercerts_claim_createdAt"
+  }
+}
+```
+
+This generates `CREATE INDEX CONCURRENTLY ON record ((json->>'field')) WHERE collection = 'nsid'`. Drop it with `dropFieldIndex(collection, field)`. Both mutations require admin auth.
+
+Nested JSON paths are supported at the SQL layer via the `__` separator (e.g., `metadata__source` → `json->'metadata'->>'source'`), but auto-generating nested WhereInput fields from lexicons is deferred (#40).
+
+---
+
 ## Endorsement lexicon
 
 The `app.certified.temp.graph.endorsement` lexicon has been uploaded
@@ -544,19 +573,28 @@ for the trusted-evaluator feed filter feature
 
 ## Deferred work
 
-Two issues are open with deliberate deferral reasoning attached:
+Issues with deliberate deferral reasoning attached:
 
 - **[#10 — Labeler signature verification](https://github.com/hb-agent/magic-indexer/issues/10)**.
   Re-open when a labeler we ingest starts shipping cryptographic
-  signatures against a stable scheme. Has design questions
-  documented in the issue.
+  signatures against a stable scheme.
 - **[#13 — GDPR hard-delete endpoint](https://github.com/hb-agent/magic-indexer/issues/13)**.
-  Re-open when there's a real erasure request or a legal
-  requirement. Has product/legal questions documented in the issue.
+  Re-open when there's a real erasure request or a legal requirement.
+- **[#39 — Multi-column sort](https://github.com/hb-agent/magic-indexer/issues/39)**.
+  Single-column sort-aware keyset pagination is done. Multi-column requires
+  ROW() comparisons with NULL handling and mixed-direction support — deferred
+  until there's concrete demand.
+- **[#40 — Auto-generating nested WhereInput fields](https://github.com/hb-agent/magic-indexer/issues/40)**.
+  SQL layer supports nested path extraction via `__` separator. Schema builder
+  walking nested object types is the remaining work.
+- **[#41 — Tap signature verification](https://github.com/hb-agent/magic-indexer/issues/41)**.
+  Defer until Tap is actually deployed.
+- **[#42 — Multi-relay Tap](https://github.com/hb-agent/magic-indexer/issues/42)**.
+  Defer until ATProto has multiple production relays; run multiple
+  magic-indexer instances sharing one Postgres as the workaround.
 
-Everything else from the overnight review process either landed
-in the codebase or is recorded as a closed issue with a fix
-commit reference.
+Everything else from the review process either landed in the codebase
+or is recorded as a closed issue with a fix commit reference.
 
 ---
 

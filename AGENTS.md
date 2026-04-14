@@ -428,26 +428,30 @@ cmd/hypergoat/          # Main entry point (server init, routing, lifecycle)
 internal/
   backfill/             # Historical record backfill from AT Protocol relays
   config/               # Configuration loading from environment + Validate()
+  consumer/             # Shared reconnection backoff (RunWithReconnect) used by jetstream, labeler, tap
+  cursor/               # Shared cursor persistence (atomic.Int64 Flusher) used by all consumers
   database/
-    migrations/         # SQL migrations (auto-run on startup, transactional)
-    repositories/       # Data access layer (records, labels, label_definitions, etc.)
-    sqlite/             # SQLite implementation (pure Go, modernc)
+    migrations/         # SQL migrations (auto-run on startup, transactional + "-- no-transaction" sentinel for CONCURRENTLY)
+    repositories/       # Data access layer (records, labels, label_definitions, filter.go for field filters, etc.)
+    sqlite/             # SQLite implementation (pure Go, modernc) — note: removed from production, Postgres-only
     postgres/           # PostgreSQL implementation (pgx)
   graphql/
-    admin/              # Admin API (POST-only, bearer-or-OAuth gated)
-    schema/             # Public schema builder (dynamic from lexicons)
+    admin/              # Admin API (POST-only, bearer-or-OAuth gated) — createFieldIndex, dropFieldIndex, uploadLexicons, etc.
+    schema/             # Public schema builder (dynamic from lexicons) + where.go for field filter extraction
     resolver/           # Public resolver wiring + repository context injection
-    query/              # Connection types (Relay spec) + ClampPageSize
+    query/              # Connection types (Relay spec) + ClampPageSize + SortDirectionEnum
     depth/              # Pre-execution GraphQL query depth guard (max 15 / 20)
     subscription/       # WebSocket subscriptions (graphql-transport-ws)
-    types/              # GraphQL type mapping from lexicon definitions
+    types/              # GraphQL type mapping from lexicon definitions + filters.go (per-type FilterInput types)
+  ingestion/            # Shared RecordProcessor: ensure-actor → insert/delete → log-activity → publish-to-pubsub
   integration/          # Integration tests (build tag: integration)
-  jetstream/            # Real-time AT Protocol event consumer
+  jetstream/            # Real-time AT Protocol event consumer (delegates to ingestion.RecordProcessor)
   labeler/              # ATProto labeler subscribeLabels + queryLabels client
   lexicon/              # Lexicon parsing, registry, NSID utilities
   metrics/              # Prometheus counters + /metrics HTTP handler
   oauth/                # OAuth 2.0 + DPoP + PKCE + did:plc / did:web resolution
   server/               # HTTP handlers, security headers, CORS, GraphiQL UI
+  tap/                  # Tap sidecar consumer (crypto-verified events, ack-based delivery) — alternative to Jetstream via TAP_ENABLED
   workers/              # Background jobs (activity cleanup + orphan janitor, etc.)
 docs/                   # RUNBOOK + reviews + plans
 scripts/                # Deployment helpers (setup-env.sh)
@@ -463,6 +467,86 @@ Typed collection queries accept an `authors: [String!]` argument
 to filter by author DID. Cap: 500 DIDs per query. An empty list
 means "no filter" (returns all authors). Example:
 `orgHypercertsClaimActivity(first: 10, authors: ["did:plc:..."])`.
+
+### Field filter system (`internal/database/repositories/filter.go` + `internal/graphql/schema/where.go`)
+Typed collection queries also accept a `where` argument with per-field
+operators generated from the lexicon's scalar properties:
+
+- Operators: `eq`, `neq`, `gt`, `lt`, `gte`, `lte`, `in`, `contains`, `startsWith`, `isNull`.
+- `eq` uses `json @> $::jsonb` containment (hits the GIN `jsonb_path_ops` index).
+  Other operators use `json->>'field'` extraction (seq scan unless an expression
+  index exists — see admin mutations below).
+- `neq` semantically means "not equal OR field absent" (includes NULLs).
+- `contains` min 3 chars; `startsWith` min 1 char. Both escape `\`, `%`, `_` via `ESCAPE '\\'`.
+- `in` uses `= ANY($::text[])` — single array param instead of expanded `IN (...)`.
+- Nested paths via `__` separator (e.g., `metadata__source` →
+  `json->'metadata'->>'source'`). Max 3 nesting levels. Auto-generating nested
+  WhereInput fields from lexicons is deferred (issue #40); SQL layer supports it.
+
+Composition via `_and` / `_or` fields on WhereInput (recursive, self-referential
+via `graphql-go` `AddFieldConfig`):
+- `FilterGroup` tree with `GroupAND`/`GroupOR` operators.
+- `BuildFilterGroupClause` is the recursive SQL builder; proper parenthesization;
+  global condition count capped at `MaxFilterConditions` (20) across the whole
+  tree; max depth `MaxFilterDepth` (3).
+- Field name validation (`[a-zA-Z_][a-zA-Z0-9_]*` per segment) runs before any
+  string interpolation into SQL — this is defense-in-depth; names come from the
+  lexicon registry, not user input.
+
+### Sort-aware keyset pagination
+`orderBy` (string, field name) and `orderDirection` (ASC/DESC, default DESC)
+arguments on typed collection queries. The repository layer now honors these:
+the `ORDER BY` clause uses `SortOption.BuildSortExpr()` and the keyset cursor
+comparison uses the sort expression (previously always `indexed_at`).
+
+- Direct columns (`indexed_at`, `uri`, `did`, `collection`, `cid`, `rkey`) use
+  the column name; anything else becomes `json->>'field'` (with nested path
+  support via `__`).
+- `NULLS LAST` in ORDER BY for both ASC and DESC.
+- URI tiebreaker appended in the same direction.
+- **Fast-path guard**: when no filters/labels/search apply, the function
+  delegates to `GetByCollectionWithKeysetCursor` which always sorts by
+  `indexed_at DESC`. The `hasCustomSort` check (PR #50) prevents that path
+  from silently ignoring a custom `orderBy` on an unfiltered query.
+- Multi-column sort (orderBy as list) is deferred (issue #39).
+
+### Cursor format (V2)
+Cursors are base64-URL-encoded JSON arrays:
+`["sortField", "sortValue", "uri"]`. The decoder also accepts the legacy
+pipe-delimited format (`"timestamp|uri"`) for backward compatibility; legacy
+cursors only work when `orderBy` is `indexed_at` (default). Sort-field
+mismatch produces a clear error.
+
+### Backward pagination
+`last` + `before` arguments complement `first` + `after`. Mixed forward +
+backward is rejected. Implementation: flip the sort direction + cursor
+comparison, fetch `last+1`, reverse the slice in memory. `hasPreviousPage`
+is true when we fetched more than `last`; `hasNextPage` for backward mode
+reflects whether items exist after the returned window.
+
+### Admin expression index mutations
+`createFieldIndex(collection, field)` and `dropFieldIndex(collection, field)`
+on the admin GraphQL API. Generates:
+`CREATE INDEX CONCURRENTLY ON record ((json->>'field')) WHERE collection = 'nsid'`.
+Partial index (filtered by collection) keeps size small. Runs outside a
+transaction via the migration runner's `-- no-transaction` sentinel convention.
+Use this to accelerate comparison/pattern filters that the GIN index can't serve.
+
+### Shared consumer infrastructure (`internal/ingestion`, `internal/cursor`, `internal/consumer`)
+Extracted from the original inline Jetstream consumer during the hyperindex port:
+
+- `ingestion.RecordProcessor` — ensure-actor → insert/delete → log-activity → publish-to-pubsub. Used by both Jetstream and Tap consumers. Enforces an optional collection allowlist and rejects non-object JSON records.
+- `cursor.Flusher` — `atomic.Int64` cursor value + ticker-based flush, skip-on-idle. Survives context cancellation via a bounded final flush.
+- `consumer.RunWithReconnect` — exponential backoff (1s → 2min, reset after 30s of stable connection).
+
+### Tap consumer (`internal/tap/`)
+Alternative to Jetstream when `TAP_ENABLED=true`. Consumes crypto-verified
+events from the Bluesky Tap sidecar with ack-based delivery and per-repo
+ordering. Synchronous dispatch (backpressure via the WebSocket itself is the
+correct signal for ack-based protocols). Panic-recovered, exponential retry
+(1s/2s/4s) per event, then skip. `Connection` / `Dialer` interfaces abstract
+gorilla/websocket for testability. Trust boundary: Tap verifies MST inclusion
+proofs but not signing key vs DID document (#41 deferred).
 
 ### Labeler subsystem (`internal/labeler/`)
 Mirrors `internal/jetstream/` but speaks the ATProto labeler

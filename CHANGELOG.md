@@ -1,5 +1,44 @@
 # Changelog
 
+## 2026-04-13/14 — Post-Port Feature Extensions
+
+Follow-up session working through deferred items from the hyperindex port.
+Each feature was planned, reviewed (5 reviewers × 3-5 rounds per the process),
+implemented, and verified end-to-end against the live Railway deployment.
+
+### Fully implemented and closed
+
+- **#37** ([PR #45](https://github.com/hb-agent/magic-indexer/pull/45)) — Improved `createClientAssertion` test coverage with 6 new tests + `fetchTokens` error propagation test (claim verification, header verification including `alg=ES256`, exp-iat range, JTI uniqueness, wrong-key rejection, BridgeError propagation).
+- **#38** ([PR #46](https://github.com/hb-agent/magic-indexer/pull/46)) — `_and`/`_or` boolean composition in field filters via `FilterGroup` tree. Self-referential WhereInput, recursive SQL builder with proper parenthesization, max depth 3, global condition count capped at 20.
+- **#43** ([PR #49](https://github.com/hb-agent/magic-indexer/pull/49)) — Admin `createFieldIndex`/`dropFieldIndex` mutations for managing partial expression indexes: `CREATE INDEX CONCURRENTLY ON record ((json->>'field')) WHERE collection = 'nsid'`. Accelerates comparison/pattern filters the GIN index can't serve.
+
+### Partially implemented (follow-ups remain open)
+
+- **#39** ([PR #47](https://github.com/hb-agent/magic-indexer/pull/47) + [PR #50](https://github.com/hb-agent/magic-indexer/pull/50)) — Single-column sort-aware keyset pagination now functional in the SQL layer (`orderBy` and `orderDirection` wire through to `ORDER BY` and the keyset cursor comparison). Multi-column sort deferred due to ROW() comparison complexity with mixed directions and NULL handling.
+- **#40** ([PR #48](https://github.com/hb-agent/magic-indexer/pull/48)) — SQL layer supports nested path extraction via `__` separator (`metadata__source` → `json->'metadata'->>'source'`). `eq` uses nested JSONB containment. Auto-generating nested WhereInput fields from lexicon schemas deferred.
+
+### Deferred (commented, not merged)
+
+- **#41** — Tap signature verification: premature until Tap is actually deployed. Trust boundary documented.
+- **#42** — Multi-relay Tap: single-instance approach sufficient for current ATProto relay landscape; alternative is running multiple magic-indexer instances sharing one Postgres.
+
+### Bug fix
+
+- **[PR #50](https://github.com/hb-agent/magic-indexer/pull/50)** — Discovered during deploy verification: `GetByCollectionFiltered` fast path delegated to `GetByCollectionWithKeysetCursor` which always sorts by `indexed_at DESC`, silently ignoring custom `orderBy` on unfiltered queries. Added `hasCustomSort` check to the fast-path guard.
+
+### Verified working in production
+
+End-to-end tested against https://magic-indexer-dev.up.railway.app after merge+deploy:
+- `where: { title: { startsWith: "H" } }` returns titles starting with H
+- `where: { _or: [{ title: { contains: "doc" } }, { title: { contains: "forest" } }] }` returns records matching either
+- `orderBy: "title", orderDirection: ASC` returns alphabetically sorted results
+- `orderBy: "title", orderDirection: DESC` returns reverse-alphabetical
+- `totalCount` returns 809 for `orgHypercertsClaimActivity`
+- `last: 2` returns final records with `hasPreviousPage: true, hasNextPage: false`
+- V2 cursor decodes as JSON array `["indexed_at", "2026-04-12T...", "at://..."]`
+- Admin `createFieldIndex` successfully created `idx_record_org_hypercerts_claim_activity_createdAt`
+- Admin `dropFieldIndex` successfully dropped the index
+
 ## 2026-04-13 — Hyperindex Feature Port
 
 **Scope:** Port key features from GainForest/hyperindex to magic-indexer, based on a 50-reviewer implementation plan.
