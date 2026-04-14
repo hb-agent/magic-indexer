@@ -1,5 +1,47 @@
 # Changelog
 
+## 2026-04-14 — AT Protocol service-auth for notifications (#57)
+
+Replaces the shared-secret `INDEXER_ADMIN_API_KEY` + `X-User-DID` path for the notifications API with AT Protocol service-auth JWTs (spec: https://atproto.com/specs/xrpc). Any ATProto client can now query its own user's notifications directly — no shared admin secret in the request path. Landed after 4 rounds of 8-reviewer plan review and 1 round of 5-reviewer implementation review.
+
+### New endpoint: `/notifications/graphql`
+- Accepts a service-auth JWT in `Authorization: Bearer …`. Verifier validates signature, audience (`DOMAIN_DID`), expiry, `lxm` (must be `com.hypergoat.notification.query`), and replay. Successful verification injects the issuer DID onto the request context; resolvers read it instead of a `did` argument.
+- GraphQL fields exposed: `notifications`, `unreadNotificationCount`, `updateNotificationsSeen` — identical to the admin schema minus the `did` arg.
+- Gated by `DOMAIN_DID`: endpoint mounts only when set. Admin-key path at `/admin/graphql` is unchanged so certs-social continues to work during transition.
+
+### Verifier implementation (`internal/oauth/`)
+- `ServiceAuthVerifier.Verify(ctx, token, expectedLxm)` returns the issuer DID on success, one of 20 `ErrServiceAuth*` sentinels on failure.
+- Supports **ES256** (P-256) and **ES256K** (secp256k1). ES256K is a custom `jwt.SigningMethod` wrapping `decred/dcrd/dcrec/secp256k1/v4`. IEEE-P1363 `r||s` 64-byte format enforced; DER rejected; panic-recovered.
+- `#atproto` verification method with `type: "Multikey"` required. `publicKeyMultibase` decoded via proper multibase + multicodec varint, compressed-point-only (33 bytes), point-on-curve validated.
+- `alg` allowlist enforced before key resolution (`jwt.WithValidMethods`) so `alg=none` / `HS256` reject pre-signature.
+- Replay cache: bounded LRU by expiry, atomic `LoadOrStore`, capacity 100k.
+- `jti` optional (matches older PDSes that don't emit it). When absent, the token must have `iat` and replay key is synthesised from signature bytes — ECDSA is non-deterministic so re-signings produce fresh keys.
+- Low-s malleability deliberately **not** enforced — ATProto ecosystem is lenient.
+- `lxm` pinned per middleware, exact-match. A token minted for one endpoint can't be replayed on another.
+
+### `/.well-known/atproto-did`
+Publishes `cfg.DomainDID` as `text/plain` when `DOMAIN_DID` is `did:web:<ourHost>`. Required by the did:web spec for third-party verification of our `aud`. For `did:plc:` the DID document lives on the PLC directory; we emit nothing there.
+
+### Metrics
+- `hypergoat_service_auth_verified_total{lxm}` — successful verifies.
+- `hypergoat_service_auth_rejected_total{reason, lxm}` — 18 bounded reason labels (`bad_audience`, `expired`, `did_resolve_not_found`, `bad_signature`, `replay`, …) so a 401 spike is diagnosable from the dashboard.
+- `hypergoat_did_resolve_served_stale_total` — reserved for the follow-up serve-stale path.
+- `hypergoat_notifications_request_total{endpoint, field}` — counts admin vs xrpc hits per field. This is the gate for deleting the admin-path notification fields.
+
+### Config (`internal/config/`)
+- `DOMAIN_DID` — fatal at startup if malformed, `did:plc:` or `did:web:` only. Unset = endpoint disabled (soft), which is the default on prod today.
+
+### Tests
+40+ cases across the oauth + server packages: ES256/ES256K happy paths, tampered payload, bad aud/lxm/exp/iat, alg=none, alg swap, HS256/RS256 rejection, forged iss (attacker signs claiming victim's DID), replay, missing-jti-and-iat, jti-only / iat-only accepted, pubkey varint / codec / compression edge cases, concurrent JTI check-and-set with `-race`, well-known handler branches, XRPC handler missing-DID / non-POST / bad-JSON / introspection. A `TestAllServiceAuthSentinelsCovered` test asserts the sentinel-error registry stays complete.
+
+### Deferred to follow-ups (acknowledged plan items)
+- Per-`iss` + client-IP token-bucket throttle on DID resolution (sentinel `ErrServiceAuthThrottled` exists, not yet fired).
+- Negative cache + serve-stale on PLC outage (metric helper exists, not yet called).
+- Key-rotation retry on `bad_signature`.
+- `caller_hash` label on `notifications_request_total` for per-caller migration visibility.
+- Persistent `jti` store (reuse `oauth_dpop_jti` table pattern) once we scale past one replica.
+- certs-social client port: switch from admin proxy to direct service-auth calls against `/notifications/graphql`.
+
 ## 2026-04-13 — Issues #22, #24, #26, #33, #53 bundled PR
 
 Single PR closing five open indexer issues. Three rounds of 5-reviewer plan review and two rounds of 3-reviewer implementation review informed the design.

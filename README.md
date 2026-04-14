@@ -223,6 +223,46 @@ See [docs/RUNBOOK.md](docs/RUNBOOK.md#notifications) for the full reason catalog
 | `/graphql` | Public GraphQL API (POST body capped at 1 MiB, query depth ≤ 15) |
 | `/graphql/ws` | GraphQL subscriptions (WebSocket, max 64 subs/client) |
 | `/admin/graphql` | Admin GraphQL API (POST-only, bearer token or OAuth required) |
+| `/notifications/graphql` | Notification queries authenticated by ATProto service-auth JWT (issue #57). Requires `DOMAIN_DID` set. `Authorization: Bearer <jwt>` with `aud=DOMAIN_DID`, `lxm=com.hypergoat.notification.query`. |
+| `/.well-known/atproto-did` | Published when `DOMAIN_DID` is a `did:web:<ourHost>`; returns the DID as `text/plain`. |
+
+### Integrating with `/notifications/graphql` (issue #57)
+
+Third-party ATProto clients mint a service-auth JWT via their own PDS, then call the indexer directly:
+
+```
+Authorization: Bearer <jwt>
+Content-Type:  application/json
+```
+
+JWT claims (`iss` = user DID, `aud` = indexer `DOMAIN_DID`):
+
+```json
+{
+  "iss": "did:plc:user123",
+  "aud": "did:web:indexer.example.com",
+  "exp": 1716000060,
+  "iat": 1716000000,
+  "jti": "random-nonce-abc",
+  "lxm": "com.hypergoat.notification.query"
+}
+```
+
+Signing key: the `#atproto` verification method on the issuer's DID document (`type: "Multikey"`, either `ES256K`/secp256k1 or `ES256`/P-256).
+
+GraphQL schema (queries + mutation):
+
+```graphql
+type Query {
+  notifications(reasons: [String!], first: Int = 50, after: String): NotificationConnection!
+  unreadNotificationCount: UnreadCount!
+}
+type Mutation {
+  updateNotificationsSeen(seenAt: String): Boolean!
+}
+```
+
+On verify failure the endpoint returns `401` with `WWW-Authenticate: Bearer error="invalid_token"`. No `error_description` — the metric `hypergoat_service_auth_rejected_total{reason,lxm}` gives operators the specific reason without leaking one to attackers.
 | `/admin/labeler/reset?did=...` | Clear subscription + backfill cursors for one labeler (POST, bearer) |
 | `/admin/labeler/pause?did=...` | Stop a single labeler consumer without restart (POST, bearer) |
 | `/admin/label-chain?uri=...` | Diagnostic: every label on a URI (GET, bearer) |

@@ -19,9 +19,22 @@ const DefaultPLCDirectoryURL = "https://plc.directory"
 
 // DIDDocument represents a DID document.
 type DIDDocument struct {
-	ID          string    `json:"id"`
-	AlsoKnownAs []string  `json:"alsoKnownAs,omitempty"`
-	Service     []Service `json:"service,omitempty"`
+	ID                 string               `json:"id"`
+	AlsoKnownAs        []string             `json:"alsoKnownAs,omitempty"`
+	Service            []Service            `json:"service,omitempty"`
+	VerificationMethod []VerificationMethod `json:"verificationMethod,omitempty"`
+}
+
+// VerificationMethod is one entry in a DID document's verificationMethod
+// array. AT Protocol uses the W3C DID Core `Multikey` type to carry
+// signing keys in `publicKeyMultibase` form. The `#atproto` suffix on
+// `ID` identifies the general service-auth key; `#atproto_label`
+// identifies a labeler key.
+type VerificationMethod struct {
+	ID                 string `json:"id"`
+	Type               string `json:"type"`
+	Controller         string `json:"controller"`
+	PublicKeyMultibase string `json:"publicKeyMultibase,omitempty"`
 }
 
 // Service represents a service in a DID document.
@@ -229,6 +242,30 @@ func (doc *DIDDocument) GetPDSEndpoint() string {
 		}
 	}
 	return ""
+}
+
+// AtprotoSigningKey returns the #atproto verification method used for
+// service-auth JWT signature verification. Only entries with
+// `type == "Multikey"` are accepted — legacy Ecdsa* types are rejected
+// to avoid parsing ambiguity. Returns nil if no matching method exists.
+func (doc *DIDDocument) AtprotoSigningKey() *VerificationMethod {
+	for i := range doc.VerificationMethod {
+		vm := &doc.VerificationMethod[i]
+		if vm.Type != "Multikey" {
+			continue
+		}
+		// The id is expected to be "<did>#atproto" or just "#atproto";
+		// accept either form (the `#atproto` suffix is the canonical
+		// selector per the ATProto identity spec).
+		if vm.ID == "#atproto" || endsWithFragment(vm.ID, "#atproto") {
+			return vm
+		}
+	}
+	return nil
+}
+
+func endsWithFragment(id, frag string) bool {
+	return len(id) >= len(frag) && id[len(id)-len(frag):] == frag
 }
 
 // GetLabelerEndpoint extracts the AtprotoLabeler service endpoint from a DID

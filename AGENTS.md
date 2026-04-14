@@ -891,6 +891,16 @@ area.
 - **[#13 — GDPR hard-delete endpoint](https://github.com/hb-agent/magic-indexer/issues/13)**.
   Re-open when there's a real erasure request or a legal
   obligation.
+- **#57 Deferred hardening (service-auth for notifications).**
+  The April-2026 PR landed the verifier, `/notifications/graphql`
+  endpoint, and `.well-known/atproto-did` handler. What it did NOT
+  land: per-`iss`/IP resolver throttle, negative cache, serve-stale
+  on PLC outage, bad-signature key-rotation retry, `caller_hash`
+  metric label, persistent jti store. Sentinels and metric helpers
+  are already in place; wire them when (a) we see real abuse, (b) we
+  add a second replica, or (c) the plan file
+  (`/workspace/issue-57-plan.md`) says we're ready.
+
 - **#26 Deploy 2 (sortAt exposure).** The April-2026 bundled PR
   shipped Deploy 1: migration 017 + `ingestion.ComputeSortAt`
   writes `sort_at` on every new insert. Deploy 2 — backfill

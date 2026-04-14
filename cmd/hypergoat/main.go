@@ -694,9 +694,10 @@ func setupAdmin(r *chi.Mux, cfg *config.Config, svc *services) *admin.Handler {
 	}
 
 	var adminOpts []admin.HandlerOption
+	var notifResolver *notifications.Resolver
 	if cfg.NotificationsEnabled {
 		notifRepo := notifications.NewRepository(svc.db)
-		notifResolver := notifications.NewResolver(notifRepo)
+		notifResolver = notifications.NewResolver(notifRepo)
 		adminOpts = append(adminOpts,
 			admin.WithExtraQueries(notifResolver.QueryFields()),
 			admin.WithExtraMutations(notifResolver.MutationFields()),
@@ -717,6 +718,47 @@ func setupAdmin(r *chi.Mux, cfg *config.Config, svc *services) *admin.Handler {
 	r.Handle("/admin/graphql", adminHandler.OptionalAuth())
 	r.Handle("/admin/graphql/", adminHandler.OptionalAuth())
 	slog.Info("Admin GraphQL endpoint enabled", "path", "/admin/graphql")
+
+	// Service-auth notifications endpoint (issue #57). Mounted only when
+	// DOMAIN_DID is set — that's also the aud every JWT is checked
+	// against, so without it the verifier has no identity to assert.
+	// A failure to build the XRPC handler must not kill the admin
+	// path: log-and-skip so the rest of the server comes up.
+	switch {
+	case !cfg.NotificationsEnabled:
+		// Nothing to do — notifications subsystem is disabled entirely.
+	case notifResolver == nil:
+		slog.Warn("Notifications XRPC endpoint disabled: resolver not built")
+	case cfg.DomainDID == "":
+		slog.Info("Notifications XRPC endpoint disabled (DOMAIN_DID unset)")
+	default:
+		xrpcHandler, err := server.NewNotificationsXRPCHandler(notifResolver)
+		if err != nil {
+			slog.Warn("Notifications XRPC endpoint disabled: schema build failed", "error", err)
+		} else {
+			verifier := oauth.NewServiceAuthVerifier(oauth.ServiceAuthConfig{
+				Audience: cfg.DomainDID,
+				Resolver: oauth.NewDIDResolver(),
+			})
+			const notificationsLxm = "com.hypergoat.notification.query"
+			r.With(oauth.ServiceAuthMiddleware(verifier, notificationsLxm)).
+				Post("/notifications/graphql", xrpcHandler.ServeHTTP)
+			slog.Info("Notifications XRPC endpoint enabled",
+				"path", "/notifications/graphql",
+				"audience", cfg.DomainDID,
+				"lxm", notificationsLxm)
+
+			// /.well-known/atproto-did lets did:web clients verify that
+			// our host claims our DOMAIN_DID. Only useful for did:web: —
+			// for did:plc: the DID document is on the PLC directory,
+			// not here.
+			if host := didWebHost(cfg.DomainDID); host != "" {
+				r.Method(http.MethodGet, "/.well-known/atproto-did",
+					server.NewAtprotoDIDHandler(cfg.DomainDID, host))
+				slog.Info("Atproto DID well-known endpoint enabled", "did", cfg.DomainDID)
+			}
+		}
+	}
 
 	// GraphiQL playgrounds
 	r.Get("/graphiql", server.HandleGraphiQL(server.GraphiQLConfig{
@@ -1346,6 +1388,17 @@ func serve(r *chi.Mux, cfg *config.Config, bg *backgroundServices) error {
 // into a non-zero exit code so the orchestrator restarts the process — a
 // fresh boot reloads lexicons from the DB and rebuilds the GraphQL schema.
 var errRestartRequested = errors.New("restart requested")
+
+// didWebHost returns the host portion of a "did:web:<host>" DID, or ""
+// if the input is not a did:web. Used by the `/.well-known/atproto-did`
+// mount to decide whether to publish.
+func didWebHost(did string) string {
+	const prefix = "did:web:"
+	if len(did) <= len(prefix) || did[:len(prefix)] != prefix {
+		return ""
+	}
+	return did[len(prefix):]
+}
 
 // parseDIDs splits a comma-separated list of DIDs and trims whitespace.
 func parseDIDs(commaSeparated string) []string {

@@ -146,6 +146,10 @@ func init() {
 		oauthRefreshJKTMismatchTotal,
 		oauthRefreshLegacyNullJKTTotal,
 		oauthRefreshLegacyExpiredTotal,
+		serviceAuthVerifiedTotal,
+		serviceAuthRejectedTotal,
+		serviceAuthDIDResolveServedStaleTotal,
+		notificationsRequestTotal,
 	)
 }
 
@@ -278,6 +282,68 @@ func OAuthRefreshLegacyNullJKT() {
 // is rejected because it was issued after the LegacyDPoPJKTCutoff.
 func OAuthRefreshLegacyExpired() {
 	oauthRefreshLegacyExpiredTotal.Inc()
+}
+
+// --- Service-auth JWT metrics (issue #57) ---
+
+var (
+	serviceAuthVerifiedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hypergoat_service_auth_verified_total",
+			Help: "Service-auth JWT verifications that succeeded, labelled by lxm.",
+		},
+		[]string{"lxm"},
+	)
+	serviceAuthRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hypergoat_service_auth_rejected_total",
+			Help: "Service-auth JWT verifications that were rejected, labelled by reason and lxm.",
+		},
+		[]string{"reason", "lxm"},
+	)
+	serviceAuthDIDResolveServedStaleTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "hypergoat_did_resolve_served_stale_total",
+			Help: "Number of service-auth verifies that proceeded with a stale-but-cached DID document because PLC was unavailable.",
+		},
+	)
+	notificationsRequestTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hypergoat_notifications_request_total",
+			Help: "Notification GraphQL requests, labelled by endpoint (admin vs xrpc) and field. Used to gate removal of the admin-key path.",
+		},
+		[]string{"endpoint", "field"},
+	)
+)
+
+// ServiceAuthVerified increments the success counter. Only called after
+// full signature + claim + replay validation.
+func ServiceAuthVerified(lxm string) {
+	serviceAuthVerifiedTotal.WithLabelValues(lxm).Inc()
+}
+
+// ServiceAuthRejected increments the rejection counter. `lxm` may be
+// "unknown" for rejections that happen before claims parse (missing
+// header, malformed header, size-cap). Reason labels are bounded to the
+// sentinel-error set in internal/oauth/serviceauth_errors.go.
+func ServiceAuthRejected(reason, lxm string) {
+	serviceAuthRejectedTotal.WithLabelValues(reason, lxm).Inc()
+}
+
+// DIDResolveServedStale increments when the resolver fell back to a
+// recently-expired cache entry because the upstream (PLC or did:web)
+// was unreachable. Alert if this is non-zero for more than 5 minutes —
+// it means the indexer is authenticating requests against keys that
+// could have rotated.
+func DIDResolveServedStale() {
+	serviceAuthDIDResolveServedStaleTotal.Inc()
+}
+
+// NotificationsRequest increments per handled notifications GraphQL op,
+// split by auth path (`admin` vs `xrpc`) and field. Primary purpose:
+// prove the admin-key path has zero traffic before deleting it.
+func NotificationsRequest(endpoint, field string) {
+	notificationsRequestTotal.WithLabelValues(endpoint, field).Inc()
 }
 
 // httpStatusString converts an int status code into a stable

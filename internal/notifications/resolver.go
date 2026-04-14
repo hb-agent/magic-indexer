@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/graphql-go/graphql"
+
+	"github.com/GainForest/hypergoat/internal/metrics"
 )
 
 // Resolver provides GraphQL resolvers for the notifications subsystem.
@@ -190,6 +192,7 @@ func (r *Resolver) QueryFields() graphql.Fields {
 						}
 					}
 				}
+				metrics.NotificationsRequest("admin", "notifications")
 				return r.ListNotifications(p.Context, did, reasons, first, after)
 			},
 		},
@@ -201,7 +204,78 @@ func (r *Resolver) QueryFields() graphql.Fields {
 			},
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 				did, _ := p.Args["did"].(string)
+				metrics.NotificationsRequest("admin", "unreadNotificationCount")
 				return r.UnreadCount(p.Context, did)
+			},
+		},
+	}
+}
+
+// XRPCQueryFields returns the notification query fields with the acting
+// DID read from the request context via oauth.ActingDIDFromContext
+// (injected by the service-auth middleware) instead of a GraphQL arg.
+// Used on the /notifications/graphql endpoint — issue #57.
+func (r *Resolver) XRPCQueryFields(didFromCtx func(ctx context.Context) (string, bool), onReq func(field string)) graphql.Fields {
+	return graphql.Fields{
+		"notifications": &graphql.Field{
+			Type:        graphql.NewNonNull(NotificationConnectionType),
+			Description: "List the authenticated user's notifications. The user is identified by the service-auth JWT's iss claim.",
+			Args: graphql.FieldConfigArgument{
+				"reasons": &graphql.ArgumentConfig{Type: graphql.NewList(graphql.NewNonNull(graphql.String))},
+				"first":   &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 50},
+				"after":   &graphql.ArgumentConfig{Type: graphql.String},
+			},
+			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+				did, ok := didFromCtx(p.Context)
+				if !ok {
+					return nil, fmt.Errorf("no authenticated DID on request context")
+				}
+				onReq("notifications")
+				first, _ := p.Args["first"].(int)
+				after, _ := p.Args["after"].(string)
+				var reasons []string
+				if raw, ok := p.Args["reasons"].([]interface{}); ok {
+					for _, v := range raw {
+						if s, ok := v.(string); ok {
+							reasons = append(reasons, s)
+						}
+					}
+				}
+				return r.ListNotifications(p.Context, did, reasons, first, after)
+			},
+		},
+		"unreadNotificationCount": &graphql.Field{
+			Type:        graphql.NewNonNull(UnreadCountType),
+			Description: "Count the authenticated user's unread notifications.",
+			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+				did, ok := didFromCtx(p.Context)
+				if !ok {
+					return nil, fmt.Errorf("no authenticated DID on request context")
+				}
+				onReq("unreadNotificationCount")
+				return r.UnreadCount(p.Context, did)
+			},
+		},
+	}
+}
+
+// XRPCMutationFields returns the context-DID version of the mutation.
+func (r *Resolver) XRPCMutationFields(didFromCtx func(ctx context.Context) (string, bool), onReq func(field string)) graphql.Fields {
+	return graphql.Fields{
+		"updateNotificationsSeen": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Boolean),
+			Description: "Mark the authenticated user's notifications as seen up to the given timestamp.",
+			Args: graphql.FieldConfigArgument{
+				"seenAt": &graphql.ArgumentConfig{Type: graphql.String},
+			},
+			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+				did, ok := didFromCtx(p.Context)
+				if !ok {
+					return nil, fmt.Errorf("no authenticated DID on request context")
+				}
+				onReq("updateNotificationsSeen")
+				seenAt, _ := p.Args["seenAt"].(string)
+				return r.UpdateSeen(p.Context, did, seenAt)
 			},
 		},
 	}
@@ -221,6 +295,7 @@ func (r *Resolver) MutationFields() graphql.Fields {
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 				did, _ := p.Args["did"].(string)
 				seenAt, _ := p.Args["seenAt"].(string)
+				metrics.NotificationsRequest("admin", "updateNotificationsSeen")
 				return r.UpdateSeen(p.Context, did, seenAt)
 			},
 		},
