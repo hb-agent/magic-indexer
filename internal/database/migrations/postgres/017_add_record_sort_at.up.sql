@@ -1,16 +1,11 @@
--- no-transaction
--- Deploy 1 of the 2-step rollout for issue #26 (Bluesky-style sortAt ordering).
+-- Deploy 1 of the 2-step rollout for issue #26 (Bluesky-style sortAt
+-- ordering). Adds a nullable sort_at column so existing rows can remain
+-- untouched; the processor writes a value on every new insert. The
+-- accompanying CONCURRENTLY-built keyset index is a separate migration
+-- (018) because CREATE INDEX CONCURRENTLY cannot run in the same
+-- statement batch as ALTER TABLE — pgx wraps multi-statement ExecContext
+-- in an implicit transaction.
 --
--- sort_at is a clock-skew-clamped timestamp used for deterministic feed
--- ordering. It is nullable in this migration so the column can be added
--- without touching existing rows; the processor writes a value on insert
--- going forward. Deploy 2 (a later migration) will backfill and flip the
--- column to NOT NULL once every row has a value.
---
--- CREATE INDEX CONCURRENTLY cannot run inside a transaction block, so this
--- file carries the "-- no-transaction" sentinel; the migration runner
--- executes it without wrapping in BEGIN/COMMIT.
+-- Deploy 2 (later) will backfill existing rows and flip sort_at to NOT
+-- NULL once the NULL tail is small enough.
 ALTER TABLE record ADD COLUMN IF NOT EXISTS sort_at TIMESTAMP WITH TIME ZONE;
-
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_record_collection_sort_at_uri
-  ON record(collection, sort_at DESC NULLS LAST, uri DESC);
