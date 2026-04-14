@@ -74,6 +74,9 @@ type Config struct {
 
 	// Validation
 	ValidationMode string // Record validation mode: "disabled" (default), "warn" (log but store), "enforce" (reject invalid records)
+
+	// Notifications
+	NotificationsEnabled bool // Enable the notifications subsystem (default false)
 }
 
 // Load reads configuration from environment variables.
@@ -140,6 +143,8 @@ func Load() (*Config, error) {
 		LabelerDryRun:              getEnvBool("LABELER_DRY_RUN", false),
 		LabelerCursorFlushInterval: getEnvInt("LABELER_CURSOR_FLUSH_INTERVAL", 0),
 		ValidationMode:             getEnv("VALIDATION_MODE", "disabled"),
+
+		NotificationsEnabled: getEnvBool("NOTIFICATIONS_ENABLED", false),
 	}
 
 	// Generate SecretKeyBase if not provided

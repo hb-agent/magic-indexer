@@ -38,6 +38,27 @@ type ProcessOp struct {
 	Record     json.RawMessage // nil for delete
 }
 
+// HookErrorPolicy controls what happens when a RecordHook returns an error.
+type HookErrorPolicy int
+
+const (
+	// HookLogContinue logs the hook error and continues processing. The record
+	// is already persisted; the hook's work is best-effort.
+	HookLogContinue HookErrorPolicy = iota
+	// HookAbortTx returns the hook error from ProcessRecord to the caller.
+	// The record has already been committed (hooks run after insert), but the
+	// consumer sees the error and may choose to retry or halt.
+	HookAbortTx
+)
+
+// RecordHook is called after a record insert/update/delete. Hooks run
+// sequentially; ordering is defined by the slice position in RecordProcessor.RecordHooks.
+type RecordHook struct {
+	Name   string
+	Policy HookErrorPolicy
+	Fn     func(ctx context.Context, op ProcessOp) error
+}
+
 // RecordProcessor handles the core indexing pipeline shared by all consumers.
 type RecordProcessor struct {
 	Records  *repositories.RecordsRepository
@@ -51,6 +72,9 @@ type RecordProcessor struct {
 	// AllowedCollections restricts which collections can be indexed.
 	// nil means all collections are allowed.
 	AllowedCollections map[string]bool
+
+	// RecordHooks run after each record insert/update/delete. See RecordHook.
+	RecordHooks []RecordHook
 }
 
 // ProcessRecord executes the core indexing pipeline for a single record event.
@@ -189,7 +213,32 @@ func (p *RecordProcessor) ProcessRecord(ctx context.Context, op ProcessOp) error
 		slog.Debug("Deleted record", "uri", op.URI)
 	}
 
+	// Run post-processing hooks (notifications, etc.). Hooks run sequentially;
+	// each hook is independently isolated with panic recovery.
+	for _, hook := range p.RecordHooks {
+		if err := p.runHook(ctx, hook, op); err != nil {
+			if hook.Policy == HookAbortTx {
+				return fmt.Errorf("hook %q: %w", hook.Name, err)
+			}
+			slog.Warn("record hook failed",
+				"hook", hook.Name,
+				"collection", op.Collection,
+				"uri", op.URI,
+				"error", err)
+		}
+	}
+
 	return nil
+}
+
+// runHook invokes a RecordHook with panic recovery.
+func (p *RecordProcessor) runHook(ctx context.Context, hook RecordHook, op ProcessOp) (retErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			retErr = fmt.Errorf("hook panic: %v", r)
+		}
+	}()
+	return hook.Fn(ctx, op)
 }
 
 // truncate returns at most n bytes of s, appending "..." if truncated.

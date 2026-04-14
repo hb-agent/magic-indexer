@@ -46,13 +46,29 @@ type Handler struct {
 	adminAPIKey string // shared secret; when set, X-User-DID is trusted if Bearer token matches
 }
 
+// HandlerOption configures the admin GraphQL handler at construction time.
+type HandlerOption func(*SchemaBuilder)
+
+// WithExtraQueries adds additional query fields to the admin schema (e.g. notifications).
+func WithExtraQueries(fields graphql.Fields) HandlerOption {
+	return func(b *SchemaBuilder) { b.AddQueryFields(fields) }
+}
+
+// WithExtraMutations adds additional mutation fields to the admin schema.
+func WithExtraMutations(fields graphql.Fields) HandlerOption {
+	return func(b *SchemaBuilder) { b.AddMutationFields(fields) }
+}
+
 // NewHandler creates a new admin GraphQL handler.
 // When adminAPIKey is non-empty, the X-User-DID header is trusted only if the
 // request also carries a matching Authorization: Bearer <key> header.
-func NewHandler(repos *Repositories, middleware *oauth.AuthMiddleware, configRepo *repositories.ConfigRepository, domainDID, adminAPIKey string) (*Handler, error) {
+func NewHandler(repos *Repositories, middleware *oauth.AuthMiddleware, configRepo *repositories.ConfigRepository, domainDID, adminAPIKey string, opts ...HandlerOption) (*Handler, error) {
 	resolver := NewResolver(repos, domainDID)
 
 	builder := NewSchemaBuilder(resolver)
+	for _, opt := range opts {
+		opt(builder)
+	}
 	schema, err := builder.Build()
 	if err != nil {
 		return nil, err

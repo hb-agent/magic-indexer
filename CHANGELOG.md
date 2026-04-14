@@ -1,5 +1,47 @@
 # Changelog
 
+## 2026-04-14 — Notifications subsystem (v1)
+
+Bluesky-pattern notification system for certs.social, built after 3 rounds of
+10-reviewer plan feedback. Two notification types in v1: endorsement received,
+activity contributor mention. Server-side aggregation for endorsements.
+
+### Schema (migration 015)
+- `notification` — notification envelopes, aggregated on `(did, group_key)` for types that opt in
+- `notification_participant` — per-source-record participation rows, unique on `(record_uri, recipient_did)` for idempotency
+- `actor_state` — per-user seen watermark
+
+### Package: `internal/notifications/`
+- `Notifier` interface, registry, repository
+- Post-insert `RecordHook` attached to shared `RecordProcessor` (runs with `HookLogContinue` — a failing extractor cannot stall firehose ingestion)
+- Extractors for `app.certified.temp.graph.endorsement` (aggregating) and `org.hypercerts.claim.activity` (non-aggregating, fan-out per contributor)
+- `clampSortAt` clamps record timestamps to `[now-7d, now]` to prevent out-of-range sort_at values
+- `isValidDID` syntactic validation + `MaxReasonSubjectBytes` cap defend against untrusted input
+- Fan-out capped at `MaxFanOutPerRecord = 100`; oversized contributor lists rejected early via shallow pre-check
+
+### GraphQL API (admin endpoint)
+- `Query.notifications(did, reasons, first, after)` with cursor pagination
+- `Query.unreadNotificationCount(did)` returning `{count, more}`, capped at 50+
+- `Mutation.updateNotificationsSeen(did, seenAt)` with monotonic GREATEST watermark + clamp to `now()`
+- Cursor V3 for notifications: base64-URL JSON array `["v1:notif", sort_at_iso, id]`
+- Resolvers registered via `admin.WithExtraQueries` / `admin.WithExtraMutations` options
+
+### Hook infrastructure (`internal/ingestion/`)
+- New `RecordHook` type with `HookErrorPolicy` (`HookLogContinue` or `HookAbortTx`)
+- `RecordProcessor.RecordHooks []RecordHook`, called sequentially after record insert with panic recovery
+
+### Configuration
+- `NOTIFICATIONS_ENABLED` env var (default false) — per-service Railway flag for staged rollout
+- Documented in `.env.example`
+
+### Deferred (follow-up work)
+- Same-transaction hook (requires refactor across all repos)
+- Per-reason circuit breaker / kill switch
+- Top-N authors (`latest_authors text[]`) for "Alice, Bob, and 3 others" rendering
+- Count-drift reconciler
+- Public-endpoint migration when OAuth ships on `/graphql`
+- Push notifications, preferences, activity subscriptions
+
 ## 2026-04-13/14 — Post-Port Feature Extensions
 
 Follow-up session working through deferred items from the hyperindex port.
