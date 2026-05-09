@@ -150,6 +150,7 @@ func init() {
 		serviceAuthRejectedTotal,
 		serviceAuthDIDResolveServedStaleTotal,
 		notificationsRequestTotal,
+		pdsResolveTotal,
 	)
 }
 
@@ -344,6 +345,42 @@ func DIDResolveServedStale() {
 // prove the admin-key path has zero traffic before deleting it.
 func NotificationsRequest(endpoint, field string) {
 	notificationsRequestTotal.WithLabelValues(endpoint, field).Inc()
+}
+
+// --- PDS resolution metrics (issue maearth-social#10) ---
+//
+// These count the outcome of resolving an actor's DID document to
+// the AtprotoPersonalDataServer service endpoint at ingestion time.
+// The resolved value flows into actor.pds and underpins the
+// excludePds GraphQL filter, so the rate of "no_endpoint" or
+// "failed" tells operators how leaky the filter is in steady state.
+
+var (
+	pdsResolveTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hypergoat_pds_resolve_total",
+			Help: "Outcomes of PDS resolution at actor upsert time. Outcome labels: ok, failed (resolver returned an error), no_endpoint (DID document had no AtprotoPersonalDataServer entry).",
+		},
+		[]string{"outcome"},
+	)
+)
+
+// PDSResolveOK increments the ok-outcome counter for PDS resolution.
+func PDSResolveOK() {
+	pdsResolveTotal.WithLabelValues("ok").Inc()
+}
+
+// PDSResolveFailed increments the failed-outcome counter (resolver
+// returned an error: PLC outage, network, document parse failure).
+func PDSResolveFailed() {
+	pdsResolveTotal.WithLabelValues("failed").Inc()
+}
+
+// PDSResolveNoEndpoint increments the no-endpoint-outcome counter
+// (resolution succeeded but the DID document had no
+// AtprotoPersonalDataServer service entry).
+func PDSResolveNoEndpoint() {
+	pdsResolveTotal.WithLabelValues("no_endpoint").Inc()
 }
 
 // httpStatusString converts an int status code into a stable

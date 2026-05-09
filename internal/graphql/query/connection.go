@@ -85,6 +85,23 @@ func LabelFilterArgs() graphql.FieldConfigArgument {
 	}
 }
 
+// PDSFilterArgs returns the PDS-based filtering arguments applied to
+// record connection queries. Exposed separately so consumers (the
+// generic `records` query, per-collection queries) can compose it
+// alongside their other args.
+//
+// The filter is best-effort: records whose author's PDS has not yet
+// been resolved (NULL on the actor row) pass through. Use AT-Protocol
+// labels with excludeLabels for guaranteed exclusion semantics.
+func PDSFilterArgs() graphql.FieldConfigArgument {
+	return graphql.FieldConfigArgument{
+		"excludePds": &graphql.ArgumentConfig{
+			Type:        graphql.NewList(graphql.NewNonNull(graphql.String)),
+			Description: "Exclude records authored from any of these PDS service endpoints. Records whose author's PDS has not yet been resolved pass through (best-effort exclusion). Use the labeler-based excludeLabels for guaranteed exclusion. Endpoint strings are matched verbatim (e.g. \"https://pds1.test.certified.app\").",
+		},
+	}
+}
+
 // SortDirectionEnum defines ASC/DESC for ordering.
 var SortDirectionEnum = graphql.NewEnum(graphql.EnumConfig{
 	Name:        "SortDirection",
@@ -151,7 +168,42 @@ func ConnectionArgs() graphql.FieldConfigArgument {
 	for k, v := range LabelFilterArgs() {
 		args[k] = v
 	}
+	for k, v := range PDSFilterArgs() {
+		args[k] = v
+	}
 	return args
+}
+
+// ParsePDSExcludeFilter extracts the "excludePds" argument from GraphQL
+// resolver args. Returns nil for omitted/null/empty arguments (no filter)
+// and a deduplicated, order-stable slice of endpoint strings otherwise.
+// Returns an error on malformed input (non-string elements).
+func ParsePDSExcludeFilter(args map[string]interface{}) ([]string, error) {
+	raw, present := args["excludePds"]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	list, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("excludePds argument must be a list")
+	}
+	if len(list) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(list))
+	out := make([]string, 0, len(list))
+	for _, e := range list {
+		s, ok := e.(string)
+		if !ok {
+			return nil, fmt.Errorf("excludePds elements must be strings")
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out, nil
 }
 
 // ParseAuthorsFilter extracts the "authors" argument from GraphQL resolver args.

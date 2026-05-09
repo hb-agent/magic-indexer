@@ -1,0 +1,13 @@
+-- no-transaction
+-- Companion index for migration 019. Split into its own file because
+-- CREATE INDEX CONCURRENTLY cannot run inside a transaction block (the
+-- migration runner wraps every other migration in BEGIN/COMMIT). The
+-- "-- no-transaction" sentinel tells the runner to exec this file
+-- without a transaction wrapper. Mirrors migrations 013 and 018.
+--
+-- Partial index: only non-null entries. The `excludePds` filter SQL is
+-- `(a.pds IS NULL OR a.pds NOT IN (...))` and Postgres won't use this
+-- index for a NOT IN scan anyway — the index exists for the symmetrical
+-- equality access pattern (looking up actors whose pds = X) that we
+-- expect future filters to want.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_actor_pds ON actor(pds) WHERE pds IS NOT NULL;

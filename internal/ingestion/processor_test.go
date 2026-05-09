@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
+
+	"github.com/GainForest/hypergoat/internal/oauth"
 )
 
 func TestProcessOp_OperationValidation(t *testing.T) {
@@ -106,6 +109,55 @@ func TestProcessOp_RejectsNonObjectJSON(t *testing.T) {
 				t.Fatalf("expected nil (skip), got error: %v", err)
 			}
 		})
+	}
+}
+
+func TestResolvePDS_NilCacheReturnsEmpty(t *testing.T) {
+	// When DIDCache is unset, the processor must fall through with
+	// empty pds rather than panicking — covers test setups and
+	// deliberate disabling.
+	p := &RecordProcessor{}
+	if got := p.resolvePDS("did:plc:any"); got != "" {
+		t.Errorf("expected empty pds with nil cache, got %q", got)
+	}
+}
+
+func TestResolvePDS_CacheHitReturnsEndpoint(t *testing.T) {
+	// Pre-populate the cache via Put, then resolve. No HTTP call —
+	// the test exercises the cache-hit path that dominates steady
+	// state ingestion.
+	cache := oauth.NewDIDCache(oauth.WithCacheTTL(time.Hour))
+	cache.Put("did:plc:happy", &oauth.DIDDocument{
+		ID: "did:plc:happy",
+		Service: []oauth.Service{
+			{Type: "AtprotoPersonalDataServer", ServiceEndpoint: "https://prod.pds.example.com"},
+		},
+	})
+
+	p := &RecordProcessor{DIDCache: cache}
+	got := p.resolvePDS("did:plc:happy")
+	if got != "https://prod.pds.example.com" {
+		t.Errorf("expected resolved endpoint, got %q", got)
+	}
+}
+
+func TestResolvePDS_CacheHitWithoutPDSEndpoint(t *testing.T) {
+	// A DID document that lacks AtprotoPersonalDataServer is a real
+	// (rare) case: e.g. a labeler-only DID with only an
+	// AtprotoLabeler service entry. The processor should treat this
+	// as "no pds" rather than crashing.
+	cache := oauth.NewDIDCache(oauth.WithCacheTTL(time.Hour))
+	cache.Put("did:plc:labeler", &oauth.DIDDocument{
+		ID: "did:plc:labeler",
+		Service: []oauth.Service{
+			{Type: "AtprotoLabeler", ServiceEndpoint: "https://labeler.example.com"},
+		},
+	})
+
+	p := &RecordProcessor{DIDCache: cache}
+	got := p.resolvePDS("did:plc:labeler")
+	if got != "" {
+		t.Errorf("expected empty pds for labeler-only DID, got %q", got)
 	}
 }
 

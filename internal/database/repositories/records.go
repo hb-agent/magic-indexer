@@ -43,6 +43,11 @@ type Record struct {
 	// migration have no sort_at yet. A nil pointer here means NULL in the
 	// database; resolvers fall back to IndexedAt when presenting.
 	SortAt *time.Time
+	// PDS is the author's resolved Personal Data Server endpoint, joined
+	// from the actor table at query time. Empty string when the actor
+	// row has no resolved PDS yet (best-effort: ingestion proceeds even
+	// when PDS resolution fails or is delayed).
+	PDS string
 }
 
 // CollectionStat represents statistics for a collection.
@@ -84,9 +89,22 @@ func NewRecordsRepository(db database.Executor) *RecordsRepository {
 	return &RecordsRepository{db: db}
 }
 
-// recordColumns returns the columns to select.
+// recordColumns returns the columns to select for a record. Always
+// prefixed with the `r` alias — every record read JOINs the actor
+// table so the author's PDS endpoint is available without a second
+// trip. Pre-JOIN call sites that just had `FROM record` should use
+// recordTable() to get the matching FROM clause.
 func (r *RecordsRepository) recordColumns() string {
-	return "uri, cid, did, collection, json::text, indexed_at::text, rkey"
+	return "r.uri, r.cid, r.did, r.collection, r.json::text, r.indexed_at::text, r.rkey, COALESCE(a.pds, '')"
+}
+
+// recordTable returns the FROM clause that pairs with recordColumns().
+// LEFT JOIN so a record whose actor row has not yet been upserted (a
+// race the ingestion processor's actor-first ordering normally avoids,
+// but which a backfill / restore could expose) still returns rather
+// than vanishing from query results.
+func (r *RecordsRepository) recordTable() string {
+	return "record r LEFT JOIN actor a ON r.did = a.did"
 }
 
 // InsertParams carries the full parameter set for a record insert. It's a
@@ -234,13 +252,13 @@ func (r *RecordsRepository) insertBatchTx(ctx context.Context, tx *sql.Tx, recor
 
 // GetByURI retrieves a record by its URI.
 func (r *RecordsRepository) GetByURI(ctx context.Context, uri string) (*Record, error) {
-	sqlStr := fmt.Sprintf("SELECT %s FROM record WHERE uri = %s",
-		r.recordColumns(), r.db.Placeholder(1))
+	sqlStr := fmt.Sprintf("SELECT %s FROM %s WHERE r.uri = %s",
+		r.recordColumns(), r.recordTable(), r.db.Placeholder(1))
 
 	var rec Record
 	var indexedAtStr string
 	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(uri)},
-		&rec.URI, &rec.CID, &rec.DID, &rec.Collection, &rec.JSON, &indexedAtStr, &rec.RKey)
+		&rec.URI, &rec.CID, &rec.DID, &rec.Collection, &rec.JSON, &indexedAtStr, &rec.RKey, &rec.PDS)
 	if err != nil {
 		return nil, err
 	}
@@ -256,8 +274,8 @@ func (r *RecordsRepository) GetByURIs(ctx context.Context, uris []string) ([]*Re
 	}
 
 	placeholders := r.db.Placeholders(len(uris), 1)
-	sqlStr := fmt.Sprintf("SELECT %s FROM record WHERE uri IN (%s)",
-		r.recordColumns(), placeholders)
+	sqlStr := fmt.Sprintf("SELECT %s FROM %s WHERE r.uri IN (%s)",
+		r.recordColumns(), r.recordTable(), placeholders)
 
 	params := make([]database.Value, len(uris))
 	for i, uri := range uris {
@@ -287,14 +305,14 @@ func (r *RecordsRepository) GetByCollectionWithCursor(ctx context.Context, colle
 
 	if afterTimestamp == "" {
 		// No cursor - get first page, ordered by indexed_at DESC (newest first)
-		sqlStr = fmt.Sprintf("SELECT %s FROM record WHERE collection = %s ORDER BY indexed_at DESC, uri DESC LIMIT %d",
-			r.recordColumns(), r.db.Placeholder(1), limit)
+		sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.collection = %s ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
+			r.recordColumns(), r.recordTable(), r.db.Placeholder(1), limit)
 		args = []any{collection}
 	} else {
 		// With cursor - get records older than the cursor timestamp
 		// Using indexed_at < cursor for "load more" (older posts)
-		sqlStr = fmt.Sprintf("SELECT %s FROM record WHERE collection = %s AND indexed_at < %s ORDER BY indexed_at DESC, uri DESC LIMIT %d",
-			r.recordColumns(), r.db.Placeholder(1), r.db.Placeholder(2), limit)
+		sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.collection = %s AND r.indexed_at < %s ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
+			r.recordColumns(), r.recordTable(), r.db.Placeholder(1), r.db.Placeholder(2), limit)
 		args = []any{collection, afterTimestamp}
 	}
 
@@ -316,14 +334,14 @@ func (r *RecordsRepository) GetByCollectionWithKeysetCursor(ctx context.Context,
 
 	if afterTimestamp == "" && afterURI == "" {
 		// No cursor - get first page
-		sqlStr = fmt.Sprintf("SELECT %s FROM record WHERE collection = %s ORDER BY indexed_at DESC, uri DESC LIMIT %d",
-			r.recordColumns(), r.db.Placeholder(1), limit)
+		sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.collection = %s ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
+			r.recordColumns(), r.recordTable(), r.db.Placeholder(1), limit)
 		args = []any{collection}
 	} else {
 		// Keyset pagination: get records that sort after (afterTimestamp, afterURI)
 		// ORDER BY indexed_at DESC, uri DESC means "after" = less than
-		sqlStr = fmt.Sprintf("SELECT %s FROM record WHERE collection = %s AND (indexed_at < %s OR (indexed_at = %s AND uri < %s)) ORDER BY indexed_at DESC, uri DESC LIMIT %d",
-			r.recordColumns(), r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), limit)
+		sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.collection = %s AND (r.indexed_at < %s OR (r.indexed_at = %s AND r.uri < %s)) ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
+			r.recordColumns(), r.recordTable(), r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), limit)
 		args = []any{collection, afterTimestamp, afterTimestamp, afterURI}
 	}
 
@@ -372,9 +390,22 @@ const MaxSearchLength = 500
 // client bug or a signal that a different indexing strategy is needed.
 const MaxAuthorsFilterSize = 500
 
+// MaxPDSExcludeSize bounds the number of PDS endpoints in a single
+// excludePds filter. The set of distinct PDSes any client realistically
+// excludes is small (handful for "test PDSes," at most ~hundred for
+// compliance jurisdictions), and the SQL `IN (...)` clause grows linearly
+// with the cap. Setting this small keeps the query plan stable and
+// prevents the symmetrical Postgres-parameter-limit hazard that
+// MaxAuthorsFilterSize was added to address.
+const MaxPDSExcludeSize = 32
+
 // ErrAuthorsFilterTooLarge is returned by GetByCollectionFiltered when
 // RecordFilter.Authors exceeds MaxAuthorsFilterSize.
 var ErrAuthorsFilterTooLarge = errors.New("authors filter exceeds maximum size")
+
+// ErrPDSExcludeTooLarge is returned by GetByCollectionFiltered when
+// RecordFilter.PDSExclude exceeds MaxPDSExcludeSize.
+var ErrPDSExcludeTooLarge = errors.New("excludePds filter exceeds maximum size")
 
 // RecordFilter composes the filter axes applied to a collection query.
 // Its zero value means "no filter applied" and behaves identically to
@@ -402,13 +433,20 @@ type RecordFilter struct {
 	// Search is the full-text search query applied against the record's
 	// search_vector tsvector column.
 	Search string
+
+	// PDSExclude drops records whose author's resolved PDS endpoint
+	// matches any of these strings. Records whose actor row has no
+	// resolved PDS (NULL) pass through — see the GraphQL field
+	// description for the best-effort semantic. Empty/nil means
+	// "no PDS exclusion."
+	PDSExclude []string
 }
 
 // IsEmpty reports whether the filter imposes no constraints. A nil
 // Authors slice means "no author filter"; an empty-but-non-nil Authors
 // slice means "match nothing" and does NOT count as empty.
 func (f RecordFilter) IsEmpty() bool {
-	return f.Authors == nil && f.Labels.IsEmpty() && f.Search == ""
+	return f.Authors == nil && f.Labels.IsEmpty() && f.Search == "" && len(f.PDSExclude) == 0
 }
 
 // GetByCollectionFiltered is the canonical filtered-records query path.
@@ -443,6 +481,11 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 		return nil, ErrAuthorsFilterTooLarge
 	}
 
+	// Enforce the PDS-list size cap before touching the DB.
+	if len(filter.PDSExclude) > MaxPDSExcludeSize {
+		return nil, ErrPDSExcludeTooLarge
+	}
+
 	// Dedup + sort author DIDs for a stable query plan and predictable
 	// binding order. slices.Compact only removes consecutive duplicates,
 	// so sort first. Work on a clone so we do not mutate the caller's
@@ -459,7 +502,7 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	// filter SQL when no constraints apply.
 	hasFieldFilters := filterGroup != nil && !filterGroup.IsEmpty()
 	hasCustomSort := sortOpt != nil && !sortOpt.IsDefault()
-	if filter.Labels.IsEmpty() && len(authors) == 0 && filter.Search == "" && !hasFieldFilters && !hasCustomSort {
+	if filter.Labels.IsEmpty() && len(authors) == 0 && filter.Search == "" && len(filter.PDSExclude) == 0 && !hasFieldFilters && !hasCustomSort {
 		return r.GetByCollectionWithKeysetCursor(ctx, collection, limit, afterSortValue, afterURI)
 	}
 
@@ -594,6 +637,30 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 		)`, verb, negFalse, nowLit, strings.Join(valPhs, ", "), srcClause, negTrue)
 	}
 
+	// excludePds: drop records whose author's PDS matches any of the
+	// supplied endpoints. Records whose actor row has no resolved PDS
+	// (NULL) pass through — see RecordFilter.PDSExclude doc and the
+	// GraphQL field description for the best-effort semantic.
+	//
+	// Defensive dedupe at the repo layer: the GraphQL parser already
+	// dedupes, but a direct repo caller (future internal job) could
+	// pass duplicates and waste planner work on identical placeholders.
+	if len(filter.PDSExclude) > 0 {
+		pdsList := filter.PDSExclude
+		if len(pdsList) > 1 {
+			pdsList = slices.Clone(pdsList)
+			sort.Strings(pdsList)
+			pdsList = slices.Compact(pdsList)
+		}
+		pdsPhs := make([]string, len(pdsList))
+		for i, pds := range pdsList {
+			pdsPhs[i] = ph()
+			args = append(args, pds)
+		}
+		whereClauses = append(whereClauses,
+			fmt.Sprintf("(a.pds IS NULL OR a.pds NOT IN (%s))", strings.Join(pdsPhs, ", ")))
+	}
+
 	// Include: EXISTS a non-negated label whose val matches one of the
 	// Include set (optionally restricted to LabelerSrcs).
 	if len(filter.Labels.Include) > 0 {
@@ -606,21 +673,10 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 		whereClauses = append(whereClauses, labelFilterSub(filter.Labels.Exclude, false))
 	}
 
-	// Build columns with "r." prefix.
-	cols := r.recordColumns()
-	prefixed := make([]string, 0, 8)
-	for _, c := range strings.Split(cols, ", ") {
-		c = strings.TrimSpace(c)
-		// Handle "json::text" and "indexed_at::text" Postgres casts.
-		if idx := strings.Index(c, "::"); idx > 0 {
-			name := c[:idx]
-			cast := c[idx:]
-			prefixed = append(prefixed, "r."+name+cast)
-		} else {
-			prefixed = append(prefixed, "r."+c)
-		}
-	}
-	selectCols := strings.Join(prefixed, ", ")
+	// recordColumns() already returns prefixed names (r.uri, …, a.pds).
+	// recordTable() supplies the matching FROM clause that joins actor
+	// onto record so a.pds is available for both selection and filtering.
+	selectCols := r.recordColumns()
 
 	uriDir := "DESC"
 	if sortDir == SortASC {
@@ -629,8 +685,9 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	orderBy := fmt.Sprintf("%s %s NULLS LAST, r.uri %s", sortExpr, sortDir, uriDir)
 
 	sqlStr := fmt.Sprintf(
-		"SELECT %s FROM record r WHERE %s ORDER BY %s LIMIT %d",
+		"SELECT %s FROM %s WHERE %s ORDER BY %s LIMIT %d",
 		selectCols,
+		r.recordTable(),
 		strings.Join(whereClauses, " AND "),
 		orderBy,
 		limit,
@@ -663,8 +720,8 @@ func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
 
 // GetByDID retrieves records for a specific DID (up to 10 000).
 func (r *RecordsRepository) GetByDID(ctx context.Context, did string) ([]*Record, error) {
-	sqlStr := fmt.Sprintf("SELECT %s FROM record WHERE did = %s ORDER BY indexed_at DESC LIMIT 10000",
-		r.recordColumns(), r.db.Placeholder(1))
+	sqlStr := fmt.Sprintf("SELECT %s FROM %s WHERE r.did = %s ORDER BY r.indexed_at DESC LIMIT 10000",
+		r.recordColumns(), r.recordTable(), r.db.Placeholder(1))
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, did)
 	if err != nil {
@@ -997,7 +1054,7 @@ func scanRecords(rows *sql.Rows) ([]*Record, error) {
 	for rows.Next() {
 		var rec Record
 		var indexedAtStr string
-		if err := rows.Scan(&rec.URI, &rec.CID, &rec.DID, &rec.Collection, &rec.JSON, &indexedAtStr, &rec.RKey); err != nil {
+		if err := rows.Scan(&rec.URI, &rec.CID, &rec.DID, &rec.Collection, &rec.JSON, &indexedAtStr, &rec.RKey, &rec.PDS); err != nil {
 			return nil, err
 		}
 		// Try various timestamp formats
@@ -1024,12 +1081,12 @@ func (r *RecordsRepository) IterateAll(ctx context.Context, batchSize int, fn fu
 		var params []database.Value
 
 		if lastURI == "" {
-			sqlStr = fmt.Sprintf("SELECT %s FROM record ORDER BY uri LIMIT %d",
-				r.recordColumns(), batchSize)
+			sqlStr = fmt.Sprintf("SELECT %s FROM %s ORDER BY r.uri LIMIT %d",
+				r.recordColumns(), r.recordTable(), batchSize)
 			params = nil
 		} else {
-			sqlStr = fmt.Sprintf("SELECT %s FROM record WHERE uri > %s ORDER BY uri LIMIT %d",
-				r.recordColumns(), r.db.Placeholder(1), batchSize)
+			sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.uri > %s ORDER BY r.uri LIMIT %d",
+				r.recordColumns(), r.recordTable(), r.db.Placeholder(1), batchSize)
 			params = []database.Value{database.Text(lastURI)}
 		}
 

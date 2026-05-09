@@ -291,6 +291,165 @@ func TestGetByCollectionFiltered_AuthorsWithLabelExclude(t *testing.T) {
 	}
 }
 
+// seedRecordsWithPDS sets up alice on a "test" PDS and bob on a "prod"
+// PDS, both publishing into col.a, and returns the test DB. Used by the
+// excludePds tests below to verify the JOIN-based filter.
+func seedRecordsWithPDS(t *testing.T) *testutil.TestDB {
+	t.Helper()
+	db := testutil.SetupTestDB(t)
+	ctx := context.Background()
+
+	if err := db.Actors.UpsertWithPDS(ctx, "did:plc:alice", "alice", "https://test.pds.example.com"); err != nil {
+		t.Fatalf("upsert alice: %v", err)
+	}
+	if err := db.Actors.UpsertWithPDS(ctx, "did:plc:bob", "bob", "https://prod.pds.example.com"); err != nil {
+		t.Fatalf("upsert bob: %v", err)
+	}
+	// carol has no actor row at all — she still publishes records, and
+	// those records should pass through the excludePds filter (NULL pds
+	// is the "unknown / not yet resolved" sentinel that the filter
+	// deliberately allows through).
+	for _, r := range []struct{ uri, cid, did string }{
+		{"at://did:plc:alice/col.a/r1", "cida1", "did:plc:alice"},
+		{"at://did:plc:alice/col.a/r2", "cida2", "did:plc:alice"},
+		{"at://did:plc:bob/col.a/r3", "cidb1", "did:plc:bob"},
+		{"at://did:plc:carol/col.a/r4", "cidc1", "did:plc:carol"},
+	} {
+		if _, err := db.Records.Insert(ctx, r.uri, r.cid, r.did, "col.a", `{"v":1}`); err != nil {
+			t.Fatalf("insert %s: %v", r.uri, err)
+		}
+	}
+	return db
+}
+
+func TestGetByCollectionFiltered_PDSExclude_NilFilter(t *testing.T) {
+	db := seedRecordsWithPDS(t)
+	ctx := context.Background()
+
+	got, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
+		repositories.RecordFilter{}, nil, nil)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(got) != 4 {
+		t.Errorf("expected 4 records (no filter), got %d", len(got))
+	}
+}
+
+func TestGetByCollectionFiltered_PDSExclude_DropsTestPDS(t *testing.T) {
+	db := seedRecordsWithPDS(t)
+	ctx := context.Background()
+
+	got, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
+		repositories.RecordFilter{
+			PDSExclude: []string{"https://test.pds.example.com"},
+		}, nil, nil)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	// alice (test pds) → 2 records dropped. bob (prod) + carol (no
+	// actor row, NULL pds) remain.
+	gotDIDs := map[string]int{}
+	for _, r := range got {
+		gotDIDs[r.DID]++
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 records (bob + carol), got %d: %+v", len(got), gotDIDs)
+	}
+	if gotDIDs["did:plc:alice"] != 0 {
+		t.Errorf("alice should have been excluded; got %d records", gotDIDs["did:plc:alice"])
+	}
+	if gotDIDs["did:plc:bob"] != 1 || gotDIDs["did:plc:carol"] != 1 {
+		t.Errorf("expected 1 bob + 1 carol, got %+v", gotDIDs)
+	}
+}
+
+func TestGetByCollectionFiltered_PDSExclude_NullPDSPassesThrough(t *testing.T) {
+	// Carol has no actor row — a.pds JOINs as NULL — which the filter
+	// SQL `(a.pds IS NULL OR a.pds NOT IN (...))` deliberately lets
+	// through. This is the documented best-effort semantic.
+	db := seedRecordsWithPDS(t)
+	ctx := context.Background()
+
+	got, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
+		repositories.RecordFilter{
+			PDSExclude: []string{"https://test.pds.example.com", "https://prod.pds.example.com"},
+		}, nil, nil)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 record (carol's NULL-pds record), got %d", len(got))
+	}
+	if got[0].DID != "did:plc:carol" {
+		t.Errorf("expected carol's record, got %s", got[0].URI)
+	}
+}
+
+func TestGetByCollectionFiltered_PDSExclude_MultipleEndpoints(t *testing.T) {
+	db := seedRecordsWithPDS(t)
+	ctx := context.Background()
+
+	got, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
+		repositories.RecordFilter{
+			PDSExclude: []string{
+				"https://test.pds.example.com",
+				"https://other.pds.example.com",
+			},
+		}, nil, nil)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	// alice on test pds dropped; bob (prod) + carol (NULL) remain.
+	if len(got) != 2 {
+		t.Errorf("expected 2 records, got %d", len(got))
+	}
+	for _, r := range got {
+		if r.DID == "did:plc:alice" {
+			t.Errorf("alice should be excluded but appeared: %s", r.URI)
+		}
+	}
+}
+
+func TestGetByCollectionFiltered_PopulatesPDSOnRecord(t *testing.T) {
+	// Records returned from any filtered query carry their author's PDS
+	// via the JOIN. This is what populates the GraphQL `pds` field.
+	db := seedRecordsWithPDS(t)
+	ctx := context.Background()
+
+	got, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
+		repositories.RecordFilter{Authors: []string{"did:plc:alice"}}, nil, nil)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 alice records, got %d", len(got))
+	}
+	for _, r := range got {
+		if r.PDS != "https://test.pds.example.com" {
+			t.Errorf("expected PDS populated from JOIN, got %q for %s", r.PDS, r.URI)
+		}
+	}
+}
+
+func TestGetByCollectionFiltered_PDSEmptyForActorWithoutRow(t *testing.T) {
+	// carol has records but no actor row → r.PDS should be "".
+	db := seedRecordsWithPDS(t)
+	ctx := context.Background()
+
+	got, err := db.Records.GetByCollectionFiltered(ctx, "col.a", 100, "", "",
+		repositories.RecordFilter{Authors: []string{"did:plc:carol"}}, nil, nil)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 carol record, got %d", len(got))
+	}
+	if got[0].PDS != "" {
+		t.Errorf("expected empty PDS for actor without row, got %q", got[0].PDS)
+	}
+}
+
 func TestGetByCollectionFiltered_AuthorsCaseSensitive(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	ctx := context.Background()

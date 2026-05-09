@@ -16,6 +16,7 @@ import (
 	"github.com/GainForest/hypergoat/internal/graphql/subscription"
 	"github.com/GainForest/hypergoat/internal/lexicon"
 	"github.com/GainForest/hypergoat/internal/metrics"
+	"github.com/GainForest/hypergoat/internal/oauth"
 )
 
 // Operation represents a record change operation.
@@ -75,6 +76,20 @@ type RecordProcessor struct {
 
 	// RecordHooks run after each record insert/update/delete. See RecordHook.
 	RecordHooks []RecordHook
+
+	// DIDCache, when non-nil, is consulted on each actor upsert to
+	// resolve the author's PDS service endpoint. The resolved PDS is
+	// persisted on the actor row so GraphQL queries can join on it
+	// (record.pds is a join attribute, not a per-record column).
+	//
+	// Resolution is best-effort: cache miss + transient failure logs
+	// a warning and persists the actor with no pds. The actor's pds
+	// is updated on the next ingestion event for that DID once the
+	// upstream is healthy again, or via the standalone backfill CLI.
+	// Singleflight inside DIDCache collapses concurrent resolves for
+	// the same DID, so a burst of records from a popular new DID
+	// makes one upstream call.
+	DIDCache *oauth.DIDCache
 }
 
 // ProcessRecord executes the core indexing pipeline for a single record event.
@@ -166,8 +181,12 @@ func (p *RecordProcessor) ProcessRecord(ctx context.Context, op ProcessOp) error
 
 	switch op.Operation {
 	case OpCreate, OpUpdate:
-		// Ensure actor exists.
-		if err := p.Actors.Upsert(ctx, op.DID, ""); err != nil {
+		// Ensure actor exists. Resolve PDS via the DID cache when one is
+		// configured; on miss/error we fall through with an empty pds and
+		// UpsertWithPDS preserves any previously-resolved value via
+		// COALESCE(EXCLUDED.pds, actor.pds).
+		pds := p.resolvePDS(op.DID)
+		if err := p.Actors.UpsertWithPDS(ctx, op.DID, "", pds); err != nil {
 			slog.Warn("Failed to ensure actor", "did", op.DID, "error", err)
 		}
 
@@ -241,6 +260,35 @@ func (p *RecordProcessor) ProcessRecord(ctx context.Context, op ProcessOp) error
 	}
 
 	return nil
+}
+
+// resolvePDS returns the author's PDS service endpoint via the DID cache,
+// or "" on cache miss / resolution failure. Logging is at warn level so
+// transient PLC outages surface in operator dashboards without spamming
+// at error severity. When the cache is nil (test setups, deliberate
+// disabling) the function is a no-op.
+func (p *RecordProcessor) resolvePDS(did string) string {
+	if p.DIDCache == nil {
+		return ""
+	}
+	doc, err := p.DIDCache.Get(did)
+	if err != nil {
+		slog.Warn("PDS resolution failed; actor will have empty pds",
+			"did", did, "error", err)
+		metrics.PDSResolveFailed()
+		return ""
+	}
+	pds := doc.GetPDSEndpoint()
+	if pds == "" {
+		// DID document had no AtprotoPersonalDataServer service entry —
+		// rare but valid. Surface as a debug log so it's visible without
+		// noise, and tag a metric so the rate is observable.
+		slog.Debug("DID document had no PDS endpoint", "did", did)
+		metrics.PDSResolveNoEndpoint()
+		return ""
+	}
+	metrics.PDSResolveOK()
+	return pds
 }
 
 // runHook invokes a RecordHook with panic recovery.
