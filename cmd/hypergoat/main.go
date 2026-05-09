@@ -100,6 +100,11 @@ type backgroundServices struct {
 
 	backfillCancel context.CancelFunc
 
+	// didCacheStop, when non-nil, halts the DIDCache cleanup goroutine
+	// started in startJetstream. Set by startJetstream when the
+	// processor is constructed; called from Stop on shutdown.
+	didCacheStop func()
+
 	// restartCh signals serve() to gracefully shut down and have main
 	// exit with a non-zero code so the orchestrator restarts the
 	// process. Used for issue #22 — a successful lexicon upload needs
@@ -124,6 +129,9 @@ func (bg *backgroundServices) Stop() {
 	}
 	if bg.tapCancel != nil {
 		bg.tapCancel()
+	}
+	if bg.didCacheStop != nil {
+		bg.didCacheStop()
 	}
 	// Snapshot labelers under the lock, then release before calling
 	// Stop() on each — Stop blocks on the consumer's final flush and
@@ -1033,6 +1041,22 @@ func startJetstream(
 		jsURL = jetstream.DefaultJetstreamURL
 	}
 
+	// Build a DID cache for actor PDS resolution. Singleflight-collapsed,
+	// 24h TTL — the same DID publishes many records, so cache hits
+	// dominate the steady state and the firehose is not bottlenecked
+	// on plc.directory latency. The cleanup goroutine sweeps stale
+	// entries hourly to bound memory in the long-tail-DID case.
+	didResolverOpts := []oauth.DIDResolverOption{}
+	if cfg.PLCDirectoryURL != "" {
+		didResolverOpts = append(didResolverOpts, oauth.WithPLCDirectoryURL(cfg.PLCDirectoryURL))
+	}
+	didCache := oauth.NewDIDCache(
+		oauth.WithCacheTTL(24*time.Hour),
+		oauth.WithResolver(oauth.NewDIDResolver(didResolverOpts...)),
+	)
+	stopDIDCacheCleanup := didCache.StartCleanupRoutine(time.Hour)
+	bg.didCacheStop = stopDIDCacheCleanup
+
 	// Build shared record processor for all consumers (Jetstream or Tap).
 	processor := &ingestion.RecordProcessor{
 		Records:   svc.records,
@@ -1041,6 +1065,7 @@ func startJetstream(
 		PubSub:    pubsub,
 		Validator: validator,
 		ValMode:   cfg.ValidationMode,
+		DIDCache:  didCache,
 	}
 
 	// Attach notifications hook if enabled.

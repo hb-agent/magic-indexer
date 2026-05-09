@@ -16,6 +16,11 @@ type Actor struct {
 	DID       string
 	Handle    string
 	IndexedAt time.Time
+	// PDS is the actor's Personal Data Server endpoint, resolved from the
+	// DID document. Empty string means "not yet resolved" — the upsert
+	// path is best-effort and may persist an actor row before resolution
+	// completes.
+	PDS string
 }
 
 // ActorsRepository handles actor persistence.
@@ -28,20 +33,33 @@ func NewActorsRepository(db database.Executor) *ActorsRepository {
 	return &ActorsRepository{db: db}
 }
 
-// Upsert inserts or updates an actor.
+// Upsert inserts or updates an actor without setting a PDS. Thin wrapper
+// over UpsertWithPDS for callers that have not yet resolved the actor's
+// PDS endpoint.
 func (r *ActorsRepository) Upsert(ctx context.Context, did, handle string) error {
+	return r.UpsertWithPDS(ctx, did, handle, "")
+}
+
+// UpsertWithPDS inserts or updates an actor, optionally setting their
+// PDS service endpoint. An empty pds is treated as "do not overwrite":
+// a previously-resolved value on the row is preserved via COALESCE so
+// transient resolution failures don't blank the field.
+func (r *ActorsRepository) UpsertWithPDS(ctx context.Context, did, handle, pds string) error {
 	p1 := r.db.Placeholder(1)
 	p2 := r.db.Placeholder(2)
+	p3 := r.db.Placeholder(3)
 
-	sqlStr := fmt.Sprintf(`INSERT INTO actor (did, handle, indexed_at)
-		VALUES (%s, %s, NOW())
+	sqlStr := fmt.Sprintf(`INSERT INTO actor (did, handle, pds, indexed_at)
+		VALUES (%s, %s, NULLIF(%s, ''), NOW())
 		ON CONFLICT(did) DO UPDATE SET
 			handle = EXCLUDED.handle,
-			indexed_at = NOW()`, p1, p2)
+			pds = COALESCE(EXCLUDED.pds, actor.pds),
+			indexed_at = NOW()`, p1, p2, p3)
 
 	_, err := r.db.Exec(ctx, sqlStr, []database.Value{
 		database.Text(did),
 		database.Text(handle),
+		database.Text(pds),
 	})
 	return err
 }
@@ -103,15 +121,34 @@ func (r *ActorsRepository) batchUpsertChunk(ctx context.Context, actors []ActorD
 	return err
 }
 
+// SetPDS updates only the pds column for an actor identified by DID.
+// Used by the standalone backfill CLI: a pure UPDATE avoids the
+// upsert path's side effects on handle (clobber) and indexed_at
+// (refreshed to NOW()), both of which would corrupt actor metadata
+// when the backfill runs against rows that ingestion is concurrently
+// writing. Returns nil with no row update if the actor doesn't exist
+// — the backfill treats that as a benign skip rather than a failure.
+func (r *ActorsRepository) SetPDS(ctx context.Context, did, pds string) error {
+	sqlStr := fmt.Sprintf(
+		"UPDATE actor SET pds = NULLIF(%s, '') WHERE did = %s",
+		r.db.Placeholder(1), r.db.Placeholder(2),
+	)
+	_, err := r.db.Exec(ctx, sqlStr, []database.Value{
+		database.Text(pds),
+		database.Text(did),
+	})
+	return err
+}
+
 // GetByDID retrieves an actor by their DID.
 func (r *ActorsRepository) GetByDID(ctx context.Context, did string) (*Actor, error) {
-	sqlStr := fmt.Sprintf("SELECT did, handle, indexed_at::text FROM actor WHERE did = %s",
+	sqlStr := fmt.Sprintf("SELECT did, handle, indexed_at::text, COALESCE(pds, '') FROM actor WHERE did = %s",
 		r.db.Placeholder(1))
 
 	var actor Actor
 	var indexedAtStr string
 	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(did)},
-		&actor.DID, &actor.Handle, &indexedAtStr)
+		&actor.DID, &actor.Handle, &indexedAtStr, &actor.PDS)
 	if err != nil {
 		return nil, err
 	}
@@ -122,13 +159,13 @@ func (r *ActorsRepository) GetByDID(ctx context.Context, did string) (*Actor, er
 
 // GetByHandle retrieves an actor by their handle.
 func (r *ActorsRepository) GetByHandle(ctx context.Context, handle string) (*Actor, error) {
-	sqlStr := fmt.Sprintf("SELECT did, handle, indexed_at::text FROM actor WHERE handle = %s",
+	sqlStr := fmt.Sprintf("SELECT did, handle, indexed_at::text, COALESCE(pds, '') FROM actor WHERE handle = %s",
 		r.db.Placeholder(1))
 
 	var actor Actor
 	var indexedAtStr string
 	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(handle)},
-		&actor.DID, &actor.Handle, &indexedAtStr)
+		&actor.DID, &actor.Handle, &indexedAtStr, &actor.PDS)
 	if err != nil {
 		return nil, err
 	}

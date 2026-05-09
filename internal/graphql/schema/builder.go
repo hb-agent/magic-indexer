@@ -341,6 +341,10 @@ var genericRecordType = graphql.NewObject(graphql.ObjectConfig{
 			Type:        graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(graphql.String))),
 			Description: "Active label values on this record from any ingested labeler. Always a list (possibly empty), never null.",
 		},
+		"pds": &graphql.Field{
+			Type:        graphql.String,
+			Description: "Service endpoint of the PDS hosting the author's DID. Null if not yet resolved.",
+		},
 	},
 })
 
@@ -386,6 +390,9 @@ func (b *Builder) buildQueryType() *graphql.Object {
 		},
 	}
 	for k, v := range query.LabelFilterArgs() {
+		genericRecordsArgs[k] = v
+	}
+	for k, v := range query.PDSFilterArgs() {
 		genericRecordsArgs[k] = v
 	}
 	genericRecordsArgs["search"] = &graphql.ArgumentConfig{
@@ -551,8 +558,12 @@ func (b *Builder) resolveRecordConnection(
 		return nil, fmt.Errorf("invalid authors argument: %w", err)
 	}
 	searchFilter := query.ParseSearchFilter(p.Args)
+	pdsExclude, err := query.ParsePDSExcludeFilter(p.Args)
+	if err != nil {
+		return nil, fmt.Errorf("invalid excludePds argument: %w", err)
+	}
 
-	filter := repositories.RecordFilter{Labels: labelFilter, Search: searchFilter}
+	filter := repositories.RecordFilter{Labels: labelFilter, Search: searchFilter, PDSExclude: pdsExclude}
 	if authorsFilter != nil {
 		filter.Authors = *authorsFilter
 		if len(*authorsFilter) == 0 {
@@ -619,6 +630,14 @@ func (b *Builder) resolveRecordConnection(
 
 		if nodeMap, ok := node.(map[string]interface{}); ok {
 			nodeMap["labels"] = labelsByURI[rec.URI]
+			// pds is nullable in the schema. Empty string means
+			// "actor row had no resolved pds" — surface as GraphQL
+			// null so clients can distinguish "unknown" from "set".
+			if rec.PDS != "" {
+				nodeMap["pds"] = rec.PDS
+			} else {
+				nodeMap["pds"] = nil
+			}
 		}
 
 		cursor := encodeCursorV2(sortField, rec.IndexedAt.Format("2006-01-02T15:04:05Z"), rec.URI)
@@ -847,6 +866,10 @@ func (b *Builder) createCollectionResolver(lexiconID string) graphql.FieldResolv
 				sanitized["cid"] = rec.CID
 				sanitized["did"] = rec.DID
 				sanitized["rkey"] = rec.RKey
+				// pds is set by resolveRecordConnection alongside
+				// labels (both come from a join, not the lexicon
+				// body). Leaving it unset here would shadow the
+				// later assignment with nil, so we don't touch it.
 				return sanitized, true
 			})
 	}
@@ -894,6 +917,11 @@ func (b *Builder) createSingleRecordResolver(lexiconID string) graphql.FieldReso
 		sanitized["cid"] = rec.CID
 		sanitized["did"] = rec.DID
 		sanitized["rkey"] = rec.RKey
+		if rec.PDS != "" {
+			sanitized["pds"] = rec.PDS
+		} else {
+			sanitized["pds"] = nil
+		}
 
 		// Attach labels from every ingested labeler (best-effort).
 		labelsByURI := loadLabelsByURI(p.Context, repos, nil, []*repositories.Record{rec})

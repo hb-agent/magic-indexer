@@ -634,3 +634,126 @@ func TestPublicGraphQL_LabelFilter(t *testing.T) {
 		t.Errorf("unexpected labels: %v", gotLabels)
 	}
 }
+
+// ========== Public GraphQL + excludePds End-to-End ==========
+
+// TestPublicGraphQL_ExcludePdsFilter verifies the full chain that the
+// excludePds GraphQL arg depends on: actor.pds is read via the
+// record→actor JOIN, the filter clause translates correctly to SQL,
+// and the resulting node carries the joined pds string for clients.
+// Also exercises the "actor row absent" pass-through case, which is
+// the documented best-effort semantic.
+func TestPublicGraphQL_ExcludePdsFilter(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	// Two actors on different PDSes; carol intentionally has no actor
+	// row so her records JOIN with NULL pds and pass through the
+	// filter — the documented best-effort behaviour.
+	if err := db.Actors.UpsertWithPDS(ctx, "did:plc:alice", "alice", "https://test.pds.example.com"); err != nil {
+		t.Fatalf("upsert alice: %v", err)
+	}
+	if err := db.Actors.UpsertWithPDS(ctx, "did:plc:bob", "bob", "https://prod.pds.example.com"); err != nil {
+		t.Fatalf("upsert bob: %v", err)
+	}
+	recs := []*repositories.Record{
+		{URI: "at://did:plc:alice/app.bsky.feed.post/1", CID: "cidA1", DID: "did:plc:alice", Collection: "app.bsky.feed.post", JSON: `{"text":"a"}`, RKey: "1"},
+		{URI: "at://did:plc:bob/app.bsky.feed.post/1", CID: "cidB1", DID: "did:plc:bob", Collection: "app.bsky.feed.post", JSON: `{"text":"b"}`, RKey: "1"},
+		{URI: "at://did:plc:carol/app.bsky.feed.post/1", CID: "cidC1", DID: "did:plc:carol", Collection: "app.bsky.feed.post", JSON: `{"text":"c"}`, RKey: "1"},
+	}
+	if err := db.Records.BatchInsert(ctx, recs); err != nil {
+		t.Fatalf("BatchInsert: %v", err)
+	}
+
+	registry := lexicon.NewRegistry()
+	repos := &resolver.Repositories{
+		Records:  db.Records,
+		Actors:   db.Actors,
+		Lexicons: db.Lexicons,
+		Labels:   repositories.NewLabelsRepository(db.Executor),
+	}
+	handler, err := hgraphql.NewHandler(registry, repos)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	schema := handler.Schema()
+	queryCtx := resolver.WithRepositories(ctx, repos)
+
+	// 1. Without excludePds: all 3 records returned, alice's includes pds.
+	query := `{
+		records(collection: "app.bsky.feed.post") {
+			edges { node { uri did pds } }
+		}
+	}`
+	result := executeQuery(schema, query, queryCtx)
+	if len(result.Errors) > 0 {
+		t.Fatalf("graphql errors: %v", result.Errors)
+	}
+	data := result.Data.(map[string]interface{})
+	rec := data["records"].(map[string]interface{})
+	edges := rec["edges"].([]interface{})
+	if len(edges) != 3 {
+		t.Fatalf("expected 3 records, got %d", len(edges))
+	}
+	pdsByDID := map[string]interface{}{}
+	for _, e := range edges {
+		n := e.(map[string]interface{})["node"].(map[string]interface{})
+		pdsByDID[n["did"].(string)] = n["pds"]
+	}
+	if got, want := pdsByDID["did:plc:alice"], "https://test.pds.example.com"; got != want {
+		t.Errorf("alice pds = %v, want %q", got, want)
+	}
+	if got, want := pdsByDID["did:plc:bob"], "https://prod.pds.example.com"; got != want {
+		t.Errorf("bob pds = %v, want %q", got, want)
+	}
+	if got := pdsByDID["did:plc:carol"]; got != nil {
+		t.Errorf("carol pds = %v, want nil (no actor row)", got)
+	}
+
+	// 2. excludePds drops alice; bob (prod) and carol (NULL) remain.
+	query2 := `{
+		records(collection: "app.bsky.feed.post", excludePds: ["https://test.pds.example.com"]) {
+			edges { node { did pds } }
+		}
+	}`
+	result = executeQuery(schema, query2, queryCtx)
+	if len(result.Errors) > 0 {
+		t.Fatalf("graphql errors: %v", result.Errors)
+	}
+	data = result.Data.(map[string]interface{})
+	edges = data["records"].(map[string]interface{})["edges"].([]interface{})
+	gotDIDs := map[string]bool{}
+	for _, e := range edges {
+		n := e.(map[string]interface{})["node"].(map[string]interface{})
+		gotDIDs[n["did"].(string)] = true
+	}
+	if len(gotDIDs) != 2 || gotDIDs["did:plc:alice"] {
+		t.Errorf("excludePds[test]: expected {bob, carol}, got %v", gotDIDs)
+	}
+	if !gotDIDs["did:plc:bob"] || !gotDIDs["did:plc:carol"] {
+		t.Errorf("excludePds[test]: missing expected DIDs, got %v", gotDIDs)
+	}
+
+	// 3. excludePds with both known PDSes: only carol (NULL pds) survives.
+	query3 := `{
+		records(collection: "app.bsky.feed.post", excludePds: [
+			"https://test.pds.example.com",
+			"https://prod.pds.example.com"
+		]) {
+			edges { node { did } }
+		}
+	}`
+	result = executeQuery(schema, query3, queryCtx)
+	if len(result.Errors) > 0 {
+		t.Fatalf("graphql errors: %v", result.Errors)
+	}
+	data = result.Data.(map[string]interface{})
+	edges = data["records"].(map[string]interface{})["edges"].([]interface{})
+	if len(edges) != 1 {
+		t.Fatalf("expected only carol, got %d records", len(edges))
+	}
+	carolNode := edges[0].(map[string]interface{})["node"].(map[string]interface{})
+	if carolNode["did"].(string) != "did:plc:carol" {
+		t.Errorf("expected carol, got %v", carolNode["did"])
+	}
+}

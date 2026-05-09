@@ -24,6 +24,7 @@ var ReservedRecordFields = map[string]bool{
 	"did":    true,
 	"rkey":   true,
 	"labels": true,
+	"pds":    true,
 }
 
 // maxResolveDepth bounds how deep the field-building walker will
@@ -124,12 +125,13 @@ func (b *ObjectBuilder) buildFields(contextRef string, def *lexicon.ObjectDef) g
 }
 
 // buildRecordFields builds GraphQL fields from RecordDef properties.
-// The synthesised metadata fields (uri, cid, did, rkey, labels) are
-// always present on every record type with their canonical Go types.
-// Any lexicon property whose name collides with one of those fields
-// is skipped with a warning — the alternative of letting a lexicon
-// author shadow a type-critical field like `uri` leads to subtle
-// schema mismatches that are harder to debug than a startup warning.
+// The synthesised metadata fields (uri, cid, did, rkey, labels, pds)
+// are always present on every record type with their canonical Go
+// types. Any lexicon property whose name collides with one of those
+// fields is skipped with a warning — the alternative of letting a
+// lexicon author shadow a type-critical field like `uri` leads to
+// subtle schema mismatches that are harder to debug than a startup
+// warning.
 func (b *ObjectBuilder) buildRecordFields(lexiconID string, def *lexicon.RecordDef) graphql.Fields {
 	fields := graphql.Fields{
 		"uri": &graphql.Field{
@@ -151,6 +153,10 @@ func (b *ObjectBuilder) buildRecordFields(lexiconID string, def *lexicon.RecordD
 		"labels": &graphql.Field{
 			Type:        graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(graphql.String))),
 			Description: "Active label values on this record from any ingested labeler. Always a list (possibly empty), never null.",
+		},
+		"pds": &graphql.Field{
+			Type:        graphql.String,
+			Description: "Service endpoint of the PDS hosting the author's DID, resolved from the DID document. Null if the author's PDS has not yet been resolved (e.g. backfill in progress, or transient resolver failure). Use this to identify records authored from a particular PDS — for example, to flag test-PDS content in the UI when consumers opt into seeing it via excludePds being absent. NOTE: GraphQL subscription record events do not populate this field (it is always null on the *Events streams), since the record's actor row may not yet exist when the subscription fan-out fires; query the connection field on a follow-up read to obtain the resolved PDS.",
 		},
 	}
 

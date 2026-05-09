@@ -1,5 +1,41 @@
 # Changelog
 
+## 2026-05-09 — feat: server-side excludePds filter and pds field on every record
+
+Adds a server-side filter that lets GraphQL clients exclude records authored from specific PDSes — primarily intended for hiding test-PDS content from public feeds (see consumer issue: hb-agent/maearth-social#10). Also exposes the resolved PDS endpoint as a new `pds: String` field on every record's GraphQL node so clients can render badges or branch logic on it.
+
+### Schema changes
+- New `excludePds: [String!]` arg on every record connection (`PDSFilterArgs` in `internal/graphql/query/connection.go`, composed into `ConnectionArgs`). Capped at `MaxPDSExcludeSize=32` endpoints per query.
+- New `pds: String` field added to `ReservedRecordFields` and `buildRecordFields` (`internal/graphql/types/object.go`). Nullable: null means "PDS not yet resolved for this author."
+- Filter semantic is best-effort: records whose author has no resolved PDS (NULL on `actor.pds`) pass through. Documented on the field description; consumers that need guaranteed exclusion should use the existing labeler-based `excludeLabels`.
+- The generic `recordEvents` subscription stream does NOT populate `pds` — at insertion time the actor row may not yet exist. Field description calls this out.
+
+### Data model
+- Migration 019: `ALTER TABLE actor ADD COLUMN pds TEXT` (transactional, metadata-only on Postgres).
+- Migration 020: `CREATE INDEX CONCURRENTLY idx_actor_pds ON actor(pds) WHERE pds IS NOT NULL` (non-transactional, via the existing `-- no-transaction` sentinel).
+- Records are unchanged. The records query gets a `LEFT JOIN actor a ON r.did = a.did` and projects `COALESCE(a.pds, '')` into `Record.PDS` for every read path. Cardinality justifies this: PDS is a per-actor attribute (~thousands of rows), not a per-record one (~millions).
+
+### Ingestion
+- `RecordProcessor.DIDCache` field reuses the existing `oauth.DIDCache` (singleflight + TTL + cleanup goroutine in `internal/oauth/did_cache.go`). 24h TTL, 1h cleanup ticker, wired in `cmd/hypergoat/main.go` startJetstream.
+- `Actors.UpsertWithPDS(ctx, did, handle, pds)` replaces `Upsert` on the ingestion path. `Upsert` is kept as a thin wrapper (no behaviour change for callers that don't pass a pds). On conflict, pds uses `COALESCE(EXCLUDED.pds, actor.pds)` so transient resolver failures don't blank a previously-resolved value.
+- Resolution is best-effort: cache miss + transient failure logs at warn and persists the actor with empty pds. Singleflight collapses bursts of records from the same DID into one upstream call.
+
+### Backfill
+- New `cmd/backfill_pds` CLI: scans actors with NULL/empty pds, resolves each via the same `oauth.DIDCache`, writes via the new pure-UPDATE `Actors.SetPDS` (does not touch `handle` or `indexed_at`). Defaults: 8 workers, 10 req/s rate-limited, `--force` to re-resolve regardless. Idempotent and safe to interrupt.
+
+### Metrics
+- New counter `hypergoat_pds_resolve_total{outcome}` with labels `ok`, `failed`, `no_endpoint`.
+
+### Tests
+- Repo unit: `actors_test.go` covers `UpsertWithPDS` (set, COALESCE preserve, non-empty overwrite), `SetPDS` (UPDATE-only, indexed_at preserved, missing-actor noop). `records_filter_test.go` covers the JOIN behaviour, NULL-pds pass-through, multi-endpoint exclusion, and that the `pds` is populated on the returned `Record`.
+- Schema: `builder_test.go` pins that the `pds` field exists on every record type and `excludePds` arg appears on per-collection and generic-records connections.
+- GraphQL parse: `connection_test.go` covers `ParsePDSExcludeFilter` (nil/null/empty handling, dedupe with first-occurrence preservation).
+- Ingestion: `processor_test.go` covers `resolvePDS` (nil cache → empty, cache hit → endpoint, labeler-only DID → empty).
+- Integration: `TestPublicGraphQL_ExcludePdsFilter` exercises the full ingest-to-query path through the real GraphQL handler.
+
+### Backwards compatibility
+- Purely additive: existing GraphQL clients see no schema break. Pre-existing `Actors.Upsert(ctx, did, handle)` calls continue to work unchanged.
+
 ## 2026-04-14 — Fix: notifications aggregated upsert fails with SQLSTATE 42P10 (#61)
 
 The aggregated-envelope upsert in `internal/notifications/repo.go` omitted the partial-index predicate on `ON CONFLICT`, so every call failed with Postgres error 42P10 (`invalid_column_reference`). No notifications were ever persisted, and `/notifications/graphql` always returned an empty feed.

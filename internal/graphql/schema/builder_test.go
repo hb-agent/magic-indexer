@@ -193,6 +193,123 @@ func TestActivityClaimType(t *testing.T) {
 	}
 }
 
+func TestRecordType_HasPDSField(t *testing.T) {
+	// pds is a "reserved" record metadata field — like uri, cid, did,
+	// rkey, labels — synthesised on every record type regardless of
+	// the lexicon definition. This test pins that contract: removing
+	// pds from buildRecordFields would silently break every consumer
+	// querying the field.
+	data, err := os.ReadFile("../../../testdata/lexicons/org/hypercerts/claim/activity.json")
+	if err != nil {
+		t.Fatalf("read activity.json: %v", err)
+	}
+	lex, err := lexicon.ParseBytes(data)
+	if err != nil {
+		t.Fatalf("parse activity.json: %v", err)
+	}
+	registry := lexicon.NewRegistry()
+	registry.Register(lex)
+	for _, p := range []string{
+		"../../../testdata/lexicons/org/hypercerts/defs.json",
+		"../../../testdata/lexicons/com/atproto/repo/strongRef.json",
+	} {
+		if d, err := os.ReadFile(p); err == nil {
+			if l, err := lexicon.ParseBytes(d); err == nil {
+				registry.Register(l)
+			}
+		}
+	}
+
+	builder := NewBuilder(registry)
+	if _, err := builder.Build(); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	recordType := builder.GetRecordType("org.hypercerts.claim.activity")
+	if recordType == nil {
+		t.Fatal("activity record type not built")
+	}
+	field, ok := recordType.Fields()["pds"]
+	if !ok {
+		t.Fatal("expected 'pds' field on record type, not found")
+	}
+	// Nullable String — clients rely on null meaning "not yet resolved".
+	if field.Type.String() != "String" {
+		t.Errorf("expected pds type to be nullable String, got %s", field.Type.String())
+	}
+}
+
+func TestConnection_HasExcludePdsArg(t *testing.T) {
+	// excludePds is wired globally via PDSFilterArgs() in
+	// ConnectionArgs(), so every record connection should carry the
+	// arg. Pin that contract on the activity connection field.
+	data, err := os.ReadFile("../../../testdata/lexicons/org/hypercerts/claim/activity.json")
+	if err != nil {
+		t.Fatalf("read activity.json: %v", err)
+	}
+	lex, err := lexicon.ParseBytes(data)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	registry := lexicon.NewRegistry()
+	registry.Register(lex)
+	for _, p := range []string{
+		"../../../testdata/lexicons/org/hypercerts/defs.json",
+		"../../../testdata/lexicons/com/atproto/repo/strongRef.json",
+	} {
+		if d, err := os.ReadFile(p); err == nil {
+			if l, err := lexicon.ParseBytes(d); err == nil {
+				registry.Register(l)
+			}
+		}
+	}
+
+	builder := NewBuilder(registry)
+	schema, err := builder.Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	queryFields := schema.QueryType().Fields()
+	field, ok := queryFields["orgHypercertsClaimActivity"]
+	if !ok {
+		t.Fatal("expected orgHypercertsClaimActivity query field; not found")
+	}
+	var foundExcludePds bool
+	for _, arg := range field.Args {
+		if arg.Name() == "excludePds" {
+			foundExcludePds = true
+			// Type should be [String!] (nullable list of non-null strings).
+			if arg.Type.String() != "[String!]" {
+				t.Errorf("excludePds type = %s, want [String!]", arg.Type.String())
+			}
+			break
+		}
+	}
+	if !foundExcludePds {
+		args := make([]string, 0, len(field.Args))
+		for _, a := range field.Args {
+			args = append(args, a.Name())
+		}
+		t.Errorf("expected excludePds arg on connection, got args: %v", args)
+	}
+
+	// Generic records query should also have the arg.
+	genericField, ok := queryFields["records"]
+	if !ok {
+		t.Fatal("expected generic 'records' query field; not found")
+	}
+	foundExcludePds = false
+	for _, arg := range genericField.Args {
+		if arg.Name() == "excludePds" {
+			foundExcludePds = true
+			break
+		}
+	}
+	if !foundExcludePds {
+		t.Error("expected excludePds arg on generic records query")
+	}
+}
+
 func TestUnionTypes(t *testing.T) {
 	// Load lexicons
 	activityData, _ := os.ReadFile("../../../testdata/lexicons/org/hypercerts/claim/activity.json")
