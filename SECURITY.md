@@ -16,7 +16,7 @@ first is missing; the rest are validated inside `config.Validate()`.
 | `SECRET_KEY_BASE` | Session / cookie signing key | ≥64 bytes. Generate with `openssl rand -base64 64`. The literal `development-secret-key-change-in-production-64chars` placeholder is rejected by Validate at startup. |
 | `DATABASE_URL` | `sqlite:/path/…` or `postgres://…` | Validate the URL does not enable `sslmode=disable` in production. |
 | `ADMIN_API_KEY` | Bearer token for `/admin/*` | Required for any admin access. Paired with `X-User-DID` header for audit. |
-| `ADMIN_DIDS` | Comma-separated admin DIDs | Every entry is validated as a valid DID shape by `UpdateSettings`. |
+| `ADMIN_DIDS` | Comma-separated admin DIDs | Every entry is validated against the canonical strict `internal/atproto/did.IsValid` predicate — the only DID input-validation gate in the codebase. The earlier prefix-only `oauth.HasDIDMethodPrefix` was removed in this PR; the strict predicate now guards every input path (admin endpoints, labeler reset/pause, service-auth JWT issuer, audit headers). |
 | `EXTERNAL_BASE_URL` | Public-facing `https://…` URL | HSTS is only emitted when this starts with `https://`. |
 | `ALLOWED_ORIGINS` | CORS allow-list | Do **not** leave unset in production — the default "allow all" is for local dev only. |
 | `LABELER_DIDS` | Comma-separated labeler DIDs | Empty disables labeler ingestion. |

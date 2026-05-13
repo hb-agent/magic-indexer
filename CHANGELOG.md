@@ -1,5 +1,123 @@
 # Changelog
 
+## Unreleased — feat: contributor filter on activity records + notifications fix
+
+Adds a server-side GraphQL filter `contributor: DIDFilterInput` on
+`OrgHypercertsClaimActivityWhereInput` so consumers (primarily
+`certified.app`'s profile page) can list every activity a user has
+been named on as a contributor in a paginated query — issue #64.
+The filter is **DID-only**: handle values are rejected at the GraphQL
+layer with an actionable error. Records whose contributor identity is
+a handle do not match — handle storage is a producer-side concern,
+not indexed as a queryable identity. Compose with the existing `did`
+filter via `_or` for "authored OR contributed" in a single query.
+
+### Schema changes
+
+- New field `contributor: DIDFilterInput` on the activity WhereInput
+  only (`internal/graphql/schema/where.go:wantsContributorFilter`
+  gates the inclusion; absence asserted on `app.certified.badge.award`).
+- Field exposes `eq` and `in` (via the existing `DIDFilterInput`). No
+  other operators are introduced; non-DID values are rejected at the
+  resolver before SQL is built.
+
+### Data model
+
+- No migrations, no new tables. The filter rides the existing
+  `(collection, indexed_at DESC, uri DESC)` keyset index. The
+  `idx_record_json_gin` GIN index does not assist this filter (its
+  `jsonb_path_ops` opclass supports `@>` etc., not the EXISTS-over-
+  `jsonb_array_elements` shape the filter uses).
+
+### SQL
+
+- New `FieldFilter.IsArrayContributor` marker; when set,
+  `buildSingleFilter` emits a guarded EXISTS subquery over
+  `json->'contributors'` that COALESCEs the two contributor-identity
+  shapes (bare string and `{$type,identity}` object) so both match.
+- The whole shape is wrapped in `CASE WHEN <guards> THEN EXISTS(...)
+  ELSE FALSE END` because Postgres does not guarantee left-to-right
+  AND evaluation in WHERE; CASE is the documented escape hatch for
+  forcing the guards to fire before the set-returning function.
+  Two cheap guards: `jsonb_typeof = 'array'` (so a pathological
+  record with a non-array `contributors` does not raise and brick
+  all queries) and `jsonb_array_length <= 200` (caps per-row scan
+  cost; oversized records are fail-safe invisible to the filter).
+  `MaxArrayContributorScan` mirrors the existing
+  `notifications.MaxContributorsBeforeReject`.
+
+### Input validation
+
+- Introduces `internal/atproto/did/IsValid` as the canonical input-
+  validation DID predicate. Strict: lowercase method prefix
+  required (`did:[a-z]+:`), no leading/trailing whitespace, length
+  [8, 256], charset `[A-Za-z0-9:._-]`. Filter values are validated
+  before reaching the SQL layer; an invalid value yields a clear
+  GraphQL error including the rejected entry. Empty `in: []`
+  lists are also rejected with a clear error rather than silently
+  matching zero rows.
+- The pre-existing `oauth.IsValidDID` prefix-only check is
+  **removed**. The round-1 plan renamed it to
+  `oauth.HasDIDMethodPrefix`; round-2 review discovered that all
+  five remaining callers (labeler reset/pause endpoints,
+  `UpdateSettings` admin DIDs, service-auth JWT `iss` claim,
+  audit `X-User-DID` header) were vulnerable to specific attacks
+  (config-key namespace escape via `/../`, log injection via
+  newlines, URL injection via `?` flowing into the PLC resolver).
+  All five call sites now use the strict `did.IsValid`; the weak
+  helper and its test are deleted.
+
+### Notifications extractor fix (folded into this release)
+
+- `extractContributorDID` now reads the production object shape
+  (`{$type, identity}`) in addition to the lexicon-compliant bare
+  string. Before this fix, `ReasonActivityContributor` notifications
+  were silently dropped for every record `certified.app` wrote.
+  Released as a separate commit so a partial revert is possible.
+
+### Metrics
+
+- New `hypergoat_contributor_identity_total{outcome}` counter,
+  incremented per contributor at ingest. Outcomes: `did` (resolved
+  to a valid DID), `non_did` (string read but failed validation —
+  typically a handle), `unrecognized_shape` (no string read — covers
+  strong-refs and other drift). Mirrors the `pds_resolve_total`
+  shape. A rising `non_did` trend nudges producers; a rising
+  `unrecognized_shape` trend signals strong-refs entering production.
+
+### Follow-up issues filed alongside this PR
+
+- Ingest-time hard cap on `contributors` array length (the SQL
+  bound is the query-side defence; record persistence is unbounded
+  today).
+- Per-query `statement_timeout` on the public GraphQL endpoint.
+- Strong-ref variant support, gated on the
+  `unrecognized_shape` metric trending up.
+
+### Metrics — outcome classification refinement (round-2)
+
+`contributor_identity_total{outcome}` classification was tightened
+to match the plan's intent. Empty bare-string contributor
+identities are now bucketed as `non_did` (a string, just not a
+valid DID) instead of `unrecognized_shape`. `unrecognized_shape`
+is reserved for genuinely non-string-shaped values (objects
+without `.identity`, arrays, numbers, malformed JSON) so a rising
+trend cleanly signals strong-refs entering production.
+
+### Process
+
+- Implemented under the deep-flow process (see `AGENTS.md`).
+- Plan + 5-reviewer round-1 (schema, SQL, security, performance,
+  ergonomics) at `docs/issue-64/`. One Critical (unbounded
+  contributors-array DoS surface) plus 18 Major findings accepted
+  and folded into the plan + implementation.
+- Implementation + 3-reviewer round-2 (plan-fidelity, security+SQL,
+  code-quality). Two more material Majors surfaced and fixed:
+  Postgres WHERE-clause AND ordering is not guaranteed (now using
+  CASE WHEN wrapper), and the rename of the weak oauth helper
+  still left five attack-surface callers — now all migrated to the
+  strict predicate and the weak helper deleted.
+
 ## 2026-05-09 — feat: server-side excludePds filter and pds field on every record
 
 Adds a server-side filter that lets GraphQL clients exclude records authored from specific PDSes — primarily intended for hiding test-PDS content from public feeds (see consumer issue: hb-agent/maearth-social#10). Also exposes the resolved PDS endpoint as a new `pds: String` field on every record's GraphQL node so clients can render badges or branch logic on it.

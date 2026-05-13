@@ -182,3 +182,74 @@ func TestActivityContributorNotifier_MalformedJSON(t *testing.T) {
 		t.Error("expected error for malformed JSON")
 	}
 }
+
+// TestActivityContributorNotifier_ObjectShapeContributorIdentity is a
+// regression test for the bug where the extractor silently dropped
+// contributors whose contributorIdentity was the production object
+// shape (certified.app writes `{"$type": "...", "identity": "did:..."}`
+// instead of the lexicon-compliant bare string). Before the fix in
+// shared.go, this record produced zero notifications. After the fix,
+// it produces one notification per object-shape DID contributor.
+func TestActivityContributorNotifier_ObjectShapeContributorIdentity(t *testing.T) {
+	n := NewActivityContributorNotifier()
+	rec := json.RawMessage(`{
+		"createdAt": "2026-01-01T12:00:00Z",
+		"contributors": [
+			{"contributorIdentity": {"$type":"org.hypercerts.claim.activity#contributorIdentity","identity":"did:plc:objalice"}},
+			{"contributorIdentity": {"$type":"org.hypercerts.claim.activity#contributorIdentity","identity":"did:plc:objbob"}}
+		]
+	}`)
+	notifs, err := n.Extract(context.Background(), ingestion.ProcessOp{
+		DID:        "did:plc:author",
+		URI:        "at://did:plc:author/org.hypercerts.claim.activity/objshape",
+		CID:        "bafy",
+		Collection: "org.hypercerts.claim.activity",
+		Operation:  ingestion.OpCreate,
+		Record:     rec,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(notifs) != 2 {
+		t.Fatalf("expected 2 notifications for object-shape contributors, got %d", len(notifs))
+	}
+	got := map[string]bool{notifs[0].Recipient: true, notifs[1].Recipient: true}
+	for _, want := range []string{"did:plc:objalice", "did:plc:objbob"} {
+		if !got[want] {
+			t.Errorf("missing recipient %s in %v", want, got)
+		}
+	}
+}
+
+// TestActivityContributorNotifier_HandleShapeIgnored confirms the
+// DID-only policy: a contributorIdentity whose value is a handle
+// (whether bare or wrapped in the object shape) yields no
+// notification.
+func TestActivityContributorNotifier_HandleShapeIgnored(t *testing.T) {
+	n := NewActivityContributorNotifier()
+	rec := json.RawMessage(`{
+		"createdAt": "2026-01-01T12:00:00Z",
+		"contributors": [
+			{"contributorIdentity": "alice.example.com"},
+			{"contributorIdentity": {"$type":"org.hypercerts.claim.activity#contributorIdentity","identity":"bob.example.com"}},
+			{"contributorIdentity": "did:plc:realdid"}
+		]
+	}`)
+	notifs, err := n.Extract(context.Background(), ingestion.ProcessOp{
+		DID:        "did:plc:author",
+		URI:        "at://did:plc:author/org.hypercerts.claim.activity/policytest",
+		CID:        "bafy",
+		Collection: "org.hypercerts.claim.activity",
+		Operation:  ingestion.OpCreate,
+		Record:     rec,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(notifs) != 1 {
+		t.Fatalf("expected exactly 1 notification (the DID-shaped entry), got %d", len(notifs))
+	}
+	if notifs[0].Recipient != "did:plc:realdid" {
+		t.Errorf("unexpected recipient: %s", notifs[0].Recipient)
+	}
+}

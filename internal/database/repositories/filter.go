@@ -39,7 +39,23 @@ type FieldFilter struct {
 	// LexiconType is the lexicon property type ("string", "integer", etc.)
 	// used for SQL CAST decisions.
 	LexiconType string
+	// IsArrayContributor, when true, signals the special EXISTS-over-
+	// `json->'contributors'` SQL shape used by the
+	// `OrgHypercertsClaimActivityWhereInput.contributor` filter.
+	// FieldName is informational only on this path; the SQL hardcodes
+	// the JSON path. The marker is intentionally narrow — if a second
+	// collection adopts the same array-of-objects-with-identity shape,
+	// rename to a Kind enum at that time.
+	IsArrayContributor bool
 }
+
+// MaxArrayContributorScan caps the per-row scan of the contributors
+// array inside the contributor-filter EXISTS subquery. A record with
+// a contributors array longer than this becomes invisible to the
+// filter (fail-safe semantics). Mirrors
+// notifications.MaxContributorsBeforeReject so a record the
+// notifications layer rejects also fails to match the filter.
+const MaxArrayContributorScan = 200
 
 const (
 	// MaxFilterConditions is the maximum number of filter conditions per query.
@@ -339,6 +355,10 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 		return "", nil, paramIdx, err
 	}
 
+	if f.IsArrayContributor {
+		return buildContributorFilter(f, paramIdx)
+	}
+
 	switch f.Operator {
 	case OpEq:
 		if f.IsJSON {
@@ -354,7 +374,7 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 			return clause, []interface{}{string(jsonBytes)}, paramIdx + 1, nil
 		}
 		param := fmt.Sprintf("$%d", paramIdx)
-		return fmt.Sprintf("%s = %s", f.FieldName, param), []interface{}{f.Value}, paramIdx + 1, nil
+		return fmt.Sprintf("%s = %s", qualifyColumn(f.FieldName), param), []interface{}{f.Value}, paramIdx + 1, nil
 
 	case OpNeq:
 		expr := jsonExtract(f.FieldName, f.IsJSON)
@@ -402,9 +422,17 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 }
 
 // jsonExtract returns the SQL expression for extracting a JSON field as text.
+//
+// Column-level (non-JSON) field references are qualified with the
+// `r.` alias because `GetByCollectionFiltered` LEFT JOINs `actor`,
+// and the `did` column exists on both `record` and `actor`. Without
+// qualification, Postgres raises `column reference "did" is
+// ambiguous (SQLSTATE 42702)`. The only column-level field today is
+// `did`; adding more would require either a per-field qualification
+// map or assuming every column lives on `r`. Keeping it explicit.
 func jsonExtract(fieldName string, isJSON bool) string {
 	if !isJSON {
-		return fieldName
+		return qualifyColumn(fieldName)
 	}
 	parts := strings.Split(fieldName, "__")
 	if len(parts) == 1 {
@@ -457,6 +485,54 @@ func sqlOp(op FilterOperator) string {
 		return "<="
 	default:
 		return "="
+	}
+}
+
+// qualifyColumn prefixes a column-level field reference with the
+// `r.` alias used by `GetByCollectionFiltered`'s FROM clause. See
+// jsonExtract for the disambiguation rationale.
+func qualifyColumn(name string) string {
+	return "r." + name
+}
+
+// buildContributorFilter emits the special EXISTS-over-
+// `json->'contributors'` clause for the activity-contributor filter.
+//
+// The clause is wrapped in a CASE expression because Postgres does
+// not guarantee left-to-right evaluation of AND operands in WHERE.
+// Without CASE, the planner is free to invoke jsonb_array_length or
+// jsonb_array_elements before the jsonb_typeof guard — both raise
+// on a non-array operand, so a single stored record whose
+// `contributors` is mis-shaped would brick every filtered query.
+// CASE is the documented escape hatch for forcing evaluation order
+// (https://www.postgresql.org/docs/current/sql-expressions.html).
+//
+// COALESCE-of-both-shapes lets the same SQL match contributor
+// identities written either as a bare string (lexicon-compliant)
+// or as the production-drift object shape
+// {"$type":"...","identity":"<DID>"}.
+func buildContributorFilter(f FieldFilter, paramIdx int) (string, []interface{}, int, error) {
+	// CASE-per-element to disambiguate the contributor-identity union.
+	// `c->>'contributorIdentity'` on a JSON object returns the object's
+	// JSON-text serialisation rather than NULL, which would defeat a
+	// COALESCE between the two shapes. jsonb_typeof gates the access
+	// so we only read each shape when the data actually matches.
+	const candidateExpr = `CASE jsonb_typeof(c->'contributorIdentity') WHEN 'string' THEN c->>'contributorIdentity' WHEN 'object' THEN c->'contributorIdentity'->>'identity' END`
+	tmplEq := `(CASE WHEN jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d THEN EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE (` + candidateExpr + `) = %s) ELSE FALSE END)`
+	tmplIn := `(CASE WHEN jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d THEN EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE (` + candidateExpr + `) = ANY(%s::text[])) ELSE FALSE END)`
+
+	switch f.Operator {
+	case OpEq:
+		param := fmt.Sprintf("$%d", paramIdx)
+		clause := fmt.Sprintf(tmplEq, MaxArrayContributorScan, param)
+		return clause, []interface{}{f.Value}, paramIdx + 1, nil
+	case OpIn:
+		param := fmt.Sprintf("$%d", paramIdx)
+		values, _ := extractInValues(f.Value)
+		clause := fmt.Sprintf(tmplIn, MaxArrayContributorScan, param)
+		return clause, []interface{}{values}, paramIdx + 1, nil
+	default:
+		return "", nil, paramIdx, fmt.Errorf("operator %s not supported on contributor filter", f.Operator)
 	}
 }
 

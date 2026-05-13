@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/GainForest/hypergoat/internal/atproto"
+	didpkg "github.com/GainForest/hypergoat/internal/atproto/did"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/lexicon"
 	"github.com/GainForest/hypergoat/internal/oauth"
@@ -1115,7 +1116,7 @@ func (r *Resolver) UpdateSettings(ctx context.Context, domainAuthority, adminDid
 			if d == "" {
 				continue
 			}
-			if !oauth.IsValidDID(d) {
+			if !didpkg.IsValid(d) {
 				return nil, fmt.Errorf("invalid admin DID: %q", d)
 			}
 		}

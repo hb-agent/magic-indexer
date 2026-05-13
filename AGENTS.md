@@ -162,6 +162,113 @@ touches state.
 
 ---
 
+## Deep flow — process for substantial features
+
+**Reference**: when the operator says "do this with the deep flow"
+(or "deep-flow this issue", "use the deep flow"), apply the
+process below. It is the default for any change beyond a
+one-line fix, typo, dep bump, copy/string edit, or doc tweak.
+For those mechanical changes, skip this and commit directly to
+`staging`.
+
+The operator sets a high bar on **security, code quality, and
+performance**. The number of reviewers, the kinds of lenses,
+and the number of rounds are **your judgement** — calibrated to
+that bar, not to a formula. Diminishing returns set in fast;
+stop when the next pass would be nit-picking.
+
+### Branching (project-specific override)
+
+Work happens **directly on `staging`**, not on per-feature
+branches. When `staging` is in good shape, open a Draft PR
+from `staging` into `main`. The operator merges; agents never
+merge.
+
+This overrides the global "feature-branch into staging"
+default in `~/.claude/CLAUDE.md`. This repo's review cadence
+is dense enough that `staging` is the natural integration
+point.
+
+### Order of operations
+
+1. **Evaluate the request.** Does it actually make sense? Is
+   the proposed shape the right one? Read the issue, the
+   surrounding code, and the larger goal it serves.
+   **Explicitly consider alternative implementations** — do
+   not run with the first proposal in the issue. Enumerate
+   the plausible approaches, then pick the one that best
+   serves the larger goal, not the one quickest to ship.
+   Record the alternatives and the rationale in the plan. If
+   the request doesn't make sense, push back instead of
+   building it.
+
+2. **Plan.** Write `docs/<feature-or-issue>/plan.md` capturing:
+   - the larger goal this serves
+   - scope and file ownership
+   - **alternatives considered, with rationale for the chosen
+     path**
+   - acceptance criteria
+   - explicit out-of-scope items
+   - rollback plan
+   - any open questions for the operator
+
+3. **Plan review.** Spawn multiple reviewer agents in
+   parallel with different lenses (e.g. security, performance,
+   GraphQL schema correctness, ATProto semantics, ops impact,
+   API-consumer ergonomics, test coverage). Pick the count
+   and mix yourself based on surface area and risk. Record
+   decisions in `docs/<feature>/review-round-N.md` —
+   accepted / rejected with a one-line rationale for each
+   item. Update the plan in place. Run further rounds only if
+   the previous round surfaced substantive items.
+
+4. **Implement.** Commit directly to `staging`. Atomic commits
+   with a clear scope tag. Match the existing commit-message
+   convention (`Co-Authored-By:` trailer per Safety Rule 6).
+
+5. **Local verification.** Run all four quality gates plus
+   anything that exercises the new surface:
+   ```bash
+   go build ./...
+   go vet ./...
+   go test -race ./...
+   golangci-lint run ./...
+   ```
+   Capture the pre-existing lint/test baseline so "no new
+   errors" is a meaningful claim.
+
+6. **Implementation review.** Same shape as plan review —
+   parallel reviewers, different lenses, your call on count
+   and mix. Apply accepted feedback in a follow-up commit. A
+   follow-up round only if round 1 surfaced enough
+   substantive items to justify one.
+
+7. **Draft PR `staging → main`.** Body must link to the plan
+   and review-decision docs, list breaking changes, state
+   out-of-scope items, and include a test plan checklist.
+
+8. **Make CI green.** Fix root causes. Never `--no-verify`.
+   Never skip hooks. Loop until all checks pass.
+
+9. **Stop.** The operator merges. Notify with the PR URL and
+   a short summary of what shipped.
+
+### Hard rules
+
+- **Never merge.** Stopping at "PR Draft, CI green" is the
+  contract.
+- **Never `--force` push to `main`.** Avoid history rewrites
+  on `staging` once you've pushed; it's the shared working
+  branch.
+- **Decisions belong in writing.** If a reviewer raises an
+  item and you reject it, record the rationale in
+  `review-round-N.md`. Future-you will not remember why.
+- **No emojis** in code, commits, or PR bodies unless the
+  operator asks. Keep the standard
+  `Co-Authored-By:` trailer; nothing else.
+
+---
+
 ## Browser automation in this dev container
 
 This dev container has a working **agent-browser** install that
@@ -920,6 +1027,17 @@ Other things that came up in review and were intentionally
   label is *not* hidden by default. Clients must pass
   `excludeLabels: ["!takedown"]` explicitly. This is a
   deliberate product decision (the indexer is labeler-neutral).
+- **`contributorIdentity` is read as a DID or not at all** for
+  the `org.hypercerts.claim.activity` collection. Handle-form
+  identities are treated as missing — the GraphQL `contributor`
+  filter rejects handle inputs and stored handle entries
+  silently do not match. This is enforcement-by-reading: we
+  nudge producers to write DIDs without rewriting any PDS
+  records ourselves. Watch
+  `hypergoat_contributor_identity_total{outcome="non_did"}`
+  to see producer drift; `outcome="unrecognized_shape"` is
+  the signal that strong-refs may be entering production.
+  See `docs/issue-64/plan.md`.
 
 ---
 

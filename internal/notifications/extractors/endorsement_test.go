@@ -136,27 +136,7 @@ func TestClampSortAt(t *testing.T) {
 	}
 }
 
-func TestIsValidDID(t *testing.T) {
-	valid := []string{
-		"did:plc:alice123",
-		"did:web:example.com",
-		"did:plc:z7mstadkybqmyvmsspztwnoy",
-	}
-	invalid := []string{
-		"",
-		"plc:alice",
-		"did:",
-		"did:plc:alice bob",
-		"did:plc:alice\nbob",
-	}
-	for _, v := range valid {
-		if !isValidDID(v) {
-			t.Errorf("expected valid: %q", v)
-		}
-	}
-	for _, v := range invalid {
-		if isValidDID(v) {
-			t.Errorf("expected invalid: %q", v)
-		}
-	}
-}
+// TestIsValidDID lived here; the canonical tests now live in
+// internal/atproto/did/did_test.go (the shared package the alias
+// delegates to). The shim isValidDID in shared.go is a single line
+// returning did.IsValid; covering it locally would be redundant.

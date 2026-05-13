@@ -319,11 +319,6 @@ func parseDIDDocument(data []byte, expectedDID ...string) (*DIDDocument, error) 
 	return &doc, nil
 }
 
-// IsValidDID checks if a string is a valid DID format.
-func IsValidDID(did string) bool {
-	return strings.HasPrefix(did, "did:plc:") || strings.HasPrefix(did, "did:web:")
-}
-
 // rejectPrivateHost errors out if host resolves to any loopback,
 // link-local, private, unspecified, or multicast address. Used to
 // block SSRF via attacker-controlled hostnames (did:web resolution).

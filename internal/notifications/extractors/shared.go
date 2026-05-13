@@ -4,9 +4,10 @@ package extractors
 import (
 	"bytes"
 	"encoding/json"
-	"strings"
 	"time"
 
+	"github.com/GainForest/hypergoat/internal/atproto/did"
+	"github.com/GainForest/hypergoat/internal/metrics"
 	"github.com/GainForest/hypergoat/internal/notifications"
 )
 
@@ -31,39 +32,73 @@ func clampSortAt(createdAt string) time.Time {
 	return parsed
 }
 
-// isValidDID performs a conservative syntactic validation of a DID string.
-// Does not call out to a DID resolver — purely local check to bound the
-// input before it flows into SQL parameters and log messages.
-func isValidDID(s string) bool {
-	if len(s) < 8 || len(s) > 256 {
-		return false
-	}
-	if !strings.HasPrefix(s, "did:") {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		case r == ':' || r == '-' || r == '.' || r == '_':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// extractContributorDID handles the ATProto union type on
-// `org.hypercerts.claim.activity#contributor.contributorIdentity`:
-// either a plain DID/identifier string, or a strongRef object.
-// strongRef is not supported in v1 — we'd have to resolve the referenced record.
+// extractContributorDID resolves an ATProto union on
+// `org.hypercerts.claim.activity#contributor.contributorIdentity`
+// to a DID, or to "" if no DID can be read.
+//
+// The lexicon-compliant shape is a bare string DID. Production
+// data from `certified.app` wraps it in an object with a `$type`
+// discriminator and an `identity` field; both shapes are accepted
+// as long as the resolved string passes did.IsValid. The
+// strong-ref variant of the union (com.atproto.repo.strongRef) is
+// not supported — those entries return "" and the caller drops
+// the contributor.
+//
+// Every call increments hypergoat_contributor_identity_total with
+// one of three outcomes: did (value resolved to a DID), non_did
+// (a string was read but failed did.IsValid — typically a
+// handle), unrecognized_shape (the value was neither a string nor
+// an object with a string .identity, or .identity was empty —
+// this is the operator's signal for strong-refs or unexpected
+// drift).
 func extractContributorDID(raw json.RawMessage) string {
-	// Try string form first.
+	// Bare-string variant: the lexicon-compliant shape. The match is
+	// byte-exact (no TrimSpace) so the extractor's notion of "is this
+	// a DID?" stays symmetric with the SQL filter, which also matches
+	// bytes exactly. A stored DID with stray whitespace is therefore
+	// non_did at the metric and invisible to both surfaces.
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return strings.TrimSpace(s)
+		switch {
+		case did.IsValid(s):
+			metrics.ContributorIdentityDID()
+			return s
+		default:
+			// Includes the empty-string case. Per the plan: any string
+			// (empty or otherwise) that fails did.IsValid is non_did.
+			// unrecognized_shape is reserved for non-string shapes —
+			// the operator's signal for strong-refs entering production.
+			metrics.ContributorIdentityNonDID()
+			return ""
+		}
 	}
+	// Object variant: production drift from certified.app.
+	var obj struct {
+		// Use a pointer so we can distinguish "no .identity field" from
+		// "identity is the empty string". Both still resolve to the same
+		// metric outcome (unrecognized_shape vs non_did respectively),
+		// but the distinction tells operators which class of drift they
+		// are seeing.
+		Identity *string `json:"identity"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		switch {
+		case obj.Identity == nil:
+			// Object without .identity at all (strong-refs land here).
+			metrics.ContributorIdentityUnrecognizedShape()
+			return ""
+		case did.IsValid(*obj.Identity):
+			metrics.ContributorIdentityDID()
+			return *obj.Identity
+		default:
+			// .identity present but not a DID (handle, empty string,
+			// garbage). Same bucket as the bare-string fail case.
+			metrics.ContributorIdentityNonDID()
+			return ""
+		}
+	}
+	// Neither shape parsed (array, number, malformed JSON, etc).
+	metrics.ContributorIdentityUnrecognizedShape()
 	return ""
 }
 

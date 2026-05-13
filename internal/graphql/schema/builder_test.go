@@ -310,6 +310,77 @@ func TestConnection_HasExcludePdsArg(t *testing.T) {
 	}
 }
 
+// TestActivityWhereInput_HasContributorFilter pins the contract that
+// only the activity collection's WhereInput carries the `contributor`
+// filter field (and that it is typed DIDFilterInput).
+func TestActivityWhereInput_HasContributorFilter(t *testing.T) {
+	lexicons, err := loadLexiconsFromDir("../../../testdata/lexicons")
+	if err != nil {
+		t.Fatalf("load lexicons: %v", err)
+	}
+	registry := lexicon.NewRegistry()
+	for _, lex := range lexicons {
+		registry.Register(lex)
+	}
+	builder := NewBuilder(registry)
+	schema, err := builder.Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	queryFields := schema.QueryType().Fields()
+
+	// Helper: locate the `where` arg on a per-collection field and return
+	// the input-object fields exposed by its type.
+	whereFieldsFor := func(t *testing.T, fieldName string) graphql.InputObjectFieldMap {
+		t.Helper()
+		field, ok := queryFields[fieldName]
+		if !ok {
+			t.Fatalf("query field %q not found", fieldName)
+		}
+		for _, arg := range field.Args {
+			if arg.Name() != "where" {
+				continue
+			}
+			io, ok := arg.Type.(*graphql.InputObject)
+			if !ok {
+				t.Fatalf("where arg on %q is not an InputObject (got %T)", fieldName, arg.Type)
+			}
+			return io.Fields()
+		}
+		return nil
+	}
+
+	// Activity WhereInput must expose `contributor` typed DIDFilterInput.
+	activityWhere := whereFieldsFor(t, "orgHypercertsClaimActivity")
+	contrib, ok := activityWhere["contributor"]
+	if !ok {
+		names := make([]string, 0, len(activityWhere))
+		for k := range activityWhere {
+			names = append(names, k)
+		}
+		t.Fatalf("contributor field missing on activity WhereInput; got: %v", names)
+	}
+	if contrib.Type.Name() != "DIDFilterInput" {
+		t.Errorf("contributor field type = %s, want DIDFilterInput", contrib.Type.Name())
+	}
+	desc := contrib.Description()
+	if !strings.Contains(desc, "DIDs only") {
+		t.Errorf("contributor description missing DID-only policy callout: %q", desc)
+	}
+
+	// Absence assertion: pick a loaded collection that is NOT activity
+	// and confirm `contributor` is not on its WhereInput.
+	awardWhere := whereFieldsFor(t, "appCertifiedBadgeAward")
+	if _, leaked := awardWhere["contributor"]; leaked {
+		names := make([]string, 0, len(awardWhere))
+		for k := range awardWhere {
+			names = append(names, k)
+		}
+		t.Errorf("contributor field leaked to badge award WhereInput; fields: %v", names)
+	}
+}
+
 func TestUnionTypes(t *testing.T) {
 	// Load lexicons
 	activityData, _ := os.ReadFile("../../../testdata/lexicons/org/hypercerts/claim/activity.json")

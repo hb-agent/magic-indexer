@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/GainForest/hypergoat/internal/atproto/did"
 	"github.com/GainForest/hypergoat/internal/ingestion"
 	"github.com/GainForest/hypergoat/internal/notifications"
 )
@@ -45,7 +46,7 @@ func (e *EndorsementNotifier) Extract(ctx context.Context, op ingestion.ProcessO
 	subjectDID := strings.TrimSpace(rec.Subject.DID)
 	subjectURI := strings.TrimSpace(rec.Subject.URI)
 
-	if !isValidDID(subjectDID) || subjectDID == op.DID {
+	if !did.IsValid(subjectDID) || subjectDID == op.DID {
 		return nil, nil
 	}
 	if len(subjectURI) > notifications.MaxReasonSubjectBytes {

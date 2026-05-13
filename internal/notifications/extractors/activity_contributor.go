@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/GainForest/hypergoat/internal/atproto/did"
 	"github.com/GainForest/hypergoat/internal/ingestion"
 	"github.com/GainForest/hypergoat/internal/notifications"
 )
@@ -50,14 +51,14 @@ func (a *ActivityContributorNotifier) Extract(ctx context.Context, op ingestion.
 
 	var notifs []notifications.Notification
 	for _, c := range rec.Contributors {
-		did := extractContributorDID(c.ContributorIdentity)
-		if !isValidDID(did) || seen[did] {
+		contribDID := extractContributorDID(c.ContributorIdentity)
+		if !did.IsValid(contribDID) || seen[contribDID] {
 			continue
 		}
-		seen[did] = true
+		seen[contribDID] = true
 
 		notifs = append(notifs, notifications.Notification{
-			Recipient:     did,
+			Recipient:     contribDID,
 			Author:        op.DID,
 			RecordURI:     op.URI,
 			RecordCID:     op.CID,
