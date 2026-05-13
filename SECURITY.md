@@ -144,6 +144,37 @@ When `DOMAIN_DID` is set, `/notifications/graphql` is mounted behind a service-a
   name and variable keys are logged. Do not re-introduce value
   logging without an audit.
 
+### Audit logs and metrics
+
+Every admin mutation that changes state emits a structured `event=*`
+slog line and increments a Prometheus counter. Together they are the
+operator's primary forensic record: there is **no DB-side audit
+table**. Losing the log line means losing the audit. Configure your
+log shipper to retain `event=*` lines from the admin surface for at
+least 90 days (GDPR-minimum); one year is recommended if you
+anticipate compliance reviews. The slog values flow through
+`internal/logsafe` (`DID`, `String`) so control characters, ANSI
+escapes, and Unicode line separators cannot forge log lines even if
+upstream validation regresses.
+
+| Event                       | Mutation                  | Metric                                                  | Sample attributes                                          |
+| --------------------------- | ------------------------- | ------------------------------------------------------- | ---------------------------------------------------------- |
+| `actor_purge`               | `purgeActor`              | `hypergoat_purge_actor_total{tap_status}` + `hypergoat_purge_records_deleted` histogram | `target_did`, `record_count`, `requested_by_did`, `tap_status` |
+| `reset_all`                 | `resetAll`                | `hypergoat_reset_all_total`                            | `requested_by_did`, `rows_deleted`, `tables_affected`      |
+| `admin_settings_changed`    | `updateSettings`          | `hypergoat_admin_settings_changed_total{field}`        | `actor_did`, `field`, `before`, `after`                    |
+| `admin_added`               | `addAdmin`                | `hypergoat_admin_settings_changed_total{field=adminDids}` | `actor_did`, `target_did`, `total_admins`              |
+| `admin_removed`             | `removeAdmin`             | `hypergoat_admin_settings_changed_total{field=adminDids}` | `actor_did`, `target_did`, `total_admins`              |
+
+Token-rejection forensics for the two preview-confirm mutations
+(`purgeActor`, `resetAll`) live in
+`hypergoat_purge_token_rejected_total{reason}`. Reasons are bounded
+to a seven-value sentinel set
+(`invalid`/`expired`/`already_used`/`wrong_admin`/`count_drift`/
+`wrong_target`/`scope_mismatch`); `err.Error()` never flows into the
+label. Sustained `wrong_admin` traffic is the alertable signal for
+"admin A trying to redeem admin B's token"; `count_drift` is benign
+(ingest raced the operator) and routinely safe to alert below.
+
 ### Statistics / activity endpoints
 
 The GraphQL fields `statistics`, `activityBuckets`, `recentActivity`,
@@ -201,6 +232,64 @@ default 60 req/min/IP) also governs `purgeActor` and is intended
 to bound fat-finger damage. No additional limit is wired
 specifically for purge; tighten the proxy rule if your threat
 model requires it.
+
+### Reset all data (`previewResetAll` / `resetAll`)
+
+Two admin mutations support wiping the entire index — every actor,
+record, activity row, label, report, notification, OAuth grant,
+and admin session. The contract mirrors `purgeActor` exactly,
+because `resetAll` is strictly more destructive (whole instance,
+not one DID) and must be at least as hardened:
+
+- `previewResetAll` returns per-table row counts plus an
+  HMAC-signed `confirmToken` bound to (requesting admin DID,
+  total rows across the deletion list, expiry, scope=reset_all).
+  The signing key is `SECRET_KEY_BASE`; the TTL is 5 minutes;
+  the token is single-use, enforced by signature in an
+  **in-memory** set that is cleared on process restart. Within
+  the 5-minute TTL window after a crash, a captured token could
+  be redeemed once more — still bound to the same admin DID and
+  total-row count. The TTL is the hard replay bound. Scope
+  binding means an actor-purge token cannot cross-redeem into
+  this mutation (or vice versa).
+- `resetAll(confirmToken)` re-counts rows before verifying the
+  bound token (so count drift between preview and reset rejects
+  the token), then commits a single SQL transaction that
+  deletes from every table in the resolver's hard-listed
+  deletion set. **The deletion list explicitly preserves**:
+  `config` (operator settings — so the reset doesn't lock the
+  admin out), `lexicon` (schema definitions), `oauth_client`
+  (registered app metadata, separate from issued tokens),
+  `label_definition` (seeded Bluesky vocabulary), and
+  `jetstream_cursor` (operational state). The list is the
+  source of truth — see `resetAllTables` in
+  `internal/graphql/admin/resolvers.go`. When a migration adds
+  a table whose contents are user / actor / activity data,
+  append it.
+
+Every successful reset emits a structured log line:
+
+```
+event=reset_all requested_by_did=… rows_deleted=… \
+tables_affected=… ts=…
+```
+
+**Operator contract**: this log line is the audit trail.
+Configure your log shipper to retain `event=reset_all` lines for
+**at least 90 days** (GDPR-minimum) and prefer **one year** if
+you anticipate audit reviews of destructive admin actions. There
+is no DB-side audit table by design — losing the log line means
+losing the audit, and the reset itself deletes any DB-side
+trail that might otherwise have survived. **A process crash
+between the SQL commit and the `slog` call can also lose the
+audit line** (low probability, no auto-recovery); operators
+detecting this case will see a populated `admin_session`-less
+instance with no `event=reset_all` line preceding it.
+
+The same `/admin/graphql` rate limit (default 60 req/min/IP)
+governs this mutation; treat it as a noise filter, not a
+defence — a single legitimate operator never approaches the
+rate, and an attacker with admin auth can already do worse.
 
 ## Metrics
 

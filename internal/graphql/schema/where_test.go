@@ -7,17 +7,29 @@ import (
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 )
 
+// contributorDescriptor returns the registry's contributor descriptor
+// for use in tests. Pulling from the live registry (rather than a
+// hand-rolled stub) ensures these tests notice registry drift.
+func contributorDescriptor(t *testing.T) filterDescriptor {
+	t.Helper()
+	d, ok := lookupFilterDescriptor("org.hypercerts.claim.activity", "contributor")
+	if !ok {
+		t.Fatalf("contributor descriptor missing from filterRegistry; registry: %+v", filterRegistry)
+	}
+	return d
+}
+
 func TestBuildContributorFieldFilter_EqValidDID(t *testing.T) {
 	in := map[string]interface{}{"eq": "did:plc:alice"}
-	f, err := buildContributorFieldFilter(in)
+	f, err := buildDIDOnlyEqInFilter(contributorDescriptor(t), in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if f.Operator != repositories.OpEq {
 		t.Errorf("Operator = %s, want %s", f.Operator, repositories.OpEq)
 	}
-	if !f.IsArrayContributor {
-		t.Error("expected IsArrayContributor = true")
+	if f.Kind != repositories.KindArrayContributor {
+		t.Errorf("Kind = %v, want KindArrayContributor", f.Kind)
 	}
 	if f.Value != "did:plc:alice" {
 		t.Errorf("Value = %v, want did:plc:alice", f.Value)
@@ -26,7 +38,7 @@ func TestBuildContributorFieldFilter_EqValidDID(t *testing.T) {
 
 func TestBuildContributorFieldFilter_EqRejectsHandle(t *testing.T) {
 	in := map[string]interface{}{"eq": "alice.example.com"}
-	_, err := buildContributorFieldFilter(in)
+	_, err := buildDIDOnlyEqInFilter(contributorDescriptor(t), in)
 	if err == nil {
 		t.Fatal("expected error for handle, got nil")
 	}
@@ -40,7 +52,7 @@ func TestBuildContributorFieldFilter_EqRejectsHandle(t *testing.T) {
 
 func TestBuildContributorFieldFilter_EqRejectsNonString(t *testing.T) {
 	in := map[string]interface{}{"eq": 42}
-	_, err := buildContributorFieldFilter(in)
+	_, err := buildDIDOnlyEqInFilter(contributorDescriptor(t), in)
 	if err == nil {
 		t.Fatal("expected error for non-string eq value")
 	}
@@ -48,7 +60,7 @@ func TestBuildContributorFieldFilter_EqRejectsNonString(t *testing.T) {
 
 func TestBuildContributorFieldFilter_InValidDIDs(t *testing.T) {
 	in := map[string]interface{}{"in": []interface{}{"did:plc:alice", "did:plc:bob"}}
-	f, err := buildContributorFieldFilter(in)
+	f, err := buildDIDOnlyEqInFilter(contributorDescriptor(t), in)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -66,7 +78,7 @@ func TestBuildContributorFieldFilter_InValidDIDs(t *testing.T) {
 
 func TestBuildContributorFieldFilter_RejectsEmptyInList(t *testing.T) {
 	in := map[string]interface{}{"in": []interface{}{}}
-	_, err := buildContributorFieldFilter(in)
+	_, err := buildDIDOnlyEqInFilter(contributorDescriptor(t), in)
 	if err == nil {
 		t.Fatal("expected error for empty in: [] list")
 	}
@@ -77,7 +89,7 @@ func TestBuildContributorFieldFilter_RejectsEmptyInList(t *testing.T) {
 
 func TestBuildContributorFieldFilter_InRejectsHandleInList(t *testing.T) {
 	in := map[string]interface{}{"in": []interface{}{"did:plc:alice", "bob.example.com"}}
-	_, err := buildContributorFieldFilter(in)
+	_, err := buildDIDOnlyEqInFilter(contributorDescriptor(t), in)
 	if err == nil {
 		t.Fatal("expected error for handle in IN list")
 	}
@@ -92,14 +104,14 @@ func TestBuildContributorFieldFilter_InRejectsOversized(t *testing.T) {
 		values[i] = "did:plc:alice"
 	}
 	in := map[string]interface{}{"in": values}
-	_, err := buildContributorFieldFilter(in)
+	_, err := buildDIDOnlyEqInFilter(contributorDescriptor(t), in)
 	if err == nil {
 		t.Fatal("expected error for oversized IN list")
 	}
 }
 
 func TestBuildContributorFieldFilter_NoOperator(t *testing.T) {
-	_, err := buildContributorFieldFilter(map[string]interface{}{})
+	_, err := buildDIDOnlyEqInFilter(contributorDescriptor(t), map[string]interface{}{})
 	if err == nil {
 		t.Fatal("expected error when neither eq nor in is provided")
 	}
@@ -109,13 +121,17 @@ func TestBuildContributorFieldFilter_RejectsUppercaseMethodPrefix(t *testing.T) 
 	// Strict input validation: canonical lowercase method prefix
 	// required, even though the rest of the DID is case-sensitive.
 	in := map[string]interface{}{"eq": "DID:PLC:abc"}
-	_, err := buildContributorFieldFilter(in)
+	_, err := buildDIDOnlyEqInFilter(contributorDescriptor(t), in)
 	if err == nil {
 		t.Fatal("expected error for uppercase method prefix")
 	}
 }
 
-func TestWantsContributorFilter(t *testing.T) {
+// TestFilterRegistry_Contributor pins the contract that the activity
+// collection has a contributor filter descriptor, and that no other
+// loaded collection has one (replaces the older wantsContributorFilter
+// predicate test now that the predicate is collapsed into the registry).
+func TestFilterRegistry_Contributor(t *testing.T) {
 	cases := map[string]bool{
 		"org.hypercerts.claim.activity":        true,
 		"org.hypercerts.claim.collection":      false,
@@ -124,8 +140,25 @@ func TestWantsContributorFilter(t *testing.T) {
 		"":                                     false,
 	}
 	for lexID, want := range cases {
-		if got := wantsContributorFilter(lexID); got != want {
-			t.Errorf("wantsContributorFilter(%q) = %v, want %v", lexID, got, want)
+		_, got := lookupFilterDescriptor(lexID, "contributor")
+		if got != want {
+			t.Errorf("lookupFilterDescriptor(%q, \"contributor\") presence = %v, want %v", lexID, got, want)
+		}
+	}
+}
+
+// TestFilterRegistry_BadgeAwardSubject pins the same shape for the
+// badge-award subject filter.
+func TestFilterRegistry_BadgeAwardSubject(t *testing.T) {
+	cases := map[string]bool{
+		"app.certified.badge.award":     true,
+		"org.hypercerts.claim.activity": false,
+		"":                              false,
+	}
+	for lexID, want := range cases {
+		_, got := lookupFilterDescriptor(lexID, "subject")
+		if got != want {
+			t.Errorf("lookupFilterDescriptor(%q, \"subject\") presence = %v, want %v", lexID, got, want)
 		}
 	}
 }

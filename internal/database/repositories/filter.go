@@ -22,6 +22,51 @@ const (
 	OpStartsWith FilterOperator = "startsWith"
 )
 
+// FilterKind selects the SQL-emission strategy for a FieldFilter. Most
+// filters use KindScalar — the standard per-operator path against a
+// single JSON property or column. Lexicon-specific shapes that need a
+// bespoke EXISTS / union match opt into a non-default Kind; the registry
+// in the GraphQL `where` layer (see internal/graphql/schema/where.go)
+// pins which lexID+field pair maps to which Kind, and the SQL emitter in
+// buildSingleFilter dispatches on Kind. Adding a new shape is two
+// edits: a new constant here, a new arm in buildSingleFilter, and a
+// new registry entry where.go-side.
+type FilterKind int
+
+const (
+	// KindScalar is the default: standard FieldFilter operators against
+	// a JSON property or column. FieldName/IsJSON/LexiconType all carry
+	// real meaning.
+	KindScalar FilterKind = iota
+	// KindArrayContributor signals the indexable contributor-
+	// identities SQL shape used by the
+	// `OrgHypercertsClaimActivityWhereInput.contributor` filter.
+	// FieldName is informational only on this path; the SQL
+	// hardcodes the JSON path. The SQL emits
+	// `record_contributor_identities(r.json) @> ARRAY[$N]::text[]`
+	// (eq) or `&&` (in), which the partial GIN expression index in
+	// migration 024 (`idx_record_contributor_identities`) serves
+	// directly. The wrapper function is created in migration 023
+	// (Postgres rejects inline subqueries in index expressions —
+	// SQLSTATE 0A000). Matches contributor identities written
+	// either as a bare string (lexicon-compliant) or as the
+	// production-drift object shape
+	// {"$type":"...","identity":"<DID>"}.
+	KindArrayContributor
+	// KindUnionSubject signals the indexable BadgeAward subject
+	// filter on `AppCertifiedBadgeAwardWhereInput.subject` (issue
+	// #65). The badge.award lexicon's `subject` is a union of
+	// `app.certified.defs#did` (object `{did: "did:plc:..."}`),
+	// `com.atproto.repo.strongRef` (object with `uri` starting with
+	// `at://<did>/...`), and a defensive bare-string branch.
+	// Migration 025 materializes the canonical DID for all three
+	// shapes into a STORED generated column `record.subject_did`;
+	// migration 026 adds a partial btree on it. The SQL emitted
+	// here is just `r.subject_did = $N` / `= ANY($N::text[])` so
+	// the planner can use that index directly.
+	KindUnionSubject
+)
+
 // FieldFilter describes a single filter condition on a record field.
 type FieldFilter struct {
 	// FieldName is the JSON property name (validated against fieldNameRegex).
@@ -39,32 +84,28 @@ type FieldFilter struct {
 	// LexiconType is the lexicon property type ("string", "integer", etc.)
 	// used for SQL CAST decisions.
 	LexiconType string
-	// IsArrayContributor, when true, signals the special EXISTS-over-
-	// `json->'contributors'` SQL shape used by the
-	// `OrgHypercertsClaimActivityWhereInput.contributor` filter.
-	// FieldName is informational only on this path; the SQL hardcodes
-	// the JSON path. The marker is intentionally narrow — if a second
-	// collection adopts the same array-of-objects-with-identity shape,
-	// rename to a Kind enum at that time.
-	IsArrayContributor bool
-
-	// IsBadgeAwardSubject, when true, signals the special "match
-	// against subject-as-DID-string OR subject-as-strongRef-uri" SQL
-	// shape used by the `AppCertifiedBadgeAwardWhereInput.subject`
-	// filter (issue #65). The badge.award lexicon's `subject` is a
-	// union of `app.certified.defs#did` (bare DID string) and
-	// `com.atproto.repo.strongRef` (object with `uri` starting with
-	// `at://<did>/...`). FieldName is informational; SQL hardcodes
-	// the JSON path. Narrow marker like IsArrayContributor.
-	IsBadgeAwardSubject bool
+	// Kind selects the SQL-emission strategy; defaults to KindScalar.
+	// Non-default Kinds are bespoke per-lexicon shapes registered in
+	// the GraphQL where-layer registry; the SQL emitter dispatches on
+	// Kind in buildSingleFilter.
+	Kind FilterKind
 }
 
-// MaxArrayContributorScan caps the per-row scan of the contributors
-// array inside the contributor-filter EXISTS subquery. A record with
-// a contributors array longer than this becomes invisible to the
-// filter (fail-safe semantics). Mirrors
-// notifications.MaxContributorsBeforeReject so a record the
-// notifications layer rejects also fails to match the filter.
+// MaxArrayContributorScan caps the per-row contributor-array size
+// the filter will consider. A record with a contributors array
+// longer than this becomes invisible to the filter (fail-safe
+// semantics). Mirrors notifications.MaxContributorsBeforeReject so
+// a record the notifications layer rejects also fails to match the
+// filter.
+//
+// Enforcement lives inside the migration-023 wrapper function
+// `record_contributor_identities(jsonb)` (it returns NULL when
+// the array is over-long), NOT in the filter SQL — keeping the
+// indexable expression at the top level so the planner can match
+// the migration-024 partial GIN index. Tests still reference this
+// constant to assert the boundary contract; the value MUST stay
+// in sync with the literal in 023's function body (changing it
+// requires REINDEX CONCURRENTLY idx_record_contributor_identities).
 const MaxArrayContributorScan = 200
 
 const (
@@ -365,11 +406,10 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 		return "", nil, paramIdx, err
 	}
 
-	if f.IsArrayContributor {
+	switch f.Kind {
+	case KindArrayContributor:
 		return buildContributorFilter(f, paramIdx)
-	}
-
-	if f.IsBadgeAwardSubject {
+	case KindUnionSubject:
 		return buildBadgeAwardSubjectFilter(f, paramIdx)
 	}
 
@@ -509,108 +549,100 @@ func qualifyColumn(name string) string {
 	return "r." + name
 }
 
-// buildContributorFilter emits the special EXISTS-over-
-// `json->'contributors'` clause for the activity-contributor filter.
+// buildContributorFilter emits the contributor-identities containment
+// clause used by the KindArrayContributor filter on
+// `org.hypercerts.claim.activity` records.
 //
-// The clause is wrapped in a CASE expression because Postgres does
-// not guarantee left-to-right evaluation of AND operands in WHERE.
-// Without CASE, the planner is free to invoke jsonb_array_length or
-// jsonb_array_elements before the jsonb_typeof guard — both raise
-// on a non-array operand, so a single stored record whose
-// `contributors` is mis-shaped would brick every filtered query.
-// CASE is the documented escape hatch for forcing evaluation order
-// (https://www.postgresql.org/docs/current/sql-expressions.html).
+// SQL shape — `record_contributor_identities(r.json) @> ARRAY[$N]::text[]`
+// (eq) and `&&` (in). `record_contributor_identities(jsonb)` is the
+// IMMUTABLE SQL function defined in migration 023; the partial GIN
+// expression index in migration 024 is keyed on the same function
+// call, so the planner picks it for both operators (P-2 in the
+// 2026-05-13 audit). Without the index match, the previous EXISTS
+// shape was O(collection-size) per row and could trip the 5s
+// /graphql budget on rare contributors in busy collections.
 //
-// COALESCE-of-both-shapes lets the same SQL match contributor
-// identities written either as a bare string (lexicon-compliant)
-// or as the production-drift object shape
-// {"$type":"...","identity":"<DID>"}.
+// Why a wrapper function rather than an inline ARRAY-subquery?
+// Postgres rejects subqueries in index expressions
+// (`cannot use subquery in index expression`, SQLSTATE 0A000), so
+// the indexed form has to live inside an IMMUTABLE function. The
+// function disambiguates the contributor-identity union with CASE
+// on `jsonb_typeof` — bare-string (lexicon-compliant) on the
+// `'string'` arm; the production-drift `{"$type":"...","identity":
+// "<DID>"}` object on the `'object'` arm. (A naive COALESCE would
+// pick `c->>'contributorIdentity'` first, which on an object
+// returns the object's JSON-text serialisation rather than NULL —
+// so the indexed text[] would contain the wrong bytes.)
+//
+// Safety: the wrapper function returns NULL for non-array
+// `contributors` AND for arrays longer than
+// notifications.MaxContributorsBeforeReject (cap synced to the
+// 200 baked into migration 023). `NULL @> ARRAY[$N]` is NULL,
+// which evaluates to FALSE in WHERE, so no outer guard is needed
+// in the filter SQL — the indexable expression stands alone at
+// the top level for the planner to match against the partial
+// index. This is the trick that lets the GIN index be used: any
+// outer CASE wrapper would hide the indexable expression and
+// silently degrade the filter back to O(collection-size).
 func buildContributorFilter(f FieldFilter, paramIdx int) (string, []interface{}, int, error) {
-	// CASE-per-element to disambiguate the contributor-identity union.
-	// `c->>'contributorIdentity'` on a JSON object returns the object's
-	// JSON-text serialisation rather than NULL, which would defeat a
-	// COALESCE between the two shapes. jsonb_typeof gates the access
-	// so we only read each shape when the data actually matches.
-	const candidateExpr = `CASE jsonb_typeof(c->'contributorIdentity') WHEN 'string' THEN c->>'contributorIdentity' WHEN 'object' THEN c->'contributorIdentity'->>'identity' END`
-	tmplEq := `(CASE WHEN jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d THEN EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE (` + candidateExpr + `) = %s) ELSE FALSE END)`
-	tmplIn := `(CASE WHEN jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d THEN EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE (` + candidateExpr + `) = ANY(%s::text[])) ELSE FALSE END)`
+	// indexedExpr MUST match the index expression in migration 024
+	// byte-for-byte (modulo the `r.` alias prefix on `json`) for the
+	// planner to recognise it as indexable. A diff here silently
+	// degrades the filter back to O(collection-size).
+	const indexedExpr = `record_contributor_identities(r.json)`
 
 	switch f.Operator {
 	case OpEq:
 		param := fmt.Sprintf("$%d", paramIdx)
-		clause := fmt.Sprintf(tmplEq, MaxArrayContributorScan, param)
+		clause := fmt.Sprintf("(%s @> ARRAY[%s]::text[])", indexedExpr, param)
 		return clause, []interface{}{f.Value}, paramIdx + 1, nil
 	case OpIn:
 		param := fmt.Sprintf("$%d", paramIdx)
 		values, _ := extractInValues(f.Value)
-		clause := fmt.Sprintf(tmplIn, MaxArrayContributorScan, param)
+		clause := fmt.Sprintf("(%s && %s::text[])", indexedExpr, param)
 		return clause, []interface{}{values}, paramIdx + 1, nil
 	default:
 		return "", nil, paramIdx, fmt.Errorf("operator %s not supported on contributor filter", f.Operator)
 	}
 }
 
-// buildBadgeAwardSubjectFilter handles the special SQL shape for the
-// `subject` filter on app.certified.badge.award (issue #65). The
-// `subject` field is a union of two lexicon refs:
+// buildBadgeAwardSubjectFilter handles the `subject` filter on
+// app.certified.badge.award (issue #65). The `subject` field is a
+// union of two lexicon refs (plus a defensive bare-string branch):
 //
-//   - app.certified.defs#did  → object `{"did": "did:plc:abc"}`
+//   - app.certified.defs#did     → object `{"did": "did:plc:abc"}`
 //   - com.atproto.repo.strongRef → object `{"uri": "at://did:plc:abc/.../...", "cid": "..."}`
+//   - bare string `at://did:plc:abc/...` (defensive — no production records)
 //
-// Production data confirms `subject` is ALWAYS an object — the
-// defs#did ref resolves to an object-with-`did`-property, not a bare
-// string. (PR #75 originally assumed a bare-string branch existed and
-// missed 70% of records; this revision adds the defs#did object
-// branch.)
+// SQL shape — direct equality / `= ANY(...)` against the
+// `r.subject_did` generated column created by migration 025. The
+// column's expression covers all three subject shapes (CASE on
+// `jsonb_typeof(json->'subject')` + COALESCE over `did` / extracted
+// URI prefix), and migration 026 creates the partial btree
+// `idx_record_subject_did` scoped to `app.certified.badge.award`
+// that the planner uses for both `=` and `= ANY(...)`. This
+// replaces the previous `LIKE 'at://' || $N || '/%'` pattern, which
+// the planner cannot index against because the LIKE pattern is
+// parameter-driven (P-3 in the 2026-05-13 audit). Without an index,
+// a rare DID on a busy badge.award collection could trip the 5s
+// /graphql budget.
 //
-// We match either by:
-//
-//   - Direct string equality on `json->'subject'->>'did'`  (defs#did)
-//   - Prefix match on `json->'subject'->>'uri'` against `at://<did>/`
-//     (strongRef)
-//
-// The legacy bare-string branch is kept defensively in case a producer
-// writes that shape; production data has none today.
-//
-// Caller has already DID-validated the input; the LIKE pattern uses
-// the trailing `/` to ensure we only match URIs whose first path
-// segment is exactly the DID (rules out `at://did:plc:foo-something/...`
-// matching `did:plc:foo`).
+// The schema layer validates the input DID before it gets here, so
+// the column comparison is exact-match against a known-good DID
+// shape — no `at://`-prefix LIKE pattern needed.
 //
 // Note: this is single-value-OR-list, NOT array-of-subjects. Each
 // record has exactly one subject; we match it against one or many
 // candidate DIDs.
 func buildBadgeAwardSubjectFilter(f FieldFilter, paramIdx int) (string, []interface{}, int, error) {
-	// jsonb_typeof + CASE per branch keeps the matcher predictable
-	// across every shape we've observed in the wild. Object-with-`did`
-	// and object-with-`uri` share the `WHEN 'object'` arm because their
-	// `did` / `uri` extractions are independent — at most one yields a
-	// non-null per row.
-	const subjectStringExpr = `CASE jsonb_typeof(r.json->'subject') WHEN 'string' THEN r.json->>'subject' WHEN 'object' THEN r.json->'subject'->>'did' ELSE NULL END`
-	const subjectURIExpr = `CASE jsonb_typeof(r.json->'subject') WHEN 'object' THEN r.json->'subject'->>'uri' ELSE NULL END`
-
 	switch f.Operator {
 	case OpEq:
-		didParam := fmt.Sprintf("$%d", paramIdx)
-		// LIKE pattern is `at://<did>/%` — concatenated server-side so
-		// the user-supplied DID stays parameterised (no SQL injection
-		// surface). DID was validated by the schema layer.
-		clause := fmt.Sprintf(
-			"((%s) = %s OR (%s) LIKE 'at://' || %s || '/%%')",
-			subjectStringExpr, didParam, subjectURIExpr, didParam,
-		)
-		return clause, []interface{}{f.Value}, paramIdx + 1, nil
+		param := fmt.Sprintf("$%d", paramIdx)
+		return fmt.Sprintf("r.subject_did = %s", param), []interface{}{f.Value}, paramIdx + 1, nil
 	case OpIn:
-		didsParam := fmt.Sprintf("$%d", paramIdx)
+		param := fmt.Sprintf("$%d", paramIdx)
 		values, _ := extractInValues(f.Value)
-		// For the IN case: string-equals-ANY OR strong-ref-uri-LIKE-ANY.
-		// The LIKE-ANY half uses an unnested subquery so each candidate
-		// DID generates its own `at://<did>/%` pattern.
-		clause := fmt.Sprintf(
-			"((%s) = ANY(%s::text[]) OR EXISTS (SELECT 1 FROM unnest(%s::text[]) AS d WHERE (%s) LIKE 'at://' || d || '/%%'))",
-			subjectStringExpr, didsParam, didsParam, subjectURIExpr,
-		)
-		return clause, []interface{}{values}, paramIdx + 1, nil
+		return fmt.Sprintf("r.subject_did = ANY(%s::text[])", param), []interface{}{values}, paramIdx + 1, nil
 	default:
 		return "", nil, paramIdx, fmt.Errorf("operator %s not supported on badge-award subject filter", f.Operator)
 	}

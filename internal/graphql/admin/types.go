@@ -388,6 +388,74 @@ var PurgeActorPreviewType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// TableCountType is a per-table row count returned by
+// previewResetAll. The list is sized by the resetAll deletion list
+// (see internal/graphql/admin/resolvers.go); name is the literal
+// Postgres table identifier.
+var TableCountType = graphql.NewObject(graphql.ObjectConfig{
+	Name:        "TableCount",
+	Description: "Per-table row count in a reset-all preview",
+	Fields: graphql.Fields{
+		"name": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "Postgres table identifier",
+		},
+		"count": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Int),
+			Description: "Current row count in the table",
+		},
+	},
+})
+
+// ResetAllPreviewType is what previewResetAll returns to the
+// operator. Mirrors the actor-purge preview contract: counts the
+// operator confirms against plus an HMAC-signed token they hand
+// back to resetAll. The token is scope-bound to reset_all so it
+// cannot be redeemed against any other destructive admin
+// mutation.
+var ResetAllPreviewType = graphql.NewObject(graphql.ObjectConfig{
+	Name:        "ResetAllPreview",
+	Description: "Preview of what resetAll would delete, plus a single-use confirmation token bound to (admin DID, total row count, expiry, scope=reset_all)",
+	Fields: graphql.Fields{
+		"totalRows": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Int),
+			Description: "Sum of row counts across every table in the deletion list",
+		},
+		"tables": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(TableCountType))),
+			Description: "Per-table breakdown (matches the deletion-list order in the resolver)",
+		},
+		"confirmToken": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "HMAC-signed token bound to (admin_did, total_rows, exp, scope=reset_all). Pass back to resetAll before tokenExpiresAt",
+		},
+		"tokenExpiresAt": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "RFC3339 timestamp at which confirmToken stops being accepted",
+		},
+		"tokenTtlSeconds": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Int),
+			Description: "Seconds the token is valid for, for client-side countdown display",
+		},
+	},
+})
+
+// ResetAllResultType is what resetAll returns on success.
+var ResetAllResultType = graphql.NewObject(graphql.ObjectConfig{
+	Name:        "ResetAllResult",
+	Description: "Result of a reset-all operation",
+	Fields: graphql.Fields{
+		"rowsDeleted": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Int),
+			Description: "Total rows deleted across every table in the deletion list",
+		},
+		"tablesAffected": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Int),
+			Description: "Number of tables touched (i.e. the size of the deletion list)",
+		},
+	},
+})
+
 // PurgeActorResultType is what purgeActor returns on success.
 var PurgeActorResultType = graphql.NewObject(graphql.ObjectConfig{
 	Name:        "PurgeActorResult",

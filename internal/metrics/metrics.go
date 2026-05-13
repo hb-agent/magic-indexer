@@ -153,6 +153,11 @@ func init() {
 		pdsResolveTotal,
 		contributorIdentityTotal,
 		graphqlQueryTimeoutTotal,
+		purgeTokenRejectedTotal,
+		purgeActorTotal,
+		purgeRecordsDeleted,
+		adminSettingsChangedTotal,
+		resetAllTotal,
 	)
 }
 
@@ -463,4 +468,120 @@ var (
 // constant.
 func GraphQLQueryTimeout(route string) {
 	graphqlQueryTimeoutTotal.WithLabelValues(route).Inc()
+}
+
+// --- Admin destructive-op metrics (T-OBS-1, T-OBS-2) ---
+//
+// PurgeActor (one actor) and ResetAll (whole instance) are the two
+// destructive admin mutations. Without these counters there is no
+// alertable signal on token-forgery attempts or sustained purge
+// volume. Reason labels for token rejection are bounded to a
+// hard-listed set — never err.Error() — so cardinality stays
+// flat under hostile input.
+//
+// PurgeReason* constants are the only values that may flow into the
+// `reason` label of hypergoat_purge_token_rejected_total. They map
+// 1:1 to the sentinel errors in internal/graphql/admin/purge.go
+// plus two failure modes that the resolver detects before reaching
+// the signer (wrong_admin, wrong_target — kept for symmetry with
+// the report's recommended label set even though Verify maps them
+// to ErrPurgeTokenInvalid today).
+const (
+	PurgeReasonInvalid       = "invalid"
+	PurgeReasonExpired       = "expired"
+	PurgeReasonAlreadyUsed   = "already_used"
+	PurgeReasonWrongAdmin    = "wrong_admin"
+	PurgeReasonCountDrift    = "count_drift"
+	PurgeReasonWrongTarget   = "wrong_target"
+	PurgeReasonScopeMismatch = "scope_mismatch"
+)
+
+// PurgeTapStatus* are the legal values for the `tap_status` label
+// on hypergoat_purge_actor_total. Mirror the strings the resolver
+// already returns via the GraphQL response.
+const (
+	PurgeTapStatusRemoved = "removed"
+	PurgeTapStatusFailed  = "failed"
+	PurgeTapStatusSkipped = "skipped"
+)
+
+// AdminSettingsField* are the legal values for the `field` label
+// on hypergoat_admin_settings_changed_total. Every UpdateSettings
+// branch + AddAdmin / RemoveAdmin uses one of these constants;
+// never a runtime string.
+const (
+	AdminSettingsFieldDomainAuthority      = "domainAuthority"
+	AdminSettingsFieldRelayURL             = "relayUrl"
+	AdminSettingsFieldPLCDirectoryURL      = "plcDirectoryUrl"
+	AdminSettingsFieldJetstreamURL         = "jetstreamUrl"
+	AdminSettingsFieldOAuthSupportedScopes = "oauthSupportedScopes"
+	AdminSettingsFieldAdminDIDs            = "adminDids"
+)
+
+var (
+	purgeTokenRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hypergoat_purge_token_rejected_total",
+			Help: "PurgeTokenSigner.Verify rejections, labelled by reason. Reasons: invalid, expired, already_used, wrong_admin, count_drift, wrong_target, scope_mismatch. Cardinality is bounded by a hard-listed sentinel set; no err.Error() values flow into the label.",
+		},
+		[]string{"reason"},
+	)
+
+	purgeActorTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hypergoat_purge_actor_total",
+			Help: "Successful purgeActor mutations, labelled by best-effort tap removal outcome. tap_status values: removed, failed, skipped.",
+		},
+		[]string{"tap_status"},
+	)
+
+	purgeRecordsDeleted = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "hypergoat_purge_records_deleted",
+			Help:    "Distribution of records deleted per successful purgeActor mutation.",
+			Buckets: []float64{0, 1, 10, 100, 1000, 10000, 100000, 1000000},
+		},
+	)
+
+	adminSettingsChangedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hypergoat_admin_settings_changed_total",
+			Help: "Admin settings mutations applied, labelled by field. Field values: domainAuthority, relayUrl, plcDirectoryUrl, jetstreamUrl, oauthSupportedScopes, adminDids. adminDids is incremented by AddAdmin / RemoveAdmin too.",
+		},
+		[]string{"field"},
+	)
+
+	resetAllTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "hypergoat_reset_all_total",
+			Help: "Successful resetAll admin mutations. No labels — the operation has no per-target dimensions and a successful reset wipes the whole instance.",
+		},
+	)
+)
+
+// PurgeTokenRejected increments the rejection counter under a
+// bounded reason label. Pass one of the PurgeReason* constants —
+// never err.Error().
+func PurgeTokenRejected(reason string) {
+	purgeTokenRejectedTotal.WithLabelValues(reason).Inc()
+}
+
+// PurgeActorCompleted increments the success counter for purgeActor
+// and observes the records-deleted distribution. tapStatus must be
+// one of the PurgeTapStatus* constants.
+func PurgeActorCompleted(tapStatus string, recordsDeleted int64) {
+	purgeActorTotal.WithLabelValues(tapStatus).Inc()
+	purgeRecordsDeleted.Observe(float64(recordsDeleted))
+}
+
+// AdminSettingsChanged increments the per-field settings-mutation
+// counter. field must be one of the AdminSettingsField* constants.
+func AdminSettingsChanged(field string) {
+	adminSettingsChangedTotal.WithLabelValues(field).Inc()
+}
+
+// ResetAllCompleted increments the resetAll success counter. No
+// labels — the operation has no per-target dimensions.
+func ResetAllCompleted() {
+	resetAllTotal.Inc()
 }

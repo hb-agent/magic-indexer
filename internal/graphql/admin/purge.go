@@ -16,32 +16,59 @@ import (
 	"time"
 
 	didpkg "github.com/GainForest/hypergoat/internal/atproto/did"
+	"github.com/GainForest/hypergoat/internal/logsafe"
+	"github.com/GainForest/hypergoat/internal/metrics"
 )
 
-// purgeTokenTTL bounds how long a previewPurgeActor token remains
+// purgeTokenTTL bounds how long a preview-confirm token remains
 // valid before the admin must re-issue the preview. Five minutes is
-// long enough for a human operator to read a multi-thousand-record
+// long enough for a human operator to read a multi-thousand-row
 // preview against external state (a takedown ticket, GDPR request,
 // the indexer's own GraphiQL) without being punished for it; short
 // enough that an abandoned browser tab cannot be replayed an hour
-// later.
+// later. Applies to both the actor-purge and reset-all scopes.
 const purgeTokenTTL = 5 * time.Minute
 
+// Token scopes are explicit strings on the wire so an actor-purge
+// token can never be redeemed as a reset-all token (or vice versa)
+// even if an attacker can produce HMAC collisions on an empty scope
+// field. The strings are stable; do not rename without a version
+// bump.
+const (
+	// ScopeActorPurge is the scope claim for previewPurgeActor /
+	// purgeActor tokens. The token binds to (admin_did, target_did,
+	// record_count, exp).
+	ScopeActorPurge = "actor_purge"
+
+	// ScopeResetAll is the scope claim for previewResetAll /
+	// resetAll tokens. The token binds to (admin_did, total_rows,
+	// exp). TargetDID is empty for this scope — the operation has
+	// no single target.
+	ScopeResetAll = "reset_all"
+)
+
 // PurgeTokenSigner mints and verifies HMAC-signed confirm tokens for
-// the actor-purge admin mutation. A token is a base64url-encoded
-// payload + HMAC, bound to the requesting admin DID, the target
-// DID, the record count at preview time, and an expiry. Verification
-// rejects any mismatch (different admin, different target, count
-// drift, expired) via constant-time compare on the HMAC.
+// admin destructive-op mutations. A token is a base64url-encoded
+// payload + HMAC, bound to the requesting admin DID, a scope-specific
+// secondary identifier (target DID for actor_purge, empty for
+// reset_all), the row count at preview time, the scope string, and
+// an expiry. Verification rejects any mismatch (different admin,
+// different target, count drift, expired, different scope) via
+// constant-time compare on the HMAC.
 //
 // Single-use is enforced server-side via an in-memory used-token
 // set keyed by the signature. The set is cleaned up lazily on each
-// verify call. Restarts clear the set but the exp claim prevents
-// replays beyond purgeTokenTTL anyway.
+// verify call and proactively by a periodic sweeper goroutine.
+// Restarts clear the set but the exp claim prevents replays beyond
+// purgeTokenTTL anyway.
 //
 // Tokens are stateless from the server's perspective — verification
 // re-derives the HMAC from claims, so a single replica restart
 // mid-flow does not invalidate a not-yet-redeemed token.
+//
+// The signer is named "Purge" historically; both supported scopes
+// purge data (one actor or the whole index). If a third scope
+// without "purge" semantics is added, rename to ScopedTokenSigner.
 type PurgeTokenSigner struct {
 	secret []byte
 	now    func() time.Time // injected for tests
@@ -141,9 +168,13 @@ func (s *PurgeTokenSigner) Close() {
 // `Reason` field for SECURITY.md log correlation, say) can be rolled
 // out without silently invalidating every outstanding token at
 // deploy. Verify rejects any token whose `v` doesn't match the
-// expected purgeTokenVersion.
+// expected purgeTokenVersion. The Scope field (added in v2)
+// disambiguates actor_purge from reset_all so an admin's
+// actor_purge token cannot be redeemed against the resetAll
+// mutation by an attacker who somehow captures it.
 type purgeTokenClaims struct {
 	V           int    `json:"v"`
+	Scope       string `json:"scope"`
 	AdminDID    string `json:"admin_did"`
 	TargetDID   string `json:"target_did"`
 	RecordCount int64  `json:"record_count"`
@@ -154,15 +185,21 @@ type purgeTokenClaims struct {
 // or removing a field; old-version tokens are rejected as
 // ErrPurgeTokenInvalid (one TTL of disruption on deploy, no
 // silent verification failures).
-const purgeTokenVersion = 1
+//
+// v2 added the Scope field (Track 3 in the 2026-05-13 review
+// follow-up). v1 tokens — which lack a Scope claim — are rejected
+// at deploy; admins re-preview and continue.
+const purgeTokenVersion = 2
 
-// Sign issues a fresh token for the given (admin, target, count)
-// triple. Returns the token and its expiry timestamp so the
-// resolver can echo "expires in M:SS" to the client.
-func (s *PurgeTokenSigner) Sign(adminDID, targetDID string, recordCount int64) (string, time.Time, error) {
+// Sign issues a fresh token for the given (admin, target, count,
+// scope) tuple. Returns the token and its expiry timestamp so the
+// resolver can echo "expires in M:SS" to the client. scope must be
+// one of the package-level Scope* constants.
+func (s *PurgeTokenSigner) Sign(scope, adminDID, targetDID string, recordCount int64) (string, time.Time, error) {
 	exp := s.now().Add(purgeTokenTTL)
 	claims := purgeTokenClaims{
 		V:           purgeTokenVersion,
+		Scope:       scope,
 		AdminDID:    adminDID,
 		TargetDID:   targetDID,
 		RecordCount: recordCount,
@@ -193,62 +230,110 @@ var (
 )
 
 // Verify confirms the token is well-formed, signed by us, and bound
-// to the given (admin, target, count) triple, then marks the
+// to the given (scope, admin, target, count) tuple, then marks the
 // signature as consumed. Returns ErrPurgeTokenInvalid /
 // ErrPurgeTokenExpired / ErrPurgeTokenAlreadyUsed for the three
 // distinct rejection modes the UI cares about; anything else
-// collapses to ErrPurgeTokenInvalid.
-func (s *PurgeTokenSigner) Verify(token, adminDID, targetDID string, recordCount int64) error {
+// collapses to ErrPurgeTokenInvalid. A token minted for one scope
+// (actor_purge) is rejected when verified under a different scope
+// (reset_all) so the two surfaces cannot cross-redeem.
+//
+// For metric labelling resolvers should call VerifyReason instead;
+// Verify discards the more granular reason.
+func (s *PurgeTokenSigner) Verify(token, scope, adminDID, targetDID string, recordCount int64) error {
+	_, err := s.VerifyReason(token, scope, adminDID, targetDID, recordCount)
+	return err
+}
+
+// VerifyReason is Verify plus a bounded reason string suitable for
+// use as a Prometheus label. Reasons map 1:1 to the
+// metrics.PurgeReason* sentinels:
+//
+//	"invalid"          — malformed / HMAC fail / wrong version / unbind admin / unbind target DID
+//	"wrong_admin"      — admin DID mismatch (more specific than "invalid")
+//	"wrong_target"     — target DID mismatch (more specific than "invalid")
+//	"scope_mismatch"   — token minted for a different scope
+//	"count_drift"      — record count differs from preview time
+//	"expired"          — past Exp
+//	"already_used"     — single-use violation
+//
+// On success the returned reason is "". The error contract is
+// identical to Verify so existing callers can continue to use
+// errors.Is on the sentinel set.
+//
+// Reason granularity is deliberately tighter than the error set —
+// wrong_admin and wrong_target both collapse to ErrPurgeTokenInvalid
+// (the UI doesn't need to distinguish; an operator typing the
+// wrong DID is observed as the same "invalid token" experience as a
+// forge attempt) but the metric labels do distinguish so an alert
+// on `wrong_admin` traffic can fire on "admin A trying to redeem
+// admin B's token" without the noise of every random forge attempt.
+func (s *PurgeTokenSigner) VerifyReason(token, scope, adminDID, targetDID string, recordCount int64) (string, error) {
 	// Split into payload + signature halves before doing any
 	// HMAC work — a malformed token shouldn't get past parsing.
 	parts := strings.SplitN(token, ".", 2)
 	if len(parts) != 2 {
-		return ErrPurgeTokenInvalid
+		return "invalid", ErrPurgeTokenInvalid
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return ErrPurgeTokenInvalid
+		return "invalid", ErrPurgeTokenInvalid
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return ErrPurgeTokenInvalid
+		return "invalid", ErrPurgeTokenInvalid
 	}
 
 	// Constant-time HMAC compare. Any payload-tampering shows
 	// up as a mismatch here.
 	want := s.hmac(payload)
 	if subtle.ConstantTimeCompare(want, sig) != 1 {
-		return ErrPurgeTokenInvalid
+		return "invalid", ErrPurgeTokenInvalid
 	}
 
 	// Only deserialize after the HMAC has matched — payload
 	// is now trusted to be ours.
 	var claims purgeTokenClaims
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return ErrPurgeTokenInvalid
+		return "invalid", ErrPurgeTokenInvalid
 	}
 
 	// Reject tokens minted by a previous version of the claim
 	// schema. See purgeTokenVersion docs.
 	if claims.V != purgeTokenVersion {
-		return ErrPurgeTokenInvalid
+		return "invalid", ErrPurgeTokenInvalid
+	}
+
+	// Scope binding. A token minted for actor_purge cannot be
+	// verified against reset_all and vice versa. Belt-and-braces
+	// with the HMAC (which already covers the scope bytes via
+	// the payload), but having the resolver pass an explicit
+	// expected scope makes the destructive-op gate self-evident
+	// at the call site.
+	if claims.Scope != scope {
+		return "scope_mismatch", ErrPurgeTokenInvalid
 	}
 
 	// Bind check: admin DID and target DID must match the values
 	// claimed at preview time. Without these, admin A's token
 	// could be replayed by admin B or across a different DID.
-	if claims.AdminDID != adminDID || claims.TargetDID != targetDID {
-		return ErrPurgeTokenInvalid
+	// For reset_all both sides pass the empty TargetDID; the
+	// equality check holds.
+	if claims.AdminDID != adminDID {
+		return "wrong_admin", ErrPurgeTokenInvalid
+	}
+	if claims.TargetDID != targetDID {
+		return "wrong_target", ErrPurgeTokenInvalid
 	}
 	// Record count drift is a separate sentinel — see
 	// ErrPurgeTokenCountDrift docs.
 	if claims.RecordCount != recordCount {
-		return ErrPurgeTokenCountDrift
+		return "count_drift", ErrPurgeTokenCountDrift
 	}
 
 	now := s.now()
 	if now.Unix() >= claims.Exp {
-		return ErrPurgeTokenExpired
+		return "expired", ErrPurgeTokenExpired
 	}
 
 	// Single-use check + lazy prune.
@@ -261,10 +346,10 @@ func (s *PurgeTokenSigner) Verify(token, adminDID, targetDID string, recordCount
 		}
 	}
 	if _, used := s.usedSigs[sigKey]; used {
-		return ErrPurgeTokenAlreadyUsed
+		return "already_used", ErrPurgeTokenAlreadyUsed
 	}
 	s.usedSigs[sigKey] = time.Unix(claims.Exp, 0)
-	return nil
+	return "", nil
 }
 
 func (s *PurgeTokenSigner) hmac(payload []byte) []byte {
@@ -344,7 +429,7 @@ func (r *Resolver) PreviewPurgeActor(ctx context.Context, did string) (map[strin
 		return nil, fmt.Errorf("count records: %w", err)
 	}
 
-	token, exp, err := r.purgeTokenSigner.Sign(adminDID, did, recordCount)
+	token, exp, err := r.purgeTokenSigner.Sign(ScopeActorPurge, adminDID, did, recordCount)
 	if err != nil {
 		return nil, fmt.Errorf("sign purge token: %w", err)
 	}
@@ -402,12 +487,19 @@ func (r *Resolver) PurgeActor(ctx context.Context, did, confirmToken string) (ma
 	// Recount records so the token-bound count is verified against
 	// fresh state. If the count drifted (a record was ingested
 	// between preview and purge), Verify rejects with
-	// ErrPurgeTokenInvalid and the operator re-previews.
+	// ErrPurgeTokenCountDrift and the operator re-previews.
 	recordCount, err := r.repos.Records.CountByDID(ctx, did)
 	if err != nil {
 		return nil, fmt.Errorf("count records: %w", err)
 	}
-	if err := r.purgeTokenSigner.Verify(confirmToken, adminDID, did, recordCount); err != nil {
+	// VerifyReason returns a bounded reason string (one of
+	// metrics.PurgeReason*) suitable for use as a Prometheus
+	// label. On rejection we increment the metric *before*
+	// returning so the SLO covers every failure path, including
+	// the wrong-admin / wrong-target forge attempts that
+	// collapse to ErrPurgeTokenInvalid in the error contract.
+	if reason, err := r.purgeTokenSigner.VerifyReason(confirmToken, ScopeActorPurge, adminDID, did, recordCount); err != nil {
+		metrics.PurgeTokenRejected(reason)
 		return nil, err
 	}
 
@@ -431,18 +523,20 @@ func (r *Resolver) PurgeActor(ctx context.Context, did, confirmToken string) (ma
 
 	// Best-effort Tap cleanup. Bounded timeout so a sidecar
 	// outage can't stall the resolver — the mutation has
-	// already returned success for the SQL leg.
-	tapStatus := "skipped"
+	// already returned success for the SQL leg. tapStatus must
+	// be one of metrics.PurgeTapStatus*; the resolver echoes the
+	// same value back to GraphQL.
+	tapStatus := metrics.PurgeTapStatusSkipped
 	if r.tapRemover != nil {
 		tapCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := r.tapRemover.RemoveRepos(tapCtx, []string{did}); err != nil {
 			slog.Warn("actor purge: tap removal failed (sql commit succeeded; rerun manually)",
-				"actor_did", did,
+				"actor_did", logsafe.DID(did),
 				"err", err)
-			tapStatus = "failed"
+			tapStatus = metrics.PurgeTapStatusFailed
 		} else {
-			tapStatus = "removed"
+			tapStatus = metrics.PurgeTapStatusRemoved
 		}
 	}
 
@@ -451,14 +545,26 @@ func (r *Resolver) PurgeActor(ctx context.Context, did, confirmToken string) (ma
 	// `target_did` is the mutation input; previously a redundant
 	// `actor_did` carried the same value, which broke any downstream
 	// SIEM tooling assuming the two fields differ. Dropped.
+	//
+	// did and adminDID are both validated upstream (did.IsValid in
+	// PreviewPurgeActor + PurgeActor, admin DID set by the auth
+	// middleware after did.IsValid). logsafe.DID is belt-and-braces:
+	// if a future bug bypasses upstream validation, the audit line
+	// is still well-formed.
 	slog.Info("actor purge",
 		"event", "actor_purge",
-		"target_did", did,
+		"target_did", logsafe.DID(did),
 		"record_count", deletedRecords,
 		"actor_rows", deletedActor,
-		"requested_by_did", adminDID,
+		"requested_by_did", logsafe.DID(adminDID),
 		"tap_status", tapStatus,
 		"ts", time.Now().UTC().Format(time.RFC3339))
+
+	// Metric tail: one purge counted, records-deleted histogram
+	// updated. Bucketed at 1/10/100/1k/10k/100k/1M so a single
+	// large-actor takedown is distinguishable from a noisy
+	// test-data cleanup loop.
+	metrics.PurgeActorCompleted(tapStatus, deletedRecords)
 
 	return map[string]interface{}{
 		"did":              did,

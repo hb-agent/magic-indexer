@@ -13,6 +13,7 @@ import (
 	"github.com/GainForest/hypergoat/internal/atproto/did"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/graphql/depth"
+	"github.com/GainForest/hypergoat/internal/logsafe"
 	"github.com/GainForest/hypergoat/internal/oauth"
 )
 
@@ -124,8 +125,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// arbitrary string and forge audit log entries.
 			if candidate != "" && did.IsValid(candidate) {
 				userDID = candidate
+				// logsafe.DID is belt-and-braces here — did.IsValid
+				// already passed — but it's the only way to keep the
+				// "every slog site that takes a DID uses logsafe"
+				// discipline auditable. A future change that loosens
+				// did.IsValid still produces a well-formed audit line.
 				slog.Info("[admin] Auth via X-User-DID + API key",
-					"did", userDID,
+					"did", logsafe.DID(userDID),
 					"remote_addr", r.RemoteAddr)
 			} else if candidate != "" {
 				slog.Warn("[admin] X-User-DID header rejected: not a valid DID",
@@ -202,9 +208,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Debug logging for auth
+	// Debug logging for auth. userDID was validated via did.IsValid
+	// upstream (either by the OAuth middleware or by the
+	// X-User-DID + API-key path above); logsafe.DID is
+	// defense-in-depth so a future bug bypassing validation
+	// cannot inject a forged audit line.
 	if userDID != "" {
-		slog.Info("[admin] Authenticated request", "userDID", userDID, "isAdmin", isAdmin)
+		slog.Info("[admin] Authenticated request", "userDID", logsafe.DID(userDID), "isAdmin", isAdmin)
 	}
 
 	// Inject auth info into context

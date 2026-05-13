@@ -13,14 +13,26 @@ import (
 	"github.com/GainForest/hypergoat/internal/lexicon"
 )
 
-// wantsContributorFilter reports whether a lexicon's generated
-// WhereInput should carry the special contributor filter field.
-// Today this is a single-collection list; when a second collection
-// adopts the same array-of-contributors-with-DID-identity shape,
-// add it here (and rename FieldFilter.IsArrayContributor to a Kind
-// enum at that time).
-func wantsContributorFilter(lexID string) bool {
-	return lexID == "org.hypercerts.claim.activity"
+// filterDescriptor describes a single lexicon-specific filter field
+// that needs a bespoke SQL shape (i.e. a non-KindScalar FieldFilter).
+// One entry per (lexicon, GraphQL field name) pair lives in
+// filterRegistry below; the schema builder injects the field at type
+// construction, and the where-input extractor uses it to wire input
+// into the right repositories.FilterKind. Field descriptions are
+// pinned at the registry so consumers see the policy text at schema
+// introspection.
+type filterDescriptor struct {
+	// Kind selects the SQL-emission strategy in
+	// repositories.buildSingleFilter.
+	Kind repositories.FilterKind
+	// FieldName is the GraphQL input-field name (e.g. "contributor",
+	// "subject"). It is also stored on the emitted FieldFilter for
+	// debugging — the SQL path is hardcoded by Kind, not FieldName.
+	FieldName string
+	// Description is the policy text shown to consumers via schema
+	// introspection. Pinned here so the GraphQL and SQL layers can
+	// never drift.
+	Description string
 }
 
 // contributorFieldDescription is the GraphQL field description for
@@ -30,19 +42,49 @@ func wantsContributorFilter(lexID string) bool {
 // rationale.
 const contributorFieldDescription = `Filter to activities where any contributors[*].contributorIdentity resolves to one of these DIDs. DIDs only — handle values are rejected at the GraphQL layer. Records whose contributor identity is a handle (not a DID) silently do not match — handle storage is a producer-side concern, not indexed as a queryable identity here. The strong-ref contributor variant (com.atproto.repo.strongRef) is not currently supported. To express "authored OR contributed" as a single query, compose with the did filter via _or: where: { _or: [ { did: { eq: "did:plc:me" } }, { contributor: { in: ["did:plc:me"] } } ] }.`
 
-// wantsBadgeAwardSubjectFilter reports whether a lexicon's generated
-// WhereInput should carry the special `subject` filter field.
-// Currently a single-collection list (app.certified.badge.award);
-// when a second collection adopts the same DID-or-strongRef union
-// subject shape, add it here and rename FieldFilter.IsBadgeAward-
-// Subject to a Kind enum at that time. See docs/issue-65/plan.md.
-func wantsBadgeAwardSubjectFilter(lexID string) bool {
-	return lexID == "app.certified.badge.award"
-}
-
 // badgeAwardSubjectDescription is pinned verbatim so consumers see
 // the policy at schema introspection.
 const badgeAwardSubjectDescription = `Filter badge awards by the subject DID. Matches awards whose subject resolves to the given DID across both lexicon refs of the subject union: app.certified.defs#did (object form {did: "did:plc:..."}) and com.atproto.repo.strongRef (object form {uri: "at://did:plc:.../...", cid: "..."} — DID is the at-uri authority). DIDs only — handle values are rejected at the GraphQL layer. Compose with the did filter via _or to express "issued by me OR targeting me": where: { _or: [ { did: { eq: "did:plc:me" } }, { subject: { eq: "did:plc:me" } } ] }.`
+
+// filterRegistry maps lexicon ID → (GraphQL input field name →
+// descriptor) for every lexicon-specific filter that needs a bespoke
+// SQL shape. Adding a new entry is the only place to touch when a
+// new lexicon adopts an existing FilterKind; adding a new
+// FilterKind is the only place to touch in repositories/filter.go
+// plus a new arm in buildSingleFilter.
+//
+// The registry intentionally lives in the GraphQL layer — the SQL
+// emitter is shape-agnostic and only sees a FilterKind, never a
+// lexicon ID. Keeping the policy here means lexicon-specific UX
+// (field name, description, what operators are accepted) does not
+// leak into the repository package.
+var filterRegistry = map[string]map[string]filterDescriptor{
+	"org.hypercerts.claim.activity": {
+		"contributor": {
+			Kind:        repositories.KindArrayContributor,
+			FieldName:   "contributor",
+			Description: contributorFieldDescription,
+		},
+	},
+	"app.certified.badge.award": {
+		"subject": {
+			Kind:        repositories.KindUnionSubject,
+			FieldName:   "subject",
+			Description: badgeAwardSubjectDescription,
+		},
+	},
+}
+
+// lookupFilterDescriptor returns the descriptor for a (lexicon, field)
+// pair if the registry has one. The second return value reports
+// presence in the standard Go idiom.
+func lookupFilterDescriptor(lexID, fieldName string) (filterDescriptor, bool) {
+	if byField, ok := filterRegistry[lexID]; ok {
+		d, ok := byField[fieldName]
+		return d, ok
+	}
+	return filterDescriptor{}, false
+}
 
 // buildWhereInputType generates a per-collection WhereInput InputObject type
 // from the lexicon's main record definition. Returns nil if the lexicon has
@@ -72,22 +114,14 @@ func buildWhereInputType(lex *lexicon.Lexicon) *graphql.InputObject {
 		Description: "Filter by record author DID (column-level, optimized)",
 	}
 
-	// Singular is deliberate: the predicate is per-record ("the record
-	// has a matching contributor"), not per-contributor.
-	if wantsContributorFilter(lex.ID) {
-		fields["contributor"] = &graphql.InputObjectFieldConfig{
+	// Inject any lexicon-specific filter fields from the registry.
+	// Each is a DIDFilterInput today; if a future descriptor needs a
+	// different input shape, extend filterDescriptor with a Type field
+	// (or a factory func) and switch here.
+	for _, descriptor := range filterRegistry[lex.ID] {
+		fields[descriptor.FieldName] = &graphql.InputObjectFieldConfig{
 			Type:        types.DIDFilterInput,
-			Description: contributorFieldDescription,
-		}
-	}
-
-	// `subject` is a per-record predicate. Issue #65: the consumer
-	// wants "give me awards targeting this DID" without scanning
-	// every issuer's PDS. See docs/issue-65/plan.md.
-	if wantsBadgeAwardSubjectFilter(lex.ID) {
-		fields["subject"] = &graphql.InputObjectFieldConfig{
-			Type:        types.DIDFilterInput,
-			Description: badgeAwardSubjectDescription,
+			Description: descriptor.Description,
 		}
 	}
 
@@ -180,30 +214,18 @@ func extractFieldFiltersRecursive(whereArg interface{}, lex *lexicon.Lexicon, de
 			continue
 		}
 
-		// Special-case: contributor filter on collections that opt in.
-		// Validates DIDs up front and emits a single FieldFilter with
-		// the array-contributor SQL marker. Returns from the per-field
-		// loop body via `continue` so the standard handler below does
-		// not also process this field.
-		if fieldName == "contributor" && lex != nil && wantsContributorFilter(lex.ID) {
-			f, err := buildContributorFieldFilter(filterMap)
-			if err != nil {
-				return repositories.FilterGroup{}, fmt.Errorf("field %q: %w", fieldName, err)
+		// Lexicon-specific filter? Dispatch through the registry. The
+		// emitted FieldFilter carries the Kind set on the descriptor;
+		// the SQL emitter dispatches on Kind in buildSingleFilter.
+		if lex != nil {
+			if descriptor, ok := lookupFilterDescriptor(lex.ID, fieldName); ok {
+				f, err := buildDIDOnlyEqInFilter(descriptor, filterMap)
+				if err != nil {
+					return repositories.FilterGroup{}, fmt.Errorf("field %q: %w", fieldName, err)
+				}
+				group.Filters = append(group.Filters, f)
+				continue
 			}
-			group.Filters = append(group.Filters, f)
-			continue
-		}
-
-		// Special-case: subject filter on badge.award. Matches either
-		// a bare DID string or a strong-ref whose URI starts with
-		// at://<did>/. See docs/issue-65/plan.md.
-		if fieldName == "subject" && lex != nil && wantsBadgeAwardSubjectFilter(lex.ID) {
-			f, err := buildBadgeAwardSubjectFieldFilter(filterMap)
-			if err != nil {
-				return repositories.FilterGroup{}, fmt.Errorf("field %q: %w", fieldName, err)
-			}
-			group.Filters = append(group.Filters, f)
-			continue
 		}
 
 		// Determine if this is a JSON field or a column.
@@ -304,26 +326,31 @@ func capitalize(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-// buildContributorFieldFilter parses the `contributor` filter input
-// (a DIDFilterInput shape, accepting `eq` and `in` only) and builds
-// a FieldFilter with IsArrayContributor=true. Every value is
-// validated as a DID up front so the SQL layer sees only sanitised
-// strings.
-func buildContributorFieldFilter(filterMap map[string]interface{}) (repositories.FieldFilter, error) {
+// buildDIDOnlyEqInFilter parses a DIDFilterInput-shaped input map
+// (accepting `eq` and `in` only, every value strictly validated as a
+// DID) and emits a FieldFilter whose Kind is set from the descriptor.
+// This is the canonical builder for any registered lexicon-specific
+// filter that takes a DID-only `eq`/`in` shape; the descriptor's Kind
+// drives SQL emission downstream.
+//
+// Error messages mention the descriptor's GraphQL field name so
+// validation errors surface the user-visible name (e.g. "contributor"
+// or "subject") rather than an internal field path.
+func buildDIDOnlyEqInFilter(descriptor filterDescriptor, filterMap map[string]interface{}) (repositories.FieldFilter, error) {
 	if eqVal, ok := filterMap["eq"]; ok {
 		s, ok := eqVal.(string)
 		if !ok {
 			return repositories.FieldFilter{}, fmt.Errorf("eq value must be a string DID, got %T", eqVal)
 		}
 		if !did.IsValid(s) {
-			return repositories.FieldFilter{}, fmt.Errorf("contributor filter values must be DIDs (did:...); resolve handles to DIDs in the session layer — handle values are not indexed as a queryable identity (rejected value: %q)", s)
+			return repositories.FieldFilter{}, fmt.Errorf("%s filter values must be DIDs (did:...); handle values are not indexed as a queryable identity (rejected value: %q)", descriptor.FieldName, s)
 		}
 		return repositories.FieldFilter{
-			FieldName:          "contributors",
-			Operator:           repositories.OpEq,
-			Value:              s,
-			IsJSON:             true,
-			IsArrayContributor: true,
+			FieldName: descriptor.FieldName,
+			Operator:  repositories.OpEq,
+			Value:     s,
+			IsJSON:    true,
+			Kind:      descriptor.Kind,
 		}, nil
 	}
 	if inVal, ok := filterMap["in"]; ok {
@@ -332,7 +359,7 @@ func buildContributorFieldFilter(filterMap map[string]interface{}) (repositories
 			return repositories.FieldFilter{}, fmt.Errorf("in value must be a list of DIDs, got %T", inVal)
 		}
 		if len(raw) == 0 {
-			return repositories.FieldFilter{}, fmt.Errorf("contributor in: list must contain at least one DID")
+			return repositories.FieldFilter{}, fmt.Errorf("%s in: list must contain at least one DID", descriptor.FieldName)
 		}
 		if len(raw) > repositories.MaxInListSize {
 			return repositories.FieldFilter{}, fmt.Errorf("in list exceeds maximum of %d values", repositories.MaxInListSize)
@@ -344,74 +371,17 @@ func buildContributorFieldFilter(filterMap map[string]interface{}) (repositories
 				return repositories.FieldFilter{}, fmt.Errorf("in[%d] must be a string DID, got %T", i, item)
 			}
 			if !did.IsValid(s) {
-				return repositories.FieldFilter{}, fmt.Errorf("contributor filter values must be DIDs (did:...); resolve handles to DIDs in the session layer — handle values are not indexed as a queryable identity (rejected value: %q)", s)
+				return repositories.FieldFilter{}, fmt.Errorf("%s filter values must be DIDs (did:...); handle values are not indexed as a queryable identity (rejected value: %q)", descriptor.FieldName, s)
 			}
 			values = append(values, s)
 		}
 		return repositories.FieldFilter{
-			FieldName:          "contributors",
-			Operator:           repositories.OpIn,
-			Value:              values,
-			IsJSON:             true,
-			IsArrayContributor: true,
+			FieldName: descriptor.FieldName,
+			Operator:  repositories.OpIn,
+			Value:     values,
+			IsJSON:    true,
+			Kind:      descriptor.Kind,
 		}, nil
 	}
-	return repositories.FieldFilter{}, fmt.Errorf("contributor filter requires `eq` or `in`")
-}
-
-// buildBadgeAwardSubjectFieldFilter parses the `subject` filter
-// input on app.certified.badge.award (a DIDFilterInput shape,
-// accepting `eq` and `in` only) and builds a FieldFilter with
-// IsBadgeAwardSubject=true. Every value is validated as a DID up
-// front so the SQL layer sees only sanitised strings. See
-// docs/issue-65/plan.md for why the SQL matches both the bare-DID
-// and strong-ref shapes.
-func buildBadgeAwardSubjectFieldFilter(filterMap map[string]interface{}) (repositories.FieldFilter, error) {
-	if eqVal, ok := filterMap["eq"]; ok {
-		s, ok := eqVal.(string)
-		if !ok {
-			return repositories.FieldFilter{}, fmt.Errorf("eq value must be a string DID, got %T", eqVal)
-		}
-		if !did.IsValid(s) {
-			return repositories.FieldFilter{}, fmt.Errorf("subject filter values must be DIDs (did:...); handle values are not indexed as a queryable identity (rejected value: %q)", s)
-		}
-		return repositories.FieldFilter{
-			FieldName:           "subject",
-			Operator:            repositories.OpEq,
-			Value:               s,
-			IsJSON:              true,
-			IsBadgeAwardSubject: true,
-		}, nil
-	}
-	if inVal, ok := filterMap["in"]; ok {
-		raw, ok := inVal.([]interface{})
-		if !ok {
-			return repositories.FieldFilter{}, fmt.Errorf("in value must be a list of DIDs, got %T", inVal)
-		}
-		if len(raw) == 0 {
-			return repositories.FieldFilter{}, fmt.Errorf("subject in: list must contain at least one DID")
-		}
-		if len(raw) > repositories.MaxInListSize {
-			return repositories.FieldFilter{}, fmt.Errorf("in list exceeds maximum of %d values", repositories.MaxInListSize)
-		}
-		values := make([]string, 0, len(raw))
-		for i, item := range raw {
-			s, ok := item.(string)
-			if !ok {
-				return repositories.FieldFilter{}, fmt.Errorf("in[%d] must be a string DID, got %T", i, item)
-			}
-			if !did.IsValid(s) {
-				return repositories.FieldFilter{}, fmt.Errorf("subject filter values must be DIDs (did:...); handle values are not indexed as a queryable identity (rejected value: %q)", s)
-			}
-			values = append(values, s)
-		}
-		return repositories.FieldFilter{
-			FieldName:           "subject",
-			Operator:            repositories.OpIn,
-			Value:               values,
-			IsJSON:              true,
-			IsBadgeAwardSubject: true,
-		}, nil
-	}
-	return repositories.FieldFilter{}, fmt.Errorf("subject filter requires `eq` or `in`")
+	return repositories.FieldFilter{}, fmt.Errorf("%s filter requires `eq` or `in`", descriptor.FieldName)
 }

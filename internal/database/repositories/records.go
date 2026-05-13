@@ -753,6 +753,17 @@ func (r *RecordsRepository) BeginTx(ctx context.Context, opts *sql.TxOptions) (*
 	return r.db.BeginTx(ctx, opts)
 }
 
+// DB exposes the underlying *sql.DB so cross-repo admin operations
+// (resetAll's per-table COUNT/DELETE over the full deletion list)
+// can issue raw SQL without each individual repo needing to grow a
+// matching shim. Treat as a privileged escape hatch — prefer typed
+// repository methods elsewhere. The repository keeps a single
+// database.Executor; this returns whatever *sql.DB that executor
+// wraps.
+func (r *RecordsRepository) DB() *sql.DB {
+	return r.db.DB()
+}
+
 // CountByDID returns the number of records authored by a single DID.
 // Used by the purge preview to give the operator a number to confirm
 // against before the destructive call.

@@ -2,12 +2,31 @@
 
 ## Unreleased — chore: review follow-ups for 2026-05-13 audit (P0 + selected P1)
 
-Lands the first wave of fixes from the six-reviewer audit recorded in
-`docs/review-2026-05-13/report.md`. Seven tracks complete (5 P0 + 2 P1);
-five remain for a follow-up (ResetAll hardening, FilterKind refactor,
-new-filter indexes, metrics + admin audit logs, resolver-level tests).
+Lands the fixes from the six-reviewer audit recorded in
+`docs/review-2026-05-13/report.md`. All twelve tracks complete (5 P0 + 6 P1 + 1 coverage).
 
 ### Server
+
+- **feat(admin)**: `resetAll` matches the actor-purge contract.
+  `previewResetAll` materializes per-table row counts and mints an
+  HMAC-signed `confirmToken` bound to (admin DID, total rows, exp,
+  scope=`reset_all`). `resetAll(confirmToken)` verifies the token,
+  re-counts under fresh state (drift rejects with the existing
+  `ErrPurgeTokenCountDrift` sentinel), and runs every DELETE in one
+  transaction over a hard-listed table set covering records, actors,
+  activity, labels, reports, notifications, OAuth tokens / sessions /
+  replay caches, and admin sessions. `config`, `lexicon`,
+  `oauth_client`, `label_definition`, and `jetstream_cursor` are
+  preserved by design so the reset doesn't lock the operator out.
+  Emits a structured audit log line (`event=reset_all
+  requested_by_did=… rows_deleted=… tables_affected=… ts=…`) matching
+  the `actor_purge` shape — SECURITY.md operator contract documents
+  the ≥90d retention requirement. The signer now carries an explicit
+  scope claim so an `actor_purge` token cannot cross-redeem into
+  `resetAll` (and vice versa); claim shape bumped to v2 with the
+  documented one-TTL window of invalidation on deploy. Client
+  `mutations.ts` ships the new shape; the settings page UI follows in
+  a separate track. Closes SEC-2 + A-1.
 
 - **fix(db)**: migration 021 drops the legacy `idx_record_json_gin` and
   recreates it as `idx_record_json_gin_path_ops` with `jsonb_path_ops`.
@@ -47,6 +66,74 @@ new-filter indexes, metrics + admin audit logs, resolver-level tests).
   periodic sweeper goroutine bounds the used-sig set to 4096 entries
   with periodic prune. Flaky tamper-the-signature test fixed.
 
+- **perf(db)**: index the new filter shapes from PRs #64 + #75 so
+  they can survive the 5s `/graphql` budget on busy collections
+  (P-2 + P-3). Four migrations: 023 adds an IMMUTABLE wrapper
+  function `record_contributor_identities(jsonb)` (Postgres rejects
+  inline subqueries in index expressions, SQLSTATE 0A000, so the
+  ARRAY-subquery has to live inside a function); 024 adds the
+  partial GIN expression index `idx_record_contributor_identities`
+  scoped to `org.hypercerts.claim.activity`; 025 adds the STORED
+  generated column `record.subject_did` over the three BadgeAward
+  subject shapes (bare-string `at://...`, strongRef object,
+  `app.certified.defs#did` object); 026 adds the partial btree
+  `idx_record_subject_did` scoped to `app.certified.badge.award`.
+  `internal/database/repositories/filter.go` rewrites the
+  KindArrayContributor and KindUnionSubject SQL to target the new
+  indexes (`@>` / `&&` on the wrapper function; `=` / `= ANY` on
+  the generated column). Operator note: migration 025's `ALTER
+  TABLE … ADD COLUMN … STORED` rewrites the table on Postgres
+  < 18 — schedule a maintenance window for >10M-row deployments.
+
+- **feat(metrics)**: destructive-op + admin-mutation observability
+  (T-OBS-1 + T-OBS-2). Five new Prometheus series:
+  `hypergoat_purge_token_rejected_total{reason}` (bounded
+  seven-value reason set — never `err.Error()`),
+  `hypergoat_purge_actor_total{tap_status}`,
+  `hypergoat_purge_records_deleted` histogram
+  (1/10/100/1k/10k/100k/1M buckets),
+  `hypergoat_admin_settings_changed_total{field}`, and
+  `hypergoat_reset_all_total`. `PurgeTokenSigner` exposes
+  `VerifyReason` alongside `Verify` so the resolver can label the
+  metric without leaking the more granular reason into the error
+  contract (wrong_admin and wrong_target still collapse to
+  `ErrPurgeTokenInvalid`; the metric label distinguishes them).
+
+- **feat(admin)**: audit logs for every state-changing admin
+  mutation (T-OBS-2). `updateSettings` emits one
+  `event=admin_settings_changed` line per applied field with
+  `before` / `after` operator-controlled strings scrubbed through
+  `logsafe.String`. `addAdmin` and `removeAdmin` emit
+  `event=admin_added` / `event=admin_removed` with `actor_did`,
+  `target_did`, `total_admins`. Shape mirrors the `actor_purge` and
+  `reset_all` lines so a single log-aggregator rule routes the
+  whole admin surface. SECURITY.md grows an audit-log + metrics
+  table under "Admin surface".
+
+- **feat(logsafe)**: new `internal/logsafe` package with `DID(s)`
+  and `String(s)` helpers (Q-6). `DID` returns the input if it
+  passes `did.IsValid`, otherwise a sentinel `<invalid-did>` marker.
+  `String` replaces ASCII controls, DEL, U+2028, U+2029, and
+  invalid UTF-8 with U+FFFD and truncates at 256 bytes after
+  replacement so a hostile payload cannot pad past the cap.
+  Applied at every audit-log slog site (purge, resetAll, the new
+  admin-mutation events, the X-User-DID + API-key auth log) as
+  belt-and-braces against a future bug bypassing upstream DID
+  validation.
+
+- **test(coverage)**: resolver-level + Postgres-backed shape tests
+  for the purge subsystem and new filter SQL (T-COV-1 + T-COV-3).
+  `purge_resolver_test.go` covers admin gating, DID validation,
+  transaction boundary, tap-status classification, audit-log
+  emission, and metric increments — the gaps the existing
+  signer-only tests left open. `records_filter_test.go` grows
+  Postgres-backed table-driven tests pinning the contributor and
+  BadgeAward-subject SQL against every production shape (bare
+  string, strongRef, defs#did for subject; bare string + object
+  form for contributor) plus the subject_did generated column
+  and the array-size + non-array guards. Locally these need a
+  live Postgres (`TEST_DATABASE_URL`); CI provides one.
+
 ### Client
 
 - **fix(client)**: settings form hydration was using `useState(()=>…)`
@@ -61,22 +148,6 @@ new-filter indexes, metrics + admin audit logs, resolver-level tests).
   guard at the callback was insufficient against `/\evil.com`,
   `/%2f%2fevil.com`, and leading-whitespace tricks. Defense in depth;
   browser mitigations made the live exploit narrow.
-
-### Deferred to follow-up
-
-The following review items remain backlog:
-
-- **Track 3** — `ResetAll` HMAC hardening + complete deletion list +
-  structured audit log (SEC-2 + A-1).
-- **Track 8** — `FilterKind` enum + per-lexicon descriptor registry to
-  collapse the two per-collection filter builders (Q-2 + A-2).
-- **Track 9** — partial-GIN expression index for contributors + subject
-  DID materialization to make the new filters indexable (P-2 + P-3).
-- **Track 10** — purge metrics (`hypergoat_purge_token_rejected_total`)
-  + audit logs for `UpdateSettings` / `ResetAll` / admin-DID mutations
-  + `internal/logsafe` slog scrubber (T-OBS-1 + T-OBS-2 + Q-6).
-- **Track 12** — resolver-level tests for the purge subsystem +
-  Postgres-backed shape tests for the new filters (T-COV-1 + T-COV-3).
 
 See `docs/review-2026-05-13/implementation-plan.md` for full
 tracking; `report.md` and the round-1/round-2 review docs for

@@ -49,10 +49,36 @@ export const UPLOAD_LEXICONS = gql`
   }
 `;
 
-// Reset All
+// Preview the wipe-all-data mutation. Returns the per-table counts
+// the operator confirms against plus an HMAC-signed token they
+// hand back to RESET_ALL. The server binds the token to (admin
+// DID, total row count, expiry, scope=reset_all) so a stale,
+// replayed, or hijacked token is rejected. Mirrors the
+// PREVIEW_PURGE_ACTOR contract.
+export const PREVIEW_RESET_ALL = gql`
+  mutation PreviewResetAll {
+    previewResetAll {
+      totalRows
+      tables {
+        name
+        count
+      }
+      confirmToken
+      tokenExpiresAt
+      tokenTtlSeconds
+    }
+  }
+`;
+
+// Confirm and execute the reset. confirmToken comes from
+// PREVIEW_RESET_ALL; the server rejects expired / mismatched /
+// already-used tokens.
 export const RESET_ALL = gql`
-  mutation ResetAll($confirm: String!) {
-    resetAll(confirm: $confirm)
+  mutation ResetAll($confirmToken: String!) {
+    resetAll(confirmToken: $confirmToken) {
+      rowsDeleted
+      tablesAffected
+    }
   }
 `;
 
