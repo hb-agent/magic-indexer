@@ -538,11 +538,11 @@ func contributorFilterGroup(op repositories.FilterOperator, value interface{}) *
 	return &repositories.FilterGroup{
 		Operator: repositories.GroupAND,
 		Filters: []repositories.FieldFilter{{
-			FieldName:          "contributors",
-			Operator:           op,
-			Value:              value,
-			IsJSON:             true,
-			IsArrayContributor: true,
+			FieldName: "contributors",
+			Operator:  op,
+			Value:     value,
+			IsJSON:    true,
+			Kind:      repositories.KindArrayContributor,
 		}},
 	}
 }
@@ -710,7 +710,7 @@ func TestGetByCollectionFiltered_Contributor_ComposeWithDID_OR(t *testing.T) {
 			Operator: repositories.GroupOR,
 			Filters: []repositories.FieldFilter{
 				{FieldName: "did", Operator: repositories.OpEq, Value: "did:plc:author2", IsJSON: false},
-				{FieldName: "contributors", Operator: repositories.OpEq, Value: "did:plc:alice", IsJSON: true, IsArrayContributor: true},
+				{FieldName: "contributors", Operator: repositories.OpEq, Value: "did:plc:alice", IsJSON: true, Kind: repositories.KindArrayContributor},
 			},
 		}},
 	}

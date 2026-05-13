@@ -6,15 +6,15 @@ import (
 )
 
 // These tests exercise the pure SQL-building path of buildSingleFilter
-// for the IsArrayContributor branch. No database is required.
+// for the KindArrayContributor branch. No database is required.
 
 func TestBuildSingleFilter_Contributor_Eq(t *testing.T) {
 	f := FieldFilter{
-		FieldName:          "contributors",
-		Operator:           OpEq,
-		Value:              "did:plc:alice",
-		IsJSON:             true,
-		IsArrayContributor: true,
+		FieldName: "contributors",
+		Operator:  OpEq,
+		Value:     "did:plc:alice",
+		IsJSON:    true,
+		Kind:      KindArrayContributor,
 	}
 	clause, params, nextIdx, err := buildSingleFilter(f, 1)
 	if err != nil {
@@ -58,11 +58,11 @@ func TestBuildSingleFilter_Contributor_Eq(t *testing.T) {
 
 func TestBuildSingleFilter_Contributor_In(t *testing.T) {
 	f := FieldFilter{
-		FieldName:          "contributors",
-		Operator:           OpIn,
-		Value:              []string{"did:plc:alice", "did:plc:bob"},
-		IsJSON:             true,
-		IsArrayContributor: true,
+		FieldName: "contributors",
+		Operator:  OpIn,
+		Value:     []string{"did:plc:alice", "did:plc:bob"},
+		IsJSON:    true,
+		Kind:      KindArrayContributor,
 	}
 	clause, params, nextIdx, err := buildSingleFilter(f, 3)
 	if err != nil {
@@ -91,11 +91,11 @@ func TestBuildSingleFilter_Contributor_UnsupportedOperator(t *testing.T) {
 		op := op
 		t.Run(string(op), func(t *testing.T) {
 			f := FieldFilter{
-				FieldName:          "contributors",
-				Operator:           op,
-				Value:              "did:plc:alice",
-				IsJSON:             true,
-				IsArrayContributor: true,
+				FieldName: "contributors",
+				Operator:  op,
+				Value:     "did:plc:alice",
+				IsJSON:    true,
+				Kind:      KindArrayContributor,
 			}
 			_, _, _, err := buildSingleFilter(f, 1)
 			if err == nil {
@@ -109,11 +109,11 @@ func TestBuildSingleFilter_Contributor_UnsupportedOperator(t *testing.T) {
 // in the JSON path — the only user input is bound via $N.
 func TestBuildSingleFilter_Contributor_NoUserInputInSQL(t *testing.T) {
 	f := FieldFilter{
-		FieldName:          "contributors",
-		Operator:           OpEq,
-		Value:              "did:plc:'; DROP TABLE record; --",
-		IsJSON:             true,
-		IsArrayContributor: true,
+		FieldName: "contributors",
+		Operator:  OpEq,
+		Value:     "did:plc:'; DROP TABLE record; --",
+		IsJSON:    true,
+		Kind:      KindArrayContributor,
 	}
 	clause, params, _, err := buildSingleFilter(f, 1)
 	if err != nil {
@@ -128,14 +128,14 @@ func TestBuildSingleFilter_Contributor_NoUserInputInSQL(t *testing.T) {
 }
 
 // Sanity: the contributor branch is never reached for filters
-// without the marker, even if FieldName happens to match.
+// without the Kind marker, even if FieldName happens to match.
 func TestBuildSingleFilter_ContributorsFieldNameWithoutMarker(t *testing.T) {
 	f := FieldFilter{
 		FieldName: "contributors",
 		Operator:  OpEq,
 		Value:     "did:plc:alice",
 		IsJSON:    true,
-		// IsArrayContributor intentionally false
+		// Kind intentionally KindScalar (zero value)
 	}
 	clause, _, _, err := buildSingleFilter(f, 1)
 	if err != nil {
@@ -147,17 +147,17 @@ func TestBuildSingleFilter_ContributorsFieldNameWithoutMarker(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// IsBadgeAwardSubject — issue #65 subject filter on badge.award.
+// KindUnionSubject — issue #65 subject filter on badge.award.
 // Pure SQL-building tests; no database required.
 // ---------------------------------------------------------------------------
 
 func TestBuildSingleFilter_BadgeAwardSubject_Eq(t *testing.T) {
 	f := FieldFilter{
-		FieldName:           "subject",
-		Operator:            OpEq,
-		Value:               "did:plc:alice",
-		IsJSON:              true,
-		IsBadgeAwardSubject: true,
+		FieldName: "subject",
+		Operator:  OpEq,
+		Value:     "did:plc:alice",
+		IsJSON:    true,
+		Kind:      KindUnionSubject,
 	}
 	clause, params, nextIdx, err := buildSingleFilter(f, 1)
 	if err != nil {
@@ -187,11 +187,11 @@ func TestBuildSingleFilter_BadgeAwardSubject_Eq(t *testing.T) {
 
 func TestBuildSingleFilter_BadgeAwardSubject_In(t *testing.T) {
 	f := FieldFilter{
-		FieldName:           "subject",
-		Operator:            OpIn,
-		Value:               []string{"did:plc:alice", "did:plc:bob"},
-		IsJSON:              true,
-		IsBadgeAwardSubject: true,
+		FieldName: "subject",
+		Operator:  OpIn,
+		Value:     []string{"did:plc:alice", "did:plc:bob"},
+		IsJSON:    true,
+		Kind:      KindUnionSubject,
 	}
 	clause, params, nextIdx, err := buildSingleFilter(f, 1)
 	if err != nil {
@@ -215,11 +215,11 @@ func TestBuildSingleFilter_BadgeAwardSubject_In(t *testing.T) {
 func TestBuildSingleFilter_BadgeAwardSubject_UnsupportedOperator(t *testing.T) {
 	for _, op := range []FilterOperator{OpNeq, OpGt, OpLt, OpGte, OpLte, OpContains, OpStartsWith} {
 		f := FieldFilter{
-			FieldName:           "subject",
-			Operator:            op,
-			Value:               "did:plc:alice",
-			IsJSON:              true,
-			IsBadgeAwardSubject: true,
+			FieldName: "subject",
+			Operator:  op,
+			Value:     "did:plc:alice",
+			IsJSON:    true,
+			Kind:      KindUnionSubject,
 		}
 		_, _, _, err := buildSingleFilter(f, 1)
 		if err == nil {
@@ -233,11 +233,11 @@ func TestBuildSingleFilter_BadgeAwardSubject_UnsupportedOperator(t *testing.T) {
 func TestBuildSingleFilter_BadgeAwardSubject_NoUserInputInSQL(t *testing.T) {
 	const malicious = "did:plc:'; DROP TABLE record; --"
 	f := FieldFilter{
-		FieldName:           "subject",
-		Operator:            OpEq,
-		Value:               malicious,
-		IsJSON:              true,
-		IsBadgeAwardSubject: true,
+		FieldName: "subject",
+		Operator:  OpEq,
+		Value:     malicious,
+		IsJSON:    true,
+		Kind:      KindUnionSubject,
 	}
 	clause, params, _, err := buildSingleFilter(f, 1)
 	if err != nil {
@@ -261,11 +261,11 @@ func TestBuildSingleFilter_BadgeAwardSubject_NoUserInputInSQL(t *testing.T) {
 // that drops any of these branches must update this test deliberately.
 func TestBuildSingleFilter_BadgeAwardSubject_AllThreeShapesCovered(t *testing.T) {
 	f := FieldFilter{
-		FieldName:           "subject",
-		Operator:            OpEq,
-		Value:               "did:plc:alice",
-		IsJSON:              true,
-		IsBadgeAwardSubject: true,
+		FieldName: "subject",
+		Operator:  OpEq,
+		Value:     "did:plc:alice",
+		IsJSON:    true,
+		Kind:      KindUnionSubject,
 	}
 	clause, _, _, err := buildSingleFilter(f, 1)
 	if err != nil {
@@ -290,11 +290,11 @@ func TestBuildSingleFilter_BadgeAwardSubject_AllThreeShapesCovered(t *testing.T)
 // This mirrors the contributor branch's contract.
 func TestBuildSingleFilter_BadgeAwardSubject_MarkerDrivesBehavior(t *testing.T) {
 	f := FieldFilter{
-		FieldName:           "irrelevant",
-		Operator:            OpEq,
-		Value:               "did:plc:alice",
-		IsJSON:              true,
-		IsBadgeAwardSubject: true,
+		FieldName: "irrelevant",
+		Operator:  OpEq,
+		Value:     "did:plc:alice",
+		IsJSON:    true,
+		Kind:      KindUnionSubject,
 	}
 	clause, _, _, err := buildSingleFilter(f, 1)
 	if err != nil {

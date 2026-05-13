@@ -22,6 +22,41 @@ const (
 	OpStartsWith FilterOperator = "startsWith"
 )
 
+// FilterKind selects the SQL-emission strategy for a FieldFilter. Most
+// filters use KindScalar — the standard per-operator path against a
+// single JSON property or column. Lexicon-specific shapes that need a
+// bespoke EXISTS / union match opt into a non-default Kind; the registry
+// in the GraphQL `where` layer (see internal/graphql/schema/where.go)
+// pins which lexID+field pair maps to which Kind, and the SQL emitter in
+// buildSingleFilter dispatches on Kind. Adding a new shape is two
+// edits: a new constant here, a new arm in buildSingleFilter, and a
+// new registry entry where.go-side.
+type FilterKind int
+
+const (
+	// KindScalar is the default: standard FieldFilter operators against
+	// a JSON property or column. FieldName/IsJSON/LexiconType all carry
+	// real meaning.
+	KindScalar FilterKind = iota
+	// KindArrayContributor signals the special EXISTS-over-
+	// `json->'contributors'` SQL shape used by the
+	// `OrgHypercertsClaimActivityWhereInput.contributor` filter.
+	// FieldName is informational only on this path; the SQL hardcodes
+	// the JSON path. Matches contributor identities written either as a
+	// bare string (lexicon-compliant) or as the production-drift object
+	// shape {"$type":"...","identity":"<DID>"}.
+	KindArrayContributor
+	// KindUnionSubject signals the "match against subject-as-DID-string
+	// OR subject-as-strongRef-uri" SQL shape used by the
+	// `AppCertifiedBadgeAwardWhereInput.subject` filter (issue #65).
+	// The badge.award lexicon's `subject` is a union of
+	// `app.certified.defs#did` (object `{did: "did:plc:..."}`) and
+	// `com.atproto.repo.strongRef` (object with `uri` starting with
+	// `at://<did>/...`). A defensive bare-string branch is kept too.
+	// FieldName is informational; SQL hardcodes the JSON path.
+	KindUnionSubject
+)
+
 // FieldFilter describes a single filter condition on a record field.
 type FieldFilter struct {
 	// FieldName is the JSON property name (validated against fieldNameRegex).
@@ -39,24 +74,11 @@ type FieldFilter struct {
 	// LexiconType is the lexicon property type ("string", "integer", etc.)
 	// used for SQL CAST decisions.
 	LexiconType string
-	// IsArrayContributor, when true, signals the special EXISTS-over-
-	// `json->'contributors'` SQL shape used by the
-	// `OrgHypercertsClaimActivityWhereInput.contributor` filter.
-	// FieldName is informational only on this path; the SQL hardcodes
-	// the JSON path. The marker is intentionally narrow — if a second
-	// collection adopts the same array-of-objects-with-identity shape,
-	// rename to a Kind enum at that time.
-	IsArrayContributor bool
-
-	// IsBadgeAwardSubject, when true, signals the special "match
-	// against subject-as-DID-string OR subject-as-strongRef-uri" SQL
-	// shape used by the `AppCertifiedBadgeAwardWhereInput.subject`
-	// filter (issue #65). The badge.award lexicon's `subject` is a
-	// union of `app.certified.defs#did` (bare DID string) and
-	// `com.atproto.repo.strongRef` (object with `uri` starting with
-	// `at://<did>/...`). FieldName is informational; SQL hardcodes
-	// the JSON path. Narrow marker like IsArrayContributor.
-	IsBadgeAwardSubject bool
+	// Kind selects the SQL-emission strategy; defaults to KindScalar.
+	// Non-default Kinds are bespoke per-lexicon shapes registered in
+	// the GraphQL where-layer registry; the SQL emitter dispatches on
+	// Kind in buildSingleFilter.
+	Kind FilterKind
 }
 
 // MaxArrayContributorScan caps the per-row scan of the contributors
@@ -365,11 +387,10 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 		return "", nil, paramIdx, err
 	}
 
-	if f.IsArrayContributor {
+	switch f.Kind {
+	case KindArrayContributor:
 		return buildContributorFilter(f, paramIdx)
-	}
-
-	if f.IsBadgeAwardSubject {
+	case KindUnionSubject:
 		return buildBadgeAwardSubjectFilter(f, paramIdx)
 	}
 
