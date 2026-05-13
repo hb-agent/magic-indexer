@@ -35,11 +35,15 @@ filter via `_or` for "authored OR contributed" in a single query.
   `buildSingleFilter` emits a guarded EXISTS subquery over
   `json->'contributors'` that COALESCEs the two contributor-identity
   shapes (bare string and `{$type,identity}` object) so both match.
-- Two cheap guards precede the EXISTS: `jsonb_typeof = 'array'` (so a
-  pathological record with a non-array `contributors` does not raise
-  and brick all queries) and `jsonb_array_length <= 200` (caps per-
-  row scan cost; oversized records are fail-safe invisible to the
-  filter). `MaxArrayContributorScan` mirrors the existing
+- The whole shape is wrapped in `CASE WHEN <guards> THEN EXISTS(...)
+  ELSE FALSE END` because Postgres does not guarantee left-to-right
+  AND evaluation in WHERE; CASE is the documented escape hatch for
+  forcing the guards to fire before the set-returning function.
+  Two cheap guards: `jsonb_typeof = 'array'` (so a pathological
+  record with a non-array `contributors` does not raise and brick
+  all queries) and `jsonb_array_length <= 200` (caps per-row scan
+  cost; oversized records are fail-safe invisible to the filter).
+  `MaxArrayContributorScan` mirrors the existing
   `notifications.MaxContributorsBeforeReject`.
 
 ### Input validation
@@ -49,10 +53,19 @@ filter via `_or` for "authored OR contributed" in a single query.
   required (`did:[a-z]+:`), no leading/trailing whitespace, length
   [8, 256], charset `[A-Za-z0-9:._-]`. Filter values are validated
   before reaching the SQL layer; an invalid value yields a clear
-  GraphQL error including the rejected entry.
-- Pre-existing `oauth.IsValidDID` (prefix-only) renamed to
-  `oauth.HasDIDMethodPrefix` to remove the foot-gun. Behaviour
-  unchanged at all six call sites.
+  GraphQL error including the rejected entry. Empty `in: []`
+  lists are also rejected with a clear error rather than silently
+  matching zero rows.
+- The pre-existing `oauth.IsValidDID` prefix-only check is
+  **removed**. The round-1 plan renamed it to
+  `oauth.HasDIDMethodPrefix`; round-2 review discovered that all
+  five remaining callers (labeler reset/pause endpoints,
+  `UpdateSettings` admin DIDs, service-auth JWT `iss` claim,
+  audit `X-User-DID` header) were vulnerable to specific attacks
+  (config-key namespace escape via `/../`, log injection via
+  newlines, URL injection via `?` flowing into the PLC resolver).
+  All five call sites now use the strict `did.IsValid`; the weak
+  helper and its test are deleted.
 
 ### Notifications extractor fix (folded into this release)
 
@@ -81,13 +94,29 @@ filter via `_or` for "authored OR contributed" in a single query.
 - Strong-ref variant support, gated on the
   `unrecognized_shape` metric trending up.
 
+### Metrics — outcome classification refinement (round-2)
+
+`contributor_identity_total{outcome}` classification was tightened
+to match the plan's intent. Empty bare-string contributor
+identities are now bucketed as `non_did` (a string, just not a
+valid DID) instead of `unrecognized_shape`. `unrecognized_shape`
+is reserved for genuinely non-string-shaped values (objects
+without `.identity`, arrays, numbers, malformed JSON) so a rising
+trend cleanly signals strong-refs entering production.
+
 ### Process
 
 - Implemented under the deep-flow process (see `AGENTS.md`).
-- Plan + 5-reviewer round (schema, SQL, security, performance,
+- Plan + 5-reviewer round-1 (schema, SQL, security, performance,
   ergonomics) at `docs/issue-64/`. One Critical (unbounded
   contributors-array DoS surface) plus 18 Major findings accepted
   and folded into the plan + implementation.
+- Implementation + 3-reviewer round-2 (plan-fidelity, security+SQL,
+  code-quality). Two more material Majors surfaced and fixed:
+  Postgres WHERE-clause AND ordering is not guaranteed (now using
+  CASE WHEN wrapper), and the rename of the weak oauth helper
+  still left five attack-surface callers — now all migrated to the
+  strict predicate and the weak helper deleted.
 
 ## 2026-05-09 — feat: server-side excludePds filter and pds field on every record
 
