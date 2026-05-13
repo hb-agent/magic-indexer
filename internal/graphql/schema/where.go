@@ -30,6 +30,20 @@ func wantsContributorFilter(lexID string) bool {
 // rationale.
 const contributorFieldDescription = `Filter to activities where any contributors[*].contributorIdentity resolves to one of these DIDs. DIDs only — handle values are rejected at the GraphQL layer. Records whose contributor identity is a handle (not a DID) silently do not match — handle storage is a producer-side concern, not indexed as a queryable identity here. The strong-ref contributor variant (com.atproto.repo.strongRef) is not currently supported. To express "authored OR contributed" as a single query, compose with the did filter via _or: where: { _or: [ { did: { eq: "did:plc:me" } }, { contributor: { in: ["did:plc:me"] } } ] }.`
 
+// wantsBadgeAwardSubjectFilter reports whether a lexicon's generated
+// WhereInput should carry the special `subject` filter field.
+// Currently a single-collection list (app.certified.badge.award);
+// when a second collection adopts the same DID-or-strongRef union
+// subject shape, add it here and rename FieldFilter.IsBadgeAward-
+// Subject to a Kind enum at that time. See docs/issue-65/plan.md.
+func wantsBadgeAwardSubjectFilter(lexID string) bool {
+	return lexID == "app.certified.badge.award"
+}
+
+// badgeAwardSubjectDescription is pinned verbatim so consumers see
+// the policy at schema introspection.
+const badgeAwardSubjectDescription = `Filter badge awards by the subject DID. Matches awards whose subject is either a bare DID string (app.certified.defs#did) or a strong-ref whose URI starts with at://<did>/ (com.atproto.repo.strongRef). DIDs only — handle values are rejected at the GraphQL layer. Compose with the did filter via _or to express "issued by me OR targeting me": where: { _or: [ { did: { eq: "did:plc:me" } }, { subject: { eq: "did:plc:me" } } ] }.`
+
 // buildWhereInputType generates a per-collection WhereInput InputObject type
 // from the lexicon's main record definition. Returns nil if the lexicon has
 // no filterable scalar properties.
@@ -64,6 +78,16 @@ func buildWhereInputType(lex *lexicon.Lexicon) *graphql.InputObject {
 		fields["contributor"] = &graphql.InputObjectFieldConfig{
 			Type:        types.DIDFilterInput,
 			Description: contributorFieldDescription,
+		}
+	}
+
+	// `subject` is a per-record predicate. Issue #65: the consumer
+	// wants "give me awards targeting this DID" without scanning
+	// every issuer's PDS. See docs/issue-65/plan.md.
+	if wantsBadgeAwardSubjectFilter(lex.ID) {
+		fields["subject"] = &graphql.InputObjectFieldConfig{
+			Type:        types.DIDFilterInput,
+			Description: badgeAwardSubjectDescription,
 		}
 	}
 
@@ -163,6 +187,18 @@ func extractFieldFiltersRecursive(whereArg interface{}, lex *lexicon.Lexicon, de
 		// not also process this field.
 		if fieldName == "contributor" && lex != nil && wantsContributorFilter(lex.ID) {
 			f, err := buildContributorFieldFilter(filterMap)
+			if err != nil {
+				return repositories.FilterGroup{}, fmt.Errorf("field %q: %w", fieldName, err)
+			}
+			group.Filters = append(group.Filters, f)
+			continue
+		}
+
+		// Special-case: subject filter on badge.award. Matches either
+		// a bare DID string or a strong-ref whose URI starts with
+		// at://<did>/. See docs/issue-65/plan.md.
+		if fieldName == "subject" && lex != nil && wantsBadgeAwardSubjectFilter(lex.ID) {
+			f, err := buildBadgeAwardSubjectFieldFilter(filterMap)
 			if err != nil {
 				return repositories.FilterGroup{}, fmt.Errorf("field %q: %w", fieldName, err)
 			}
@@ -321,4 +357,61 @@ func buildContributorFieldFilter(filterMap map[string]interface{}) (repositories
 		}, nil
 	}
 	return repositories.FieldFilter{}, fmt.Errorf("contributor filter requires `eq` or `in`")
+}
+
+// buildBadgeAwardSubjectFieldFilter parses the `subject` filter
+// input on app.certified.badge.award (a DIDFilterInput shape,
+// accepting `eq` and `in` only) and builds a FieldFilter with
+// IsBadgeAwardSubject=true. Every value is validated as a DID up
+// front so the SQL layer sees only sanitised strings. See
+// docs/issue-65/plan.md for why the SQL matches both the bare-DID
+// and strong-ref shapes.
+func buildBadgeAwardSubjectFieldFilter(filterMap map[string]interface{}) (repositories.FieldFilter, error) {
+	if eqVal, ok := filterMap["eq"]; ok {
+		s, ok := eqVal.(string)
+		if !ok {
+			return repositories.FieldFilter{}, fmt.Errorf("eq value must be a string DID, got %T", eqVal)
+		}
+		if !did.IsValid(s) {
+			return repositories.FieldFilter{}, fmt.Errorf("subject filter values must be DIDs (did:...); handle values are not indexed as a queryable identity (rejected value: %q)", s)
+		}
+		return repositories.FieldFilter{
+			FieldName:           "subject",
+			Operator:            repositories.OpEq,
+			Value:               s,
+			IsJSON:              true,
+			IsBadgeAwardSubject: true,
+		}, nil
+	}
+	if inVal, ok := filterMap["in"]; ok {
+		raw, ok := inVal.([]interface{})
+		if !ok {
+			return repositories.FieldFilter{}, fmt.Errorf("in value must be a list of DIDs, got %T", inVal)
+		}
+		if len(raw) == 0 {
+			return repositories.FieldFilter{}, fmt.Errorf("subject in: list must contain at least one DID")
+		}
+		if len(raw) > repositories.MaxInListSize {
+			return repositories.FieldFilter{}, fmt.Errorf("in list exceeds maximum of %d values", repositories.MaxInListSize)
+		}
+		values := make([]string, 0, len(raw))
+		for i, item := range raw {
+			s, ok := item.(string)
+			if !ok {
+				return repositories.FieldFilter{}, fmt.Errorf("in[%d] must be a string DID, got %T", i, item)
+			}
+			if !did.IsValid(s) {
+				return repositories.FieldFilter{}, fmt.Errorf("subject filter values must be DIDs (did:...); handle values are not indexed as a queryable identity (rejected value: %q)", s)
+			}
+			values = append(values, s)
+		}
+		return repositories.FieldFilter{
+			FieldName:           "subject",
+			Operator:            repositories.OpIn,
+			Value:               values,
+			IsJSON:              true,
+			IsBadgeAwardSubject: true,
+		}, nil
+	}
+	return repositories.FieldFilter{}, fmt.Errorf("subject filter requires `eq` or `in`")
 }
