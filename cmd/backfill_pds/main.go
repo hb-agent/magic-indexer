@@ -76,7 +76,7 @@ func run() error {
 		return fmt.Errorf("DATABASE_URL env not set")
 	}
 
-	db, err := server.ConnectDatabase(cfg.DatabaseURL)
+	db, err := server.ConnectDatabase(cfg.DatabaseURL, cfg.DBStatementTimeoutMs)
 	if err != nil {
 		return fmt.Errorf("connect database: %w", err)
 	}

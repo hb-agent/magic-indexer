@@ -6,6 +6,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,9 +23,65 @@ type Executor struct {
 	db *sql.DB
 }
 
+// statementTimeoutRegex matches a `statement_timeout=` token preceded
+// by a `-c` flag inside a Postgres `options` connection-string value.
+// Anchored on whitespace boundaries so it cannot false-match the
+// adjacent `idle_in_transaction_session_timeout` GUC name.
+var statementTimeoutRegex = regexp.MustCompile(`(^|\s)-c\s+statement_timeout=`)
+
+// injectStatementTimeout returns databaseURL with a
+// `?options=-c statement_timeout=<ms>` parameter appended if and
+// only if the operator has not already set `statement_timeout`. If
+// the operator has, the existing value is preserved and a single
+// slog line records the choice so the deploy log shows which value
+// is in force.
+//
+// The merge preserves any other `-c` flags in `options` (e.g.,
+// `-c search_path=foo`) and all other URL query parameters
+// (`sslmode`, `application_name`, etc.). When the URL cannot be
+// parsed, the original string is returned unchanged — `sql.Open`
+// will report the real error.
+//
+// Do not issue `SET statement_timeout` without `LOCAL` anywhere in
+// the application — the URL-level value is the contract and a
+// session-scoped `SET` would leak to subsequent users of the same
+// pooled connection.
+func injectStatementTimeout(databaseURL string, statementTimeoutMs int) string {
+	if statementTimeoutMs <= 0 {
+		return databaseURL
+	}
+	parsed, err := url.Parse(databaseURL)
+	if err != nil {
+		return databaseURL
+	}
+	q := parsed.Query()
+	existing := q.Get("options")
+	if statementTimeoutRegex.MatchString(existing) {
+		slog.Info("statement_timeout preserved from DATABASE_URL",
+			"options", existing,
+		)
+		return databaseURL
+	}
+	directive := "-c statement_timeout=" + strconv.Itoa(statementTimeoutMs)
+	merged := directive
+	if existing != "" {
+		merged = existing + " " + directive
+	}
+	q.Set("options", merged)
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
+}
+
 // NewExecutor creates a new PostgreSQL executor from a database URL.
 // URL format: "postgres://user:pass@host:port/dbname?sslmode=disable"
-func NewExecutor(databaseURL string) (*Executor, error) {
+//
+// statementTimeoutMs, when > 0, is injected as a server-side hard
+// kill via the URL's `options=-c statement_timeout=<ms>` parameter.
+// Every connection in the pool inherits it at session start. Set
+// from `DB_STATEMENT_TIMEOUT_MS`; default 30000.
+func NewExecutor(databaseURL string, statementTimeoutMs int) (*Executor, error) {
+	databaseURL = injectStatementTimeout(databaseURL, statementTimeoutMs)
+
 	// Open the database using pgx driver
 	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {

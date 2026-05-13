@@ -47,6 +47,7 @@ import (
 	notifextractors "github.com/GainForest/hypergoat/internal/notifications/extractors"
 	"github.com/GainForest/hypergoat/internal/oauth"
 	"github.com/GainForest/hypergoat/internal/server"
+	svrmiddleware "github.com/GainForest/hypergoat/internal/server/middleware"
 	"github.com/GainForest/hypergoat/internal/tap"
 	"github.com/GainForest/hypergoat/internal/workers"
 )
@@ -242,7 +243,7 @@ func run() error {
 // repository instances. JetstreamActivityRepository is created once here
 // instead of being duplicated across multiple call sites.
 func initServices(cfg *config.Config) (*services, error) {
-	db, err := server.ConnectDatabase(cfg.DatabaseURL)
+	db, err := server.ConnectDatabase(cfg.DatabaseURL, cfg.DBStatementTimeoutMs)
 	if err != nil {
 		return nil, err
 	}
@@ -983,13 +984,21 @@ func setupGraphQL(r *chi.Mux, cfg *config.Config, svc *services, pubsub *subscri
 		Labels:   svc.labels,
 	}
 
-	graphqlHandler, err := hgraphql.NewHandler(registry, repos)
+	graphqlHandler, err := hgraphql.NewHandler(registry, repos, cfg.GraphQLPublicQueryTimeoutMs)
 	if err != nil {
 		slog.Error("Failed to create GraphQL handler", "error", err)
 	} else {
-		r.Handle("/graphql", graphqlHandler)
-		r.Handle("/graphql/", graphqlHandler)
-		slog.Info("GraphQL endpoint enabled", "path", "/graphql")
+		// QueryTimeoutMiddleware applies only to /graphql (issue #71).
+		// /graphql/ws (subscriptions) and /admin/graphql have their
+		// own threat models — Layer 1 (pool-level statement_timeout)
+		// covers those.
+		queryTimeout := time.Duration(cfg.GraphQLPublicQueryTimeoutMs) * time.Millisecond
+		r.With(svrmiddleware.QueryTimeoutMiddleware(queryTimeout)).Handle("/graphql", graphqlHandler)
+		r.With(svrmiddleware.QueryTimeoutMiddleware(queryTimeout)).Handle("/graphql/", graphqlHandler)
+		slog.Info("GraphQL endpoint enabled",
+			"path", "/graphql",
+			"query_timeout_ms", cfg.GraphQLPublicQueryTimeoutMs,
+		)
 
 		// WebSocket subscription endpoint
 		var allowedOrigins []string

@@ -1038,6 +1038,23 @@ Other things that came up in review and were intentionally
   to see producer drift; `outcome="unrecognized_shape"` is
   the signal that strong-refs may be entering production.
   See `docs/issue-64/plan.md`.
+- **Query budgets are layered, not single-pool isolation**
+  (issue #71). Two env knobs:
+  `DB_STATEMENT_TIMEOUT_MS` (Layer 1, pool-level
+  `statement_timeout`, default 30 s) and
+  `GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS` (Layer 2, per-request
+  middleware on `/graphql`, default 5 s). `config.Validate()`
+  enforces Layer 1 > Layer 2. Admin and subscription paths
+  rely on Layer 1 only — different threat models, intentional.
+  See `docs/issue-71/plan.md`.
+- **GraphQL `extensions.code` is SCREAMING_SNAKE_CASE** —
+  project convention introduced by #71. Initial reserved set:
+  `QUERY_TIMEOUT`, `QUERY_TOO_DEEP`, `QUERY_TOO_LARGE`,
+  `UNAUTHENTICATED`, `INTERNAL_ERROR`. The strings are part of
+  the public API contract; renaming requires deprecation
+  procedures. The `X-Query-Budget-Ms` request-header name is
+  reserved for a future per-request budget override; do not
+  use it for anything else.
 
 ---
 

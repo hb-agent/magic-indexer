@@ -84,6 +84,18 @@ type Config struct {
 
 	// Notifications
 	NotificationsEnabled bool // Enable the notifications subsystem (default false)
+
+	// Query budgets (issue #71). Two-layer defence against runaway
+	// queries holding pool connections. Both are operator-tunable.
+	// DBStatementTimeoutMs is injected as Postgres `statement_timeout`
+	// on every connection in the pool — a server-side hard kill that
+	// runs regardless of client liveness. GraphQLPublicQueryTimeoutMs
+	// is a tighter per-request budget applied only on `/graphql` via
+	// the QueryTimeoutMiddleware. Validate() enforces that Layer 1
+	// (DB) is strictly greater than Layer 2 (public budget) so the
+	// per-request budget always fires first under normal conditions.
+	DBStatementTimeoutMs        int
+	GraphQLPublicQueryTimeoutMs int
 }
 
 // Load reads configuration from environment variables.
@@ -153,6 +165,11 @@ func Load() (*Config, error) {
 		ValidationMode:             getEnv("VALIDATION_MODE", "disabled"),
 
 		NotificationsEnabled: getEnvBool("NOTIFICATIONS_ENABLED", false),
+
+		// Query budgets (issue #71). Defaults are conservative; tune
+		// based on httpRequestDuration p99 from /metrics.
+		DBStatementTimeoutMs:        getEnvInt("DB_STATEMENT_TIMEOUT_MS", 30000),
+		GraphQLPublicQueryTimeoutMs: getEnvInt("GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS", 5000),
 	}
 
 	// Generate SecretKeyBase if not provided
@@ -220,6 +237,30 @@ func (c *Config) Validate() error {
 		)
 	}
 
+	// Query budgets (issue #71). Layer 1 is the pool-level
+	// statement_timeout safety net; Layer 2 is the per-request budget
+	// on /graphql. The per-request budget must fire first under
+	// normal conditions; the pool ceiling catches stuck queries the
+	// per-request layer can't.
+	if c.DBStatementTimeoutMs < 1000 {
+		return fmt.Errorf(
+			"DB_STATEMENT_TIMEOUT_MS = %d is too small; minimum is 1000 (1 second)",
+			c.DBStatementTimeoutMs,
+		)
+	}
+	if c.GraphQLPublicQueryTimeoutMs < 100 {
+		return fmt.Errorf(
+			"GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS = %d is too small; minimum is 100",
+			c.GraphQLPublicQueryTimeoutMs,
+		)
+	}
+	if c.DBStatementTimeoutMs <= c.GraphQLPublicQueryTimeoutMs {
+		return fmt.Errorf(
+			"DB_STATEMENT_TIMEOUT_MS (%d) must be strictly greater than GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS (%d) — the pool-level safety net must outlast the per-request budget",
+			c.DBStatementTimeoutMs, c.GraphQLPublicQueryTimeoutMs,
+		)
+	}
+
 	return nil
 }
 
@@ -266,6 +307,8 @@ func (c *Config) LogConfig() {
 		"backfill_on_start", c.BackfillOnStart,
 		"allowed_origins", c.AllowedOrigins,
 		"labeler_dids_count", labelerDIDsCount(c.LabelerDIDs),
+		"db_statement_timeout_ms", c.DBStatementTimeoutMs,
+		"graphql_public_query_timeout_ms", c.GraphQLPublicQueryTimeoutMs,
 	)
 
 	if c.AdminAPIKey != "" {
