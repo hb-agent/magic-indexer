@@ -22,7 +22,10 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/GainForest/hypergoat/internal/database"
 )
@@ -101,8 +104,44 @@ func injectStatementTimeout(databaseURL string, statementTimeoutMs int) string {
 func NewExecutor(databaseURL string, statementTimeoutMs int) (*Executor, error) {
 	databaseURL = injectStatementTimeout(databaseURL, statementTimeoutMs)
 
-	// Open the database using pgx driver
-	db, err := sql.Open("pgx", databaseURL)
+	// Parse the URL into a pgx ConnConfig so we can override the
+	// default DeadlineContextWatcherHandler. The default sends a
+	// pg_cancel_backend on context cancel AND asyncCloses the TCP
+	// connection — under sustained timeout storms (issue #71's
+	// Layer-2 deadline firing at ~5s), every timeout churns one
+	// TCP+TLS handshake. With MaxOpenConns=50 and even a moderate
+	// rate of timeouts, the pool re-establishment loop becomes the
+	// bottleneck and pushes p99 *up* — exactly the latency the
+	// budget is supposed to protect against.
+	//
+	// CancelRequestContextWatcherHandler instead sends a
+	// CancelRequest on a sideband connection and lets the original
+	// connection return to the pool cleanly. Recommended in the
+	// pgx 5.3+ docs for high-traffic deployments.
+	connConfig, err := pgx.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, database.ConnectionError("failed to parse database URL", err)
+	}
+	connConfig.BuildContextWatcherHandler = func(c *pgconn.PgConn) ctxwatch.Handler {
+		return &pgconn.CancelRequestContextWatcherHandler{
+			Conn: c,
+			// CancelRequestDelay: how long to wait after the
+			// context fires before sending CancelRequest. Short
+			// enough that long-running queries don't hold the
+			// connection past the user's patience; long enough
+			// that genuinely-fast queries finish before we cancel.
+			CancelRequestDelay: 100 * time.Millisecond,
+			// DeadlineDelay: hard deadline on the underlying
+			// net.Conn. Fallback if CancelRequest itself stalls.
+			// Aligned with the request-level deadline so a stuck
+			// CancelRequest can't outlive the request budget.
+			DeadlineDelay: 10 * time.Second,
+		}
+	}
+	connStr := stdlib.RegisterConnConfig(connConfig)
+
+	// Open the database using pgx driver via the registered config.
+	db, err := sql.Open("pgx", connStr)
 	if err != nil {
 		return nil, database.ConnectionError("failed to open PostgreSQL database", err)
 	}
