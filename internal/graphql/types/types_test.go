@@ -312,3 +312,104 @@ func TestObjectBuilder_BuildObjectType(t *testing.T) {
 		t.Error("expected cached object on second call, got a different pointer")
 	}
 }
+
+// ---------- buildUnionType tests ----------
+//
+// These regressions cover zero-property ObjectDef variants in mixed
+// unions. graphql-go panics when asked to register an object type
+// with no fields, so a lexicon like `{"type": "object"}` with no
+// properties — which produces a zero-property ObjectDef — must
+// fall through to JSONScalar via the primitive-fallback path,
+// not be passed through as a real union variant.
+
+// registerEmptyAndPopulated registers a synthetic lexicon containing
+// (a) `#empty` — a zero-property object def, and (b) `#populated` —
+// an object def with a single string property. Returns the
+// fully-qualified refs in the same order.
+func registerEmptyAndPopulated(t *testing.T, r *lexicon.Registry, id string) (emptyRef, populatedRef string) {
+	t.Helper()
+	r.Register(&lexicon.Lexicon{
+		ID: id,
+		Defs: lexicon.Defs{
+			Others: map[string]lexicon.Def{
+				"empty": {
+					Type:   "object",
+					Object: &lexicon.ObjectDef{Type: "object"},
+				},
+				"populated": {
+					Type: "object",
+					Object: &lexicon.ObjectDef{
+						Type: "object",
+						Properties: []lexicon.PropertyEntry{
+							{Name: "value", Property: lexicon.Property{Type: "string"}},
+						},
+					},
+				},
+				"populated2": {
+					Type: "object",
+					Object: &lexicon.ObjectDef{
+						Type: "object",
+						Properties: []lexicon.PropertyEntry{
+							{Name: "other", Property: lexicon.Property{Type: "integer"}},
+						},
+					},
+				},
+			},
+		},
+	})
+	return lexicon.MakeRef(id, "empty"), lexicon.MakeRef(id, "populated")
+}
+
+func TestObjectBuilder_BuildUnionType_ZeroPropertyObjectFoldsToJSONScalar(t *testing.T) {
+	registry := lexicon.NewRegistry()
+	mapper := NewMapper()
+	builder := NewObjectBuilder(mapper, registry)
+
+	const lexID = "com.example.testunion"
+	emptyRef, populatedRef := registerEmptyAndPopulated(t, registry, lexID)
+
+	got := builder.buildUnionType(lexID, "myField", []string{emptyRef, populatedRef})
+	if got == nil {
+		t.Fatal("buildUnionType returned nil for {empty, populated}")
+	}
+	if got.Name() != JSONScalar.Name() {
+		t.Errorf("union of {zero-property object, populated object} = %q, want JSONScalar (zero-property variant must fold to primitive)", got.Name())
+	}
+}
+
+func TestObjectBuilder_BuildUnionType_AllZeroPropertyObjectFoldsToJSONScalar(t *testing.T) {
+	registry := lexicon.NewRegistry()
+	mapper := NewMapper()
+	builder := NewObjectBuilder(mapper, registry)
+
+	const lexID = "com.example.testunion2"
+	emptyRef, _ := registerEmptyAndPopulated(t, registry, lexID)
+	emptyRef2 := lexicon.MakeRef(lexID, "empty") // same ref re-used; sanity check
+
+	got := builder.buildUnionType(lexID, "myField", []string{emptyRef, emptyRef2})
+	if got == nil {
+		t.Fatal("buildUnionType returned nil for {empty, empty}")
+	}
+	if got.Name() != JSONScalar.Name() {
+		t.Errorf("union of {zero-property, zero-property} = %q, want JSONScalar", got.Name())
+	}
+}
+
+func TestObjectBuilder_BuildUnionType_PopulatedObjectsStillBuildRealUnion(t *testing.T) {
+	registry := lexicon.NewRegistry()
+	mapper := NewMapper()
+	builder := NewObjectBuilder(mapper, registry)
+
+	const lexID = "com.example.testunion3"
+	_, populatedRef := registerEmptyAndPopulated(t, registry, lexID)
+	populated2Ref := lexicon.MakeRef(lexID, "populated2")
+
+	got := builder.buildUnionType(lexID, "myField", []string{populatedRef, populated2Ref})
+	if got == nil {
+		t.Fatal("buildUnionType returned nil for {populated, populated2}")
+	}
+	if _, ok := got.(*graphql.Union); !ok {
+		t.Errorf("union of two populated objects = %T (%q), want *graphql.Union — the zero-property carve-out must not poison real unions",
+			got, got.Name())
+	}
+}

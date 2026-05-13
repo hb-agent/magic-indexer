@@ -144,3 +144,36 @@ export const POPULATE_ACTIVITY = gql`
     populateActivity
   }
 `;
+
+// Preview an actor purge. Returns the counts the operator confirms
+// against plus an HMAC-signed token they hand back to PURGE_ACTOR.
+// The server binds the token to (admin DID, target DID, record count,
+// expiry) so a stale, replayed, or hijacked token is rejected.
+export const PREVIEW_PURGE_ACTOR = gql`
+  mutation PreviewPurgeActor($did: String!) {
+    previewPurgeActor(did: $did) {
+      did
+      recordCount
+      actorExists
+      handle
+      latestIndexedAt
+      confirmToken
+      tokenExpiresAt
+      tokenTtlSeconds
+    }
+  }
+`;
+
+// Confirm and execute the purge. confirmToken comes from
+// PREVIEW_PURGE_ACTOR; the server rejects expired / mismatched /
+// already-used tokens.
+export const PURGE_ACTOR = gql`
+  mutation PurgeActor($did: String!, $confirmToken: String!) {
+    purgeActor(did: $did, confirmToken: $confirmToken) {
+      did
+      recordsDeleted
+      actorRowsDeleted
+      tapStatus
+    }
+  }
+`;

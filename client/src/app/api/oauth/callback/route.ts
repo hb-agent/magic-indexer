@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { Agent } from "@atproto/api";
 import { getGlobalOAuthClient } from "@/lib/auth/client";
 import { getRawSession } from "@/lib/session";
+import { env } from "@/lib/env";
 
 export const dynamic = "force-dynamic";
 
@@ -75,17 +76,39 @@ export async function GET(request: NextRequest) {
     session.returnTo = undefined; // Clear after use
     await session.save();
 
-    // Redirect to the page the user was on before login
+    // Redirect to the page the user was on before login.
+    //
+    // Behind a reverse proxy (Vercel, Railway, anything that
+    // terminates TLS upstream), request.url's host can be the
+    // internal address the proxy forwarded to, not the public
+    // origin the user typed in their browser. Redirecting to that
+    // breaks the flow — the browser either can't reach the host
+    // or, worse, the OAuth client's registered redirect_uri
+    // (which is derived from env.PUBLIC_URL — see
+    // client/src/lib/auth/client.ts and
+    // app/api/oauth/client-metadata.json/route.ts) won't match.
+    //
+    // Prefer env.PUBLIC_URL when set; fall back to requestUrl.origin
+    // for local dev where the request actually IS coming in on the
+    // public origin.
     const requestUrl = new URL(request.url);
-    const origin = requestUrl.origin;
-    const redirectPath = returnTo.startsWith("/") ? returnTo : "/";
+    const origin = env.PUBLIC_URL || requestUrl.origin;
+
+    // Defense in depth: reject `//`-prefixed paths even though
+    // `returnTo` is currently server-set. `"//evil.com".startsWith("/")`
+    // is true, and `"${origin}//evil.com"` is a scheme-relative URL
+    // browsers follow to evil.com. A single-`/` prefix that is NOT
+    // followed by another `/` keeps the redirect inside our origin.
+    const redirectPath =
+      returnTo.startsWith("/") && !returnTo.startsWith("//") ? returnTo : "/";
 
     return Response.redirect(`${origin}${redirectPath}`, 303);
   } catch (error) {
     console.error("OAuth callback failed:", error);
     const requestUrl = new URL(request.url);
+    const origin = env.PUBLIC_URL || requestUrl.origin;
     return Response.redirect(
-      `${requestUrl.origin}/?error=${encodeURIComponent("Authentication failed - please try again")}`,
+      `${origin}/?error=${encodeURIComponent("Authentication failed - please try again")}`,
       303
     );
   }

@@ -458,3 +458,101 @@ func TestGenerateRandomKey(t *testing.T) {
 		}
 	})
 }
+
+func TestNormalizeExternalBaseURL(t *testing.T) {
+	const (
+		host = "127.0.0.1"
+		port = 8080
+	)
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "empty falls back to host:port",
+			raw:  "",
+			want: "http://127.0.0.1:8080",
+		},
+		{
+			name: "whitespace-only falls back to host:port",
+			raw:  "   ",
+			want: "http://127.0.0.1:8080",
+		},
+		{
+			name: "schemeless public host gets https://",
+			raw:  "magic-indexer.example.com",
+			want: "https://magic-indexer.example.com",
+		},
+		{
+			name: "schemeless localhost gets http://",
+			raw:  "localhost:8080",
+			want: "http://localhost:8080",
+		},
+		{
+			name: "schemeless 127.0.0.1 gets http://",
+			raw:  "127.0.0.1:8080",
+			want: "http://127.0.0.1:8080",
+		},
+		{
+			name: "schemeless [::1] gets http://",
+			raw:  "[::1]:8080",
+			want: "http://[::1]:8080",
+		},
+		{
+			name: "schemeless mixed-case localhost gets http://",
+			raw:  "LocalHost:8080",
+			want: "http://LocalHost:8080",
+		},
+		{
+			name: "lowercases uppercase scheme",
+			raw:  "HTTPS://Magic-Indexer.example.com",
+			want: "https://Magic-Indexer.example.com",
+		},
+		{
+			name: "preserves host case once scheme is lowercased",
+			raw:  "Https://CamelCase.Example.COM",
+			want: "https://CamelCase.Example.COM",
+		},
+		{
+			name: "trims surrounding whitespace",
+			raw:  "  https://magic-indexer.example.com  ",
+			want: "https://magic-indexer.example.com",
+		},
+		{
+			name: "trims trailing slash",
+			raw:  "https://magic-indexer.example.com/",
+			want: "https://magic-indexer.example.com",
+		},
+		{
+			name: "trims multiple trailing slashes",
+			raw:  "https://magic-indexer.example.com///",
+			want: "https://magic-indexer.example.com",
+		},
+		{
+			name: "preserves path",
+			raw:  "https://magic-indexer.example.com/api",
+			want: "https://magic-indexer.example.com/api",
+		},
+		{
+			name: "schemeless with path defaults to https",
+			raw:  "magic-indexer.example.com/api",
+			want: "https://magic-indexer.example.com/api",
+		},
+		{
+			name: "preserves http scheme",
+			raw:  "http://internal.example.com",
+			want: "http://internal.example.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeExternalBaseURL(tt.raw, host, port)
+			if got != tt.want {
+				t.Errorf("normalizeExternalBaseURL(%q, %q, %d) = %q, want %q",
+					tt.raw, host, port, got, tt.want)
+			}
+		})
+	}
+}
