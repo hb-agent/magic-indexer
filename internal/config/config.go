@@ -92,11 +92,20 @@ type Config struct {
 	// runs regardless of client liveness. GraphQLPublicQueryTimeoutMs
 	// is a tighter per-request budget applied only on `/graphql` via
 	// the QueryTimeoutMiddleware. Validate() enforces that Layer 1
-	// (DB) is strictly greater than Layer 2 (public budget) so the
+	// (DB) is strictly greater than Layer 2 (public budget), and
+	// that Layer 2 is less than the chi outer router timeout, so the
 	// per-request budget always fires first under normal conditions.
 	DBStatementTimeoutMs        int
 	GraphQLPublicQueryTimeoutMs int
 }
+
+// HTTPRouterTimeoutMs is the outer chi `middleware.Timeout`
+// applied at the router level (`cmd/hypergoat/main.go`). It's
+// declared here so `config.Validate()` can enforce that the
+// per-request Layer-2 budget never exceeds it — if it did, chi
+// would fire first and the in-process budget shape would be a lie.
+// Hoisted from main.go to give Validate() a single source of truth.
+const HTTPRouterTimeoutMs = 60000
 
 // Load reads configuration from environment variables.
 // It loads .env file if present and applies defaults.
@@ -258,6 +267,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf(
 			"DB_STATEMENT_TIMEOUT_MS (%d) must be strictly greater than GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS (%d) — the pool-level safety net must outlast the per-request budget",
 			c.DBStatementTimeoutMs, c.GraphQLPublicQueryTimeoutMs,
+		)
+	}
+	if c.GraphQLPublicQueryTimeoutMs >= HTTPRouterTimeoutMs {
+		return fmt.Errorf(
+			"GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS (%d) must be strictly less than the chi router outer timeout (%d ms) — otherwise chi fires first and the per-request budget value advertised to clients is a lie",
+			c.GraphQLPublicQueryTimeoutMs, HTTPRouterTimeoutMs,
 		)
 	}
 

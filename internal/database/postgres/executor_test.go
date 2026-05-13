@@ -333,3 +333,43 @@ func mustParseQuery(t *testing.T, raw string) url.Values {
 func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
 }
+
+// Sec-M1: Postgres accepts three syntactic forms of -c
+// directive. The regex must catch all three so the
+// operator-override contract holds for each.
+
+func TestInjectStatementTimeout_PreservesGetoptShortForm(t *testing.T) {
+	// `-cstatement_timeout=10000` (no space) — getopt
+	// short-option-with-value form. Postgres accepts it.
+	in := "postgres://u:p@h:5432/db?options=-cstatement_timeout%3D10000"
+	got := injectStatementTimeout(in, 30000)
+	if got != in {
+		t.Errorf("operator -c<no-space> override not preserved:\n  got:  %s\n want: %s", got, in)
+	}
+}
+
+func TestInjectStatementTimeout_PreservesLongOptionForm(t *testing.T) {
+	// `--statement_timeout=10000` — long-option form. Equivalent
+	// to `-c statement_timeout=10000` per Postgres docs.
+	in := "postgres://u:p@h:5432/db?options=--statement_timeout%3D10000"
+	got := injectStatementTimeout(in, 30000)
+	if got != in {
+		t.Errorf("operator --long-form override not preserved:\n  got:  %s\n want: %s", got, in)
+	}
+}
+
+func TestInjectStatementTimeout_DoesNotFalseMatchLongerName(t *testing.T) {
+	// A hypothetical GUC like `--statement_timeout_extra=` must not
+	// match the regex — the `=` immediately after `statement_timeout`
+	// is the anchor that distinguishes them.
+	in := "postgres://u:p@h:5432/db?options=--statement_timeout_extra%3D5000"
+	got := injectStatementTimeout(in, 30000)
+	values := mustParseQuery(t, got)
+	options := values.Get("options")
+	if !contains(options, "statement_timeout_extra=5000") {
+		t.Errorf("longer-named GUC was dropped: %q", options)
+	}
+	if !contains(options, "-c statement_timeout=30000") {
+		t.Errorf("our default was not appended (regex false-matched the longer name): %q", options)
+	}
+}

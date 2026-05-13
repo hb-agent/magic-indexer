@@ -88,17 +88,6 @@ counter. Recommended Prometheus alert:
 - `idle_in_transaction_session_timeout` and `lock_timeout`
   companion budgets via the same URL mechanism.
 
-### Process
-
-Plan + 4-reviewer plan-review round at `docs/issue-71/`. Three of
-four reviewers independently caught the same structural bug in the
-original draft (header-after-write no-op + post-handler ctx.Err()
-race + chi.Timeout collision) — all collapsed into one fix: timeout
-detection and response shaping moved into the handler; middleware
-is a thin deadline wrapper. DB/pgx semantics review corrected the
-"connection returns to pool cleanly" claim. CORS expose-headers
-gap was caught and closed.
-
 ## Unreleased — feat: contributor filter on activity records + notifications fix
 
 Adds a server-side GraphQL filter `contributor: DIDFilterInput` on

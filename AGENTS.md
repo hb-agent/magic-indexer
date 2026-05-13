@@ -1017,8 +1017,8 @@ area.
   NULL tail is small. Check `SELECT count(*) FROM record WHERE
   sort_at IS NULL` before scheduling it.
 
-Other things that came up in review and were intentionally
-**not** changed:
+Active conventions and policies recorded during reviews
+(do-not-rediscover; do not undo without an explicit RFC):
 - The Go module path stays `github.com/GainForest/hypergoat`
   and the binary stays `hypergoat`. Renaming would touch ~80
   files for a brand-only change. The product is "Magic Indexer"

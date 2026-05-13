@@ -1,4 +1,13 @@
-// Package postgres provides a PostgreSQL implementation of the database Executor interface.
+// Package postgres provides a PostgreSQL implementation of the
+// database Executor interface.
+//
+// Pool-level operational invariant (issue #71): every connection
+// inherits `statement_timeout` from the DATABASE_URL `options=`
+// parameter, injected by `injectStatementTimeout` at executor
+// construction time. Do not issue `SET statement_timeout` without
+// `LOCAL` anywhere in the codebase — the URL-level value is the
+// contract, and a session-scoped `SET` would leak to subsequent
+// users of the same pooled connection.
 package postgres
 
 import (
@@ -23,42 +32,52 @@ type Executor struct {
 	db *sql.DB
 }
 
-// statementTimeoutRegex matches a `statement_timeout=` token preceded
-// by a `-c` flag inside a Postgres `options` connection-string value.
-// Anchored on whitespace boundaries so it cannot false-match the
-// adjacent `idle_in_transaction_session_timeout` GUC name.
-var statementTimeoutRegex = regexp.MustCompile(`(^|\s)-c\s+statement_timeout=`)
+// statementTimeoutRegex matches a `statement_timeout=` directive
+// in any of the three syntactic forms Postgres accepts inside an
+// `options` connection-string value:
+//
+//	-c statement_timeout=10000    (space — most common)
+//	-cstatement_timeout=10000     (getopt short-option-with-value)
+//	--statement_timeout=10000     (long-option form)
+//
+// Anchored at a whitespace or start-of-string boundary so the
+// adjacent GUC `idle_in_transaction_session_timeout` cannot
+// false-match.
+var statementTimeoutRegex = regexp.MustCompile(`(^|\s)(-c\s+|-c|--)statement_timeout=`)
 
 // injectStatementTimeout returns databaseURL with a
-// `?options=-c statement_timeout=<ms>` parameter appended if and
-// only if the operator has not already set `statement_timeout`. If
-// the operator has, the existing value is preserved and a single
-// slog line records the choice so the deploy log shows which value
-// is in force.
+// `?options=-c statement_timeout=<ms>` parameter appended if the
+// operator has not already set `statement_timeout` (in any of the
+// three accepted Postgres syntactic forms — see
+// statementTimeoutRegex). The operator's value wins and is logged
+// once at startup so the deploy log shows the configured value.
 //
-// The merge preserves any other `-c` flags in `options` (e.g.,
-// `-c search_path=foo`) and all other URL query parameters
-// (`sslmode`, `application_name`, etc.). When the URL cannot be
-// parsed, the original string is returned unchanged — `sql.Open`
-// will report the real error.
-//
-// Do not issue `SET statement_timeout` without `LOCAL` anywhere in
-// the application — the URL-level value is the contract and a
-// session-scoped `SET` would leak to subsequent users of the same
-// pooled connection.
+// On parse error the original URL is returned unchanged with a
+// breadcrumb — `sql.Open` will report the real parse error to the
+// operator.
 func injectStatementTimeout(databaseURL string, statementTimeoutMs int) string {
 	if statementTimeoutMs <= 0 {
 		return databaseURL
 	}
 	parsed, err := url.Parse(databaseURL)
 	if err != nil {
+		slog.Warn("statement_timeout injection skipped: DATABASE_URL parse failed",
+			"error", err,
+		)
 		return databaseURL
 	}
 	q := parsed.Query()
 	existing := q.Get("options")
 	if statementTimeoutRegex.MatchString(existing) {
+		// Truncate the logged options value defensively — an operator
+		// who shoves something unusually large into `options` should
+		// not flood the deploy log.
+		shown := existing
+		if len(shown) > 256 {
+			shown = shown[:256] + "...(truncated)"
+		}
 		slog.Info("statement_timeout preserved from DATABASE_URL",
-			"options", existing,
+			"options", shown,
 		)
 		return databaseURL
 	}

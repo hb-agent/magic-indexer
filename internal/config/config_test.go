@@ -370,6 +370,17 @@ func TestConfigValidate(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "issue #71: Layer 2 exceeding chi outer timeout rejected",
+			config: Config{
+				SecretKeyBase:               "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                        8080,
+				OAuthLegacyDPoPJKTCutoff:    1744416000,
+				DBStatementTimeoutMs:        120000,
+				GraphQLPublicQueryTimeoutMs: HTTPRouterTimeoutMs, // == outer ceiling, must be rejected
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -338,7 +338,10 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
+	// HTTPRouterTimeoutMs is the single source of truth shared with
+	// config.Validate() so the per-request /graphql budget can never
+	// silently exceed this outer ceiling.
+	r.Use(middleware.Timeout(time.Duration(config.HTTPRouterTimeoutMs) * time.Millisecond))
 
 	// CORS — uses AllowedOrigins from config; defaults to "*" if not set
 	var allowedOrigins []string

@@ -69,16 +69,18 @@ func NewHandler(registry *lexicon.Registry, repos *resolver.Repositories, queryT
 }
 
 // clampOperationName trims op-name to maxLoggedOperationName chars
-// and rejects any control characters (newline, carriage return,
-// tab, etc). Returns "" for an entirely-unsafe value. Defensive
-// shaping for slog and downstream log aggregators that split on
-// newlines.
+// and rejects any character that could let a downstream log
+// aggregator forge a log line: ASCII control chars (newline,
+// carriage return, tab, DEL) and the Unicode line/paragraph
+// separators U+2028 / U+2029. Returns "" for an entirely-unsafe
+// value. Non-ASCII printables pass through and are encoded safely
+// by slog.
 func clampOperationName(op string) string {
 	if len(op) > maxLoggedOperationName {
 		op = op[:maxLoggedOperationName]
 	}
 	for _, r := range op {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || r == 0x7f || r == ' ' || r == ' ' {
 			return ""
 		}
 	}
