@@ -353,7 +353,10 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 	// Defensive response headers. HSTS is only emitted when
 	// EXTERNAL_BASE_URL is https so a dev instance on http://
 	// doesn't accidentally pin its own browser into HTTPS.
-	httpsOnly := strings.HasPrefix(cfg.ExternalBaseURL, "https://")
+	// Case-insensitive on the scheme — defence in depth in case
+	// anything bypasses normalizeExternalBaseURL (e.g. programmatic
+	// override in tests).
+	httpsOnly := strings.HasPrefix(strings.ToLower(cfg.ExternalBaseURL), "https://")
 	r.Use(server.SecurityHeadersMiddleware(httpsOnly))
 	// Prometheus HTTP metrics middleware. Installed after chi's
 	// RequestID / RealIP / Logger / Recoverer / Timeout so it sees

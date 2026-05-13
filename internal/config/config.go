@@ -166,12 +166,71 @@ func Load() (*Config, error) {
 		cfg.SecretKeyBase = key
 	}
 
-	// Set default external base URL if not provided
-	if cfg.ExternalBaseURL == "" {
-		cfg.ExternalBaseURL = fmt.Sprintf("http://%s:%d", cfg.Host, cfg.Port)
-	}
+	// Normalize EXTERNAL_BASE_URL and fall back to the host:port
+	// default when unset. Operators set this to bare hosts
+	// (`magic-indexer.example.com`), uppercased schemes
+	// (`HTTPS://…`), or values with trailing slashes more often
+	// than we'd like; without normalization those produce broken
+	// OAuth redirect URIs and doubled-host GraphiQL endpoints.
+	cfg.ExternalBaseURL = normalizeExternalBaseURL(cfg.ExternalBaseURL, cfg.Host, cfg.Port)
 
 	return cfg, nil
+}
+
+// normalizeExternalBaseURL canonicalises an operator-supplied
+// EXTERNAL_BASE_URL. Rules, in order:
+//
+//  1. Trim surrounding whitespace.
+//  2. Empty → fall back to `http://<host>:<port>`.
+//  3. If a scheme is present, lowercase it (case-insensitive match)
+//     so HSTS gating and string-prefix comparisons elsewhere don't
+//     silently fall off the happy path.
+//  4. If no scheme is present, infer one: loopback hosts
+//     (`localhost`, `127.0.0.1`, `::1`, with or without port) get
+//     `http://`; everything else gets `https://`. The loopback
+//     carve-out matters because bare `localhost:8080` in a dev
+//     `.env` would otherwise become `https://localhost:8080` and
+//     boot a TLS-only server that the dev's browser can't talk to.
+//  5. Trim any trailing slash so endpoints built by raw
+//     concatenation (`cfg.ExternalBaseURL + "/oauth/callback"`)
+//     don't produce `//oauth/callback` and mismatch the registered
+//     OAuth redirect URI.
+func normalizeExternalBaseURL(raw, host string, port int) string {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return fmt.Sprintf("http://%s:%d", host, port)
+	}
+
+	// Lowercase scheme if present.
+	if idx := strings.Index(v, "://"); idx > 0 {
+		scheme := strings.ToLower(v[:idx])
+		v = scheme + v[idx:]
+	} else {
+		// No scheme — infer one from the host.
+		hostPart := v
+		if i := strings.Index(v, "/"); i >= 0 {
+			hostPart = v[:i]
+		}
+		// Strip port for the loopback check.
+		hostOnly := hostPart
+		if strings.HasPrefix(hostOnly, "[") {
+			// IPv6 literal like `[::1]:8080` or `[::1]`.
+			if end := strings.Index(hostOnly, "]"); end > 0 {
+				hostOnly = hostOnly[1:end]
+			}
+		} else if i := strings.LastIndex(hostOnly, ":"); i >= 0 {
+			hostOnly = hostOnly[:i]
+		}
+		hostOnly = strings.ToLower(hostOnly)
+
+		if hostOnly == "localhost" || hostOnly == "127.0.0.1" || hostOnly == "::1" {
+			v = "http://" + v
+		} else {
+			v = "https://" + v
+		}
+	}
+
+	return strings.TrimRight(v, "/")
 }
 
 // devSecretKeyBase is the literal placeholder value shipped in
