@@ -248,6 +248,21 @@ export default function LexiconsPage() {
     queryFn: () => graphqlClient.request<LexiconsResponse>(GET_LEXICONS),
   });
 
+  // Batch-aware registration status. Operators paste multiple
+  // NSIDs (comma- or newline-separated) and we surface per-item
+  // pending/success/error state in a persistent list so they can
+  // see exactly which entries succeeded and which need attention.
+  // Auto-clearing alerts thrash for batches >1 item and lose error
+  // detail, so the list stays put until the operator dismisses it.
+  type BatchStatus = "pending" | "success" | "error" | "skipped";
+  interface BatchItem {
+    nsid: string;
+    status: BatchStatus;
+    message?: string;
+  }
+  const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
+  const [batchRunning, setBatchRunning] = useState(false);
+
   const registerMutation = useMutation({
     mutationFn: (nsid: string) =>
       graphqlClient.request(REGISTER_LEXICON, { nsid }),
@@ -282,18 +297,62 @@ export default function LexiconsPage() {
     onSettled: () => setDeletingNsid(null),
   });
 
-  const handleRegister = (e: React.FormEvent) => {
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    const trimmed = nsidInput.trim();
-    if (!trimmed) return;
+    if (!nsidInput.trim() || batchRunning) return;
 
-    if (!isValidNsid(trimmed)) {
-      setError("Invalid NSID format. Expected something like org.example.record.type");
-      return;
+    // Parse: split on commas + any whitespace (including newlines),
+    // trim, drop empties, dedupe in input order. Operators paste
+    // from specs and spreadsheets — both extra delimiters and
+    // duplicates are common.
+    const seen = new Set<string>();
+    const tokens: string[] = [];
+    for (const raw of nsidInput.split(/[\s,]+/)) {
+      const t = raw.trim();
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      tokens.push(t);
     }
+    if (tokens.length === 0) return;
 
+    // Pre-validate every token so we don't fire mutations for
+    // obviously-bad input. Invalid entries land in the status
+    // list as "skipped" with a clear reason; valid ones queue up.
+    const items: BatchItem[] = tokens.map((nsid) =>
+      isValidNsid(nsid)
+        ? { nsid, status: "pending" }
+        : { nsid, status: "skipped", message: "invalid NSID format" }
+    );
+    setBatchItems(items);
     setError(null);
-    registerMutation.mutate(trimmed);
+    setSuccess(null);
+
+    const todo = items.filter((it) => it.status === "pending");
+    if (todo.length === 0) return;
+
+    // Serialize: backend lexicon resolution hits DNS / a network
+    // registry; running N in parallel would just burn rate-limit
+    // headroom. The visible per-item spinner is the affordance
+    // that explains why it's slower than a single-shot register.
+    setBatchRunning(true);
+    for (const it of todo) {
+      try {
+        await graphqlClient.request(REGISTER_LEXICON, { nsid: it.nsid });
+        setBatchItems((prev) =>
+          prev.map((p) => (p.nsid === it.nsid ? { ...p, status: "success" } : p))
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setBatchItems((prev) =>
+          prev.map((p) =>
+            p.nsid === it.nsid ? { ...p, status: "error", message } : p
+          )
+        );
+      }
+    }
+    setBatchRunning(false);
+    setNsidInput("");
+    queryClient.invalidateQueries({ queryKey: ["lexicons"] });
   };
 
   const filteredLexicons = useMemo(() => {
@@ -339,30 +398,95 @@ export default function LexiconsPage() {
       )}
       {success && <Alert variant="success">{success}</Alert>}
 
-      {/* Register */}
-      <form onSubmit={handleRegister} className="flex gap-2">
-        <input
-          type="text"
+      {/* Register — single textarea accepts one NSID or many
+          (comma- and/or newline-separated). Single-line muscle
+          memory is preserved: typing one NSID + Enter submits
+          via the form. Multi-line input grows the box. */}
+      <form onSubmit={handleRegister} className="flex flex-col gap-2 sm:flex-row sm:items-start">
+        <textarea
           value={nsidInput}
           onChange={(e) => {
             setNsidInput(e.target.value);
             setError(null);
           }}
-          placeholder="Enter NSID to register..."
+          onKeyDown={(e) => {
+            // Enter submits (single-line muscle memory); Shift+Enter
+            // inserts a newline for batch input.
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              (e.currentTarget.form as HTMLFormElement | null)?.requestSubmit();
+            }
+          }}
+          rows={Math.min(6, Math.max(1, nsidInput.split("\n").length))}
+          placeholder="Enter one NSID, or paste many separated by commas or newlines..."
           className="flex-1 px-3 py-1.5 bg-white/50 border border-zinc-200/60 rounded-lg
                      text-sm text-zinc-800 placeholder-zinc-400 font-mono
                      focus:outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-100
-                     transition-all"
+                     transition-all resize-y"
         />
         <Button
           type="submit"
           variant="primary"
-          disabled={registerMutation.isPending || !nsidInput.trim()}
-          loading={registerMutation.isPending}
+          disabled={batchRunning || registerMutation.isPending || !nsidInput.trim()}
+          loading={batchRunning || registerMutation.isPending}
         >
           Register
         </Button>
       </form>
+
+      {/* Batch status list. aria-live announces per-item updates
+          to screen readers as serialized mutations resolve. Stays
+          visible until the operator clicks Dismiss — auto-clearing
+          loses the error detail that's the whole point of seeing
+          per-item state. */}
+      {batchItems.length > 0 && (
+        <div
+          className="rounded-lg border border-zinc-200/60 bg-white/60 p-3 text-sm"
+          aria-live="polite"
+        >
+          <div className="flex items-center justify-between pb-2 border-b border-zinc-100">
+            <span className="text-zinc-600">
+              Registration: {batchItems.filter((i) => i.status === "success").length} ok · {batchItems.filter((i) => i.status === "error").length} failed · {batchItems.filter((i) => i.status === "skipped").length} skipped
+              {batchRunning && " · running…"}
+            </span>
+            {!batchRunning && (
+              <button
+                className="text-xs text-zinc-500 underline"
+                onClick={() => setBatchItems([])}
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
+          <ul className="divide-y divide-zinc-100">
+            {batchItems.map((it) => (
+              <li key={it.nsid} className="flex items-center justify-between py-1.5">
+                <code className="font-mono text-xs text-zinc-700">{it.nsid}</code>
+                <span
+                  className={
+                    it.status === "success"
+                      ? "text-emerald-700 text-xs"
+                      : it.status === "error"
+                        ? "text-red-700 text-xs"
+                        : it.status === "skipped"
+                          ? "text-amber-700 text-xs"
+                          : "text-zinc-500 text-xs"
+                  }
+                  title={it.message}
+                >
+                  {it.status === "success"
+                    ? "✓ registered"
+                    : it.status === "error"
+                      ? `✕ ${it.message ?? "failed"}`
+                      : it.status === "skipped"
+                        ? `⊘ ${it.message ?? "skipped"}`
+                        : "…pending"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Search */}
       <div className="relative">
