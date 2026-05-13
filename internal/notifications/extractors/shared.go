@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GainForest/hypergoat/internal/atproto/did"
 	"github.com/GainForest/hypergoat/internal/notifications"
 )
 
@@ -31,27 +32,11 @@ func clampSortAt(createdAt string) time.Time {
 	return parsed
 }
 
-// isValidDID performs a conservative syntactic validation of a DID string.
-// Does not call out to a DID resolver — purely local check to bound the
-// input before it flows into SQL parameters and log messages.
+// isValidDID is a thin alias for the canonical did.IsValid predicate.
+// Retained as a package-level shim for call-site brevity in the
+// extractor files; new callers should import did.IsValid directly.
 func isValidDID(s string) bool {
-	if len(s) < 8 || len(s) > 256 {
-		return false
-	}
-	if !strings.HasPrefix(s, "did:") {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		case r == ':' || r == '-' || r == '.' || r == '_':
-		default:
-			return false
-		}
-	}
-	return true
+	return did.IsValid(s)
 }
 
 // extractContributorDID handles the ATProto union type on

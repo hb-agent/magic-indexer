@@ -429,7 +429,7 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 		// otherwise an attacker with the API key could inject
 		// arbitrary config-key shapes like `labeler_cursor:../..` and
 		// delete unrelated rows.
-		if !oauth.IsValidDID(did) {
+		if !oauth.HasDIDMethodPrefix(did) {
 			http.Error(w, "invalid did format (expected did:plc: or did:web:)", http.StatusBadRequest)
 			return
 		}
@@ -472,7 +472,7 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 			http.Error(w, "missing did query parameter", http.StatusBadRequest)
 			return
 		}
-		if !oauth.IsValidDID(did) {
+		if !oauth.HasDIDMethodPrefix(did) {
 			http.Error(w, "invalid did format", http.StatusBadRequest)
 			return
 		}
@@ -1206,7 +1206,7 @@ func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
 
 	var dids []string
 	for _, d := range raw {
-		if !oauth.IsValidDID(d) {
+		if !oauth.HasDIDMethodPrefix(d) {
 			slog.Warn("Ignoring invalid labeler DID",
 				"did", d,
 				"hint", "expected did:plc: or did:web:")

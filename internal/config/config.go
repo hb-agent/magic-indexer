@@ -224,7 +224,7 @@ func (c *Config) Validate() error {
 }
 
 // looksLikeDID is a cheap syntactic check we can run at config load. A
-// stricter check lives in oauth.IsValidDID but that's in a downstream
+// stricter check lives in oauth.HasDIDMethodPrefix but that's in a downstream
 // package and importing it here would create a cycle. Adequate for the
 // "typo the env var" case.
 func looksLikeDID(s string) bool {

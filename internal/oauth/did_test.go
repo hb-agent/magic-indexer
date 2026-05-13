@@ -90,7 +90,7 @@ func TestDIDDocument_GetHandle(t *testing.T) {
 	}
 }
 
-func TestIsValidDID(t *testing.T) {
+func TestHasDIDMethodPrefix(t *testing.T) {
 	tests := []struct {
 		did  string
 		want bool
@@ -103,8 +103,8 @@ func TestIsValidDID(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := IsValidDID(tt.did); got != tt.want {
-			t.Errorf("IsValidDID(%q) = %v, want %v", tt.did, got, tt.want)
+		if got := HasDIDMethodPrefix(tt.did); got != tt.want {
+			t.Errorf("HasDIDMethodPrefix(%q) = %v, want %v", tt.did, got, tt.want)
 		}
 	}
 }

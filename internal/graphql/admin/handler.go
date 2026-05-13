@@ -144,7 +144,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Validate the DID format before trusting it —
 			// otherwise a caller with the API key could pass an
 			// arbitrary string and forge audit log entries.
-			if candidate != "" && oauth.IsValidDID(candidate) {
+			if candidate != "" && oauth.HasDIDMethodPrefix(candidate) {
 				userDID = candidate
 				slog.Info("[admin] Auth via X-User-DID + API key",
 					"did", userDID,

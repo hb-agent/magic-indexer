@@ -209,7 +209,7 @@ func (v *ServiceAuthVerifier) keyFunc(token *jwt.Token) (any, error) {
 	if claims.Iss == "" {
 		return nil, fmt.Errorf("%w: missing iss", ErrServiceAuthMalformedHeader)
 	}
-	if !IsValidDID(claims.Iss) {
+	if !HasDIDMethodPrefix(claims.Iss) {
 		return nil, fmt.Errorf("%w: malformed iss %q", ErrServiceAuthUnsupportedDIDMethod, claims.Iss)
 	}
 

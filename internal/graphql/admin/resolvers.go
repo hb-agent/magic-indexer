@@ -1115,7 +1115,7 @@ func (r *Resolver) UpdateSettings(ctx context.Context, domainAuthority, adminDid
 			if d == "" {
 				continue
 			}
-			if !oauth.IsValidDID(d) {
+			if !oauth.HasDIDMethodPrefix(d) {
 				return nil, fmt.Errorf("invalid admin DID: %q", d)
 			}
 		}

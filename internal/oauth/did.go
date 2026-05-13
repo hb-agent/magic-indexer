@@ -319,9 +319,14 @@ func parseDIDDocument(data []byte, expectedDID ...string) (*DIDDocument, error) 
 	return &doc, nil
 }
 
-// IsValidDID checks if a string is a valid DID format.
-func IsValidDID(did string) bool {
-	return strings.HasPrefix(did, "did:plc:") || strings.HasPrefix(did, "did:web:")
+// HasDIDMethodPrefix checks that a string starts with `did:plc:` or
+// `did:web:` — a coarse method-only gate sufficient for the oauth /
+// token-binding code paths it gates. This is **not** an input
+// validator; for attacker-influenced strings that flow into SQL or
+// log messages, use the strict predicate at
+// internal/atproto/did/did.go:IsValid instead.
+func HasDIDMethodPrefix(s string) bool {
+	return strings.HasPrefix(s, "did:plc:") || strings.HasPrefix(s, "did:web:")
 }
 
 // rejectPrivateHost errors out if host resolves to any loopback,
