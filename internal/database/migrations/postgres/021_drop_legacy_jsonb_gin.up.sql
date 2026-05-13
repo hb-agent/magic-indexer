@@ -1,0 +1,19 @@
+-- no-transaction
+-- Step 1 of 2: drop the legacy idx_record_json_gin (created in 001
+-- with the default jsonb_ops operator class). The faster
+-- jsonb_path_ops variant is created in migration 022.
+--
+-- Split into two migrations because the migration runner sends each
+-- file as a single ExecContext call to pgx, and `DROP INDEX
+-- CONCURRENTLY` + `CREATE INDEX CONCURRENTLY` in one file gets
+-- wrapped in an implicit transaction by pgx — which Postgres rejects
+-- with SQLSTATE 25001. One statement per `-- no-transaction` file
+-- keeps both halves transaction-free.
+--
+-- Background: migration 013 originally tried to switch operator
+-- classes but reused the same index name with `IF NOT EXISTS`, so
+-- it was a silent no-op on every environment that ran 001 first.
+-- Today's prod GIN is therefore the larger, slower jsonb_ops
+-- variant; this migration plus 022 replaces it with the smaller /
+-- faster path_ops variant.
+DROP INDEX CONCURRENTLY IF EXISTS idx_record_json_gin;
