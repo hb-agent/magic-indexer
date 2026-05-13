@@ -500,8 +500,13 @@ func (r *LabelsRepository) DeleteAll(ctx context.Context) error {
 }
 
 // IsValidSubjectURI validates an AT Protocol subject URI format.
+// Permissive shape check by design: a subject URI is either an at:// URI
+// or a DID URI (`did:plc:...` / `did:web:...`). The strict per-method
+// DID format check lives in `internal/atproto/did.IsValid`; this helper
+// only discriminates between the two URI families.
+// allow-did-prefix: format discriminator, not validator
 func IsValidSubjectURI(uri string) bool {
-	return strings.HasPrefix(uri, "at://") || strings.HasPrefix(uri, "did:")
+	return strings.HasPrefix(uri, "at://") || strings.HasPrefix(uri, "did:") //nolint:revive // allow-did-prefix
 }
 
 // Helper function to scan labels from rows

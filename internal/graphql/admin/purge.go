@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	didpkg "github.com/GainForest/hypergoat/internal/atproto/did"
 )
 
 // purgeTokenTTL bounds how long a previewPurgeActor token remains
@@ -205,8 +207,14 @@ func (r *Resolver) PreviewPurgeActor(ctx context.Context, did string) (map[strin
 	if r.purgeTokenSigner == nil {
 		return nil, errors.New("purge mutation is not configured")
 	}
-	if did == "" {
-		return nil, errors.New("did is required")
+	// Strict DID validation: the target DID flows into the HMAC payload,
+	// into the SQL DELETE param, into the structured audit log line, and
+	// into the Tap removal HTTP call. Newline / control chars in the
+	// input would forge audit-log lines or split CSV values downstream.
+	// The same discipline #64 (commit c069afa) applied to contributor /
+	// settings paths must apply here too — destructive ops especially.
+	if !didpkg.IsValid(did) {
+		return nil, errors.New("invalid DID")
 	}
 
 	adminDID, _ := ctx.Value(contextKeyUserDID).(string)
@@ -269,8 +277,14 @@ func (r *Resolver) PurgeActor(ctx context.Context, did, confirmToken string) (ma
 	if r.purgeTokenSigner == nil {
 		return nil, errors.New("purge mutation is not configured")
 	}
-	if did == "" || confirmToken == "" {
-		return nil, errors.New("did and confirmToken are required")
+	if confirmToken == "" {
+		return nil, errors.New("confirmToken is required")
+	}
+	// Strict DID validation (mirror of PreviewPurgeActor). The token
+	// also binds to the target DID, but the binding check is downstream
+	// of HMAC compare — surface the cleaner error message first.
+	if !didpkg.IsValid(did) {
+		return nil, errors.New("invalid DID")
 	}
 
 	adminDID, _ := ctx.Value(contextKeyUserDID).(string)

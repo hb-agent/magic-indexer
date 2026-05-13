@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	didpkg "github.com/GainForest/hypergoat/internal/atproto/did"
 	"github.com/GainForest/hypergoat/internal/database"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/metrics"
@@ -268,8 +269,13 @@ func (h *OAuthHandlers) HandleAuthorize(w http.ResponseWriter, r *http.Request) 
 	// underlying error server-side but surface only a generic
 	// message to the client so DNS / auth-server topology isn't
 	// leaked back through error_description.
+	//
+	// Use strict didpkg.IsValid so a malformed-but-prefix-shaped value
+	// (e.g. `did:plc:foo\nbar`) goes through handle-resolution rather
+	// than directly into the auth code path — the resolver will reject
+	// it cleanly. Matches the rollout in #64 / commit c069afa.
 	did := loginHint
-	if !strings.HasPrefix(loginHint, "did:") {
+	if !didpkg.IsValid(loginHint) {
 		resolvedDID, err := h.didResolver.ResolveHandleToDID(loginHint)
 		if err != nil {
 			slog.Warn("handle resolution failed", "handle", loginHint, "error", err)

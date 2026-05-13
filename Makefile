@@ -57,10 +57,15 @@ test-coverage:
 	@go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report: coverage.html"
 
-# Run linter (requires golangci-lint)
+# Run linter (requires golangci-lint) + project-specific guards.
+# - lint-no-did-prefix bans `strings.HasPrefix(s, "did:")` outside
+#   internal/atproto/did; use didpkg.IsValid instead. Per-line opt-out
+#   via the `// allow-did-prefix:<reason>` marker.
 lint:
 	@echo "Running linter..."
 	@golangci-lint run ./...
+	@echo "Running project-specific guards..."
+	@./scripts/lint-no-did-prefix.sh
 
 # Format code
 fmt:
