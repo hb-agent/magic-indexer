@@ -434,18 +434,17 @@ export default function LexiconsPage() {
         </Button>
       </form>
 
-      {/* Batch status list. aria-live announces per-item updates
-          to screen readers as serialized mutations resolve. Stays
-          visible until the operator clicks Dismiss — auto-clearing
-          loses the error detail that's the whole point of seeing
-          per-item state. */}
+      {/* Batch status list. aria-live is scoped to the terse
+          summary line, NOT the per-item <ul> — announcing every
+          row of a 10-NSID batch one at a time spams screen
+          readers, and the running summary already conveys
+          progress. The list stays visible until Dismiss because
+          auto-clearing loses the per-item error detail that's the
+          whole point of showing it. */}
       {batchItems.length > 0 && (
-        <div
-          className="rounded-lg border border-zinc-200/60 bg-white/60 p-3 text-sm"
-          aria-live="polite"
-        >
+        <div className="rounded-lg border border-zinc-200/60 bg-white/60 p-3 text-sm">
           <div className="flex items-center justify-between pb-2 border-b border-zinc-100">
-            <span className="text-zinc-600">
+            <span className="text-zinc-600" aria-live="polite">
               Registration: {batchItems.filter((i) => i.status === "success").length} ok · {batchItems.filter((i) => i.status === "error").length} failed · {batchItems.filter((i) => i.status === "skipped").length} skipped
               {batchRunning && " · running…"}
             </span>

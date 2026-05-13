@@ -33,7 +33,7 @@ import type {
 
 export default function SettingsPage() {
   const queryClient = useQueryClient();
-  const { session: authSession } = useAuth();
+  const { session: authSession, isLoading: authLoading } = useAuth();
 
   // Fetch settings
   const { data: settingsData, isLoading } = useQuery({
@@ -93,6 +93,16 @@ export default function SettingsPage() {
       return;
     }
     const expiresAtMs = new Date(purgePreview.tokenExpiresAt).getTime();
+    // A malformed timestamp from the server would yield NaN, which
+    // collapses the countdown to 0 and shows a misleading "Token
+    // expired" message. Detect once at effect set-up and bail
+    // with a distinct error so the operator re-previews.
+    if (Number.isNaN(expiresAtMs)) {
+      setPurgePreview(null);
+      setPurgeConfirmDid("");
+      setPurgeError("Invalid token response from server. Preview the purge again.");
+      return;
+    }
     const tick = () => {
       const remaining = Math.max(0, Math.floor((expiresAtMs - Date.now()) / 1000));
       setPurgeTokenSecondsLeft(remaining);
@@ -173,16 +183,22 @@ export default function SettingsPage() {
       queryClient.invalidateQueries();
     },
     onError: (error: Error) => {
-      // Stale-token errors surface here too; offer "preview again"
-      // by clearing the preview, which re-arms the preview button.
-      if (
-        error.message.includes("purge_token_expired") ||
-        error.message.includes("purge_token_already_used") ||
-        error.message.includes("purge_token_invalid")
-      ) {
+      // Map the three token-rejection sentinels to operator-readable
+      // copy. Anything else surfaces verbatim. All three clear the
+      // preview so the operator can re-arm via "preview again".
+      let msg = error.message;
+      if (error.message.includes("purge_token_expired")) {
+        msg = "Confirmation token expired. Preview the purge again.";
+        setPurgePreview(null);
+      } else if (error.message.includes("purge_token_already_used")) {
+        msg = "Confirmation token has already been used. Preview again.";
+        setPurgePreview(null);
+      } else if (error.message.includes("purge_token_invalid")) {
+        msg =
+          "Confirmation token is no longer valid (record count may have changed). Preview the purge again.";
         setPurgePreview(null);
       }
-      setPurgeError(error.message);
+      setPurgeError(msg);
     },
   });
 
@@ -231,7 +247,13 @@ export default function SettingsPage() {
         </Alert>
       )}
 
-      {!isAdmin && (
+      {/* Gate the "Read-only view" banner on auth being resolved.
+          During the first paint useAuth().isLoading is true and
+          authSession is null, so isAdmin is false — without this
+          guard, a legitimate admin sees the read-only banner flash
+          for a frame before /api/status resolves. Destructive UI
+          was already hidden behind isAdmin and unaffected. */}
+      {!authLoading && !isAdmin && (
         <div
           id="admin-gate-hint"
           className="rounded-xl border border-amber-200/60 bg-amber-50/40 p-4 text-sm text-amber-900"
@@ -473,6 +495,13 @@ export default function SettingsPage() {
                       </div>
                     </>
                   )}
+                  {/* No aria-live on the per-second countdown — it
+                      would spam screen readers every second. The
+                      preview card carries the same information, and
+                      the Purge button's disabled state collapses to
+                      false when the token expires (clearing the
+                      preview), which IS announced via the
+                      preview-cleared branch. */}
                   <div className="flex items-center justify-between pt-2 border-t border-red-200/40 mt-2">
                     <span className="text-zinc-500">Token expires in</span>
                     <span
@@ -481,7 +510,6 @@ export default function SettingsPage() {
                           ? "text-red-600 font-mono"
                           : "text-zinc-800 font-mono"
                       }
-                      aria-live="polite"
                     >
                       {Math.floor(purgeTokenSecondsLeft / 60)}:
                       {String(purgeTokenSecondsLeft % 60).padStart(2, "0")}

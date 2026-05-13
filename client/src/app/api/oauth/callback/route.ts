@@ -93,7 +93,14 @@ export async function GET(request: NextRequest) {
     // public origin.
     const requestUrl = new URL(request.url);
     const origin = env.PUBLIC_URL || requestUrl.origin;
-    const redirectPath = returnTo.startsWith("/") ? returnTo : "/";
+
+    // Defense in depth: reject `//`-prefixed paths even though
+    // `returnTo` is currently server-set. `"//evil.com".startsWith("/")`
+    // is true, and `"${origin}//evil.com"` is a scheme-relative URL
+    // browsers follow to evil.com. A single-`/` prefix that is NOT
+    // followed by another `/` keeps the redirect inside our origin.
+    const redirectPath =
+      returnTo.startsWith("/") && !returnTo.startsWith("//") ? returnTo : "/";
 
     return Response.redirect(`${origin}${redirectPath}`, 303);
   } catch (error) {
