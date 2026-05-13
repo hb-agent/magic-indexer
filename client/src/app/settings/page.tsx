@@ -191,8 +191,11 @@ export default function SettingsPage() {
     },
     onError: (error: Error) => {
       // Map the three token-rejection sentinels to operator-readable
-      // copy. Anything else surfaces verbatim. All three clear the
-      // preview so the operator can re-arm via "preview again".
+      // copy. Anything else surfaces verbatim. All four clear the
+      // preview so the operator can re-arm via "preview again". The
+      // count_drift case is split from invalid so forensics can tell
+      // apart "operator raced an ingest" (benign) from "someone is
+      // forging tokens" (active attack).
       let msg = error.message;
       if (error.message.includes("purge_token_expired")) {
         msg = "Confirmation token expired. Preview the purge again.";
@@ -200,9 +203,13 @@ export default function SettingsPage() {
       } else if (error.message.includes("purge_token_already_used")) {
         msg = "Confirmation token has already been used. Preview again.";
         setPurgePreview(null);
+      } else if (error.message.includes("purge_token_count_drift")) {
+        msg =
+          "Record count changed since preview (a new record was ingested for this DID). Preview the purge again.";
+        setPurgePreview(null);
       } else if (error.message.includes("purge_token_invalid")) {
         msg =
-          "Confirmation token is no longer valid (record count may have changed). Preview the purge again.";
+          "Confirmation token rejected. Preview the purge again.";
         setPurgePreview(null);
       }
       setPurgeError(msg);

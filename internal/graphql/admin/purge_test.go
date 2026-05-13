@@ -47,12 +47,17 @@ func TestPurgeTokenSigner_RoundTrip(t *testing.T) {
 func TestPurgeTokenSigner_RejectsTamperedSignature(t *testing.T) {
 	s, _ := newSigner(t)
 	token, _, _ := s.Sign("did:plc:a", "did:plc:t", 1)
-	// Flip the last character of the signature half. If it's the
-	// last char of the token, swap "A" / "B" / "C" so we end up
-	// with a different but still-valid base64url byte.
-	tampered := token[:len(token)-1] + "_"
+	// Pick a different last byte than what's there. Previous version
+	// just appended "_" which is a no-op ~1/64 of runs (when the
+	// signature already ended in "_"), making the test flaky.
+	last := token[len(token)-1]
+	repl := byte('_')
+	if last == repl {
+		repl = 'A'
+	}
+	tampered := token[:len(token)-1] + string(repl)
 	if err := s.Verify(tampered, "did:plc:a", "did:plc:t", 1); !errors.Is(err, ErrPurgeTokenInvalid) {
-		t.Errorf("Verify(tampered sig) = %v, want ErrPurgeTokenInvalid", err)
+		t.Errorf("Verify(tampered sig, last %q → %q) = %v, want ErrPurgeTokenInvalid", last, repl, err)
 	}
 }
 
@@ -86,8 +91,12 @@ func TestPurgeTokenSigner_RejectsWrongTarget(t *testing.T) {
 func TestPurgeTokenSigner_RejectsCountDrift(t *testing.T) {
 	s, _ := newSigner(t)
 	token, _, _ := s.Sign("did:plc:admin", "did:plc:target", 5)
-	if err := s.Verify(token, "did:plc:admin", "did:plc:target", 6); !errors.Is(err, ErrPurgeTokenInvalid) {
-		t.Errorf("Verify(count drift) = %v, want ErrPurgeTokenInvalid — count must match preview to prevent racing new ingest", err)
+	// Distinct sentinel for count drift — split from
+	// ErrPurgeTokenInvalid so forensics can tell apart "operator
+	// raced an ingest" (benign) from "someone is forging tokens"
+	// (active attack).
+	if err := s.Verify(token, "did:plc:admin", "did:plc:target", 6); !errors.Is(err, ErrPurgeTokenCountDrift) {
+		t.Errorf("Verify(count drift) = %v, want ErrPurgeTokenCountDrift", err)
 	}
 }
 

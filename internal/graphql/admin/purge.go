@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -46,8 +47,20 @@ type PurgeTokenSigner struct {
 	now    func() time.Time // injected for tests
 
 	mu       sync.Mutex
-	usedSigs map[string]time.Time // signature → exp (for lazy prune)
+	usedSigs map[string]time.Time // signature → exp (lazy + periodic prune)
+
+	// stopSweeper, when set, halts the periodic prune goroutine
+	// (see startSweeper). Closed by Close().
+	stopSweeper chan struct{}
 }
+
+// maxUsedSigs caps the in-memory used-token set. Under hostile
+// preview-spam an attacker with API-key access could otherwise grow
+// the set unbounded (Verify only prunes on successful match; failed
+// verifies bail at the HMAC check). Cap is high enough that legitimate
+// admin traffic never hits it: at 1 preview/sec × 300s TTL = 300
+// entries steady-state. Cap of 4096 gives 13× headroom.
+const maxUsedSigs = 4096
 
 // NewPurgeTokenSigner returns a signer keyed by the application's
 // SECRET_KEY_BASE. The secret must be non-empty; an empty secret
@@ -57,21 +70,91 @@ func NewPurgeTokenSigner(secret []byte) (*PurgeTokenSigner, error) {
 	if len(secret) == 0 {
 		return nil, errors.New("purge token signer: empty secret")
 	}
-	return &PurgeTokenSigner{
-		secret:   secret,
-		now:      time.Now,
-		usedSigs: make(map[string]time.Time),
-	}, nil
+	s := &PurgeTokenSigner{
+		secret:      secret,
+		now:         time.Now,
+		usedSigs:    make(map[string]time.Time),
+		stopSweeper: make(chan struct{}),
+	}
+	go s.runSweeper()
+	return s, nil
+}
+
+// runSweeper periodically prunes expired entries from usedSigs so
+// Verify doesn't pay an O(N) lazy-prune cost on every call. Stops
+// when Close() closes stopSweeper.
+func (s *PurgeTokenSigner) runSweeper() {
+	t := time.NewTicker(purgeTokenTTL)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.stopSweeper:
+			return
+		case <-t.C:
+			s.sweepExpired()
+		}
+	}
+}
+
+// sweepExpired drops entries whose Exp has passed. Also enforces the
+// maxUsedSigs cap by dropping the oldest entries when over: a hostile
+// caller cannot grow the map unbounded.
+func (s *PurgeTokenSigner) sweepExpired() {
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, exp := range s.usedSigs {
+		if now.Unix() >= exp.Unix() {
+			delete(s.usedSigs, k)
+		}
+	}
+	// Belt-and-braces cap. Map iteration order is randomised, so
+	// "oldest" here is "whatever the runtime gives us first." Good
+	// enough — the goal is to bound memory, not to preserve any
+	// particular eviction policy.
+	if len(s.usedSigs) > maxUsedSigs {
+		toRemove := len(s.usedSigs) - maxUsedSigs
+		for k := range s.usedSigs {
+			if toRemove <= 0 {
+				break
+			}
+			delete(s.usedSigs, k)
+			toRemove--
+		}
+	}
+}
+
+// Close halts the periodic sweeper goroutine. Idempotent.
+func (s *PurgeTokenSigner) Close() {
+	select {
+	case <-s.stopSweeper:
+		// already closed
+	default:
+		close(s.stopSweeper)
+	}
 }
 
 // purgeTokenClaims is the signed payload. JSON shape kept stable
 // because the signature is over its serialized bytes.
+//
+// The `V` (version) field exists so a future addition of a claim (a
+// `Reason` field for SECURITY.md log correlation, say) can be rolled
+// out without silently invalidating every outstanding token at
+// deploy. Verify rejects any token whose `v` doesn't match the
+// expected purgeTokenVersion.
 type purgeTokenClaims struct {
+	V           int    `json:"v"`
 	AdminDID    string `json:"admin_did"`
 	TargetDID   string `json:"target_did"`
 	RecordCount int64  `json:"record_count"`
 	Exp         int64  `json:"exp"` // unix seconds
 }
+
+// purgeTokenVersion is the current claim shape. Bump when adding
+// or removing a field; old-version tokens are rejected as
+// ErrPurgeTokenInvalid (one TTL of disruption on deploy, no
+// silent verification failures).
+const purgeTokenVersion = 1
 
 // Sign issues a fresh token for the given (admin, target, count)
 // triple. Returns the token and its expiry timestamp so the
@@ -79,6 +162,7 @@ type purgeTokenClaims struct {
 func (s *PurgeTokenSigner) Sign(adminDID, targetDID string, recordCount int64) (string, time.Time, error) {
 	exp := s.now().Add(purgeTokenTTL)
 	claims := purgeTokenClaims{
+		V:           purgeTokenVersion,
 		AdminDID:    adminDID,
 		TargetDID:   targetDID,
 		RecordCount: recordCount,
@@ -95,10 +179,17 @@ func (s *PurgeTokenSigner) Sign(adminDID, targetDID string, recordCount int64) (
 
 // Sentinel errors returned by Verify so the resolver can map them
 // to stable GraphQL error codes for the client UI.
+//
+// ErrPurgeTokenCountDrift is split from ErrPurgeTokenInvalid because
+// it represents a benign race (a record was ingested between preview
+// and confirm), not an attack. Forensic separation matters: a burst
+// of CountDrift is "operator is racing ingest," while a burst of
+// Invalid is "someone is trying to forge tokens."
 var (
 	ErrPurgeTokenInvalid     = errors.New("purge_token_invalid")
 	ErrPurgeTokenExpired     = errors.New("purge_token_expired")
 	ErrPurgeTokenAlreadyUsed = errors.New("purge_token_already_used")
+	ErrPurgeTokenCountDrift  = errors.New("purge_token_count_drift")
 )
 
 // Verify confirms the token is well-formed, signed by us, and bound
@@ -137,12 +228,22 @@ func (s *PurgeTokenSigner) Verify(token, adminDID, targetDID string, recordCount
 		return ErrPurgeTokenInvalid
 	}
 
-	// Bind check: admin DID, target DID, and record count must
-	// all match the values claimed at preview time. Without
-	// these, admin A's token could be replayed by admin B, or
-	// across a different DID, or against a stale row count.
-	if claims.AdminDID != adminDID || claims.TargetDID != targetDID || claims.RecordCount != recordCount {
+	// Reject tokens minted by a previous version of the claim
+	// schema. See purgeTokenVersion docs.
+	if claims.V != purgeTokenVersion {
 		return ErrPurgeTokenInvalid
+	}
+
+	// Bind check: admin DID and target DID must match the values
+	// claimed at preview time. Without these, admin A's token
+	// could be replayed by admin B or across a different DID.
+	if claims.AdminDID != adminDID || claims.TargetDID != targetDID {
+		return ErrPurgeTokenInvalid
+	}
+	// Record count drift is a separate sentinel — see
+	// ErrPurgeTokenCountDrift docs.
+	if claims.RecordCount != recordCount {
+		return ErrPurgeTokenCountDrift
 	}
 
 	now := s.now()
@@ -224,11 +325,17 @@ func (r *Resolver) PreviewPurgeActor(ctx context.Context, did string) (map[strin
 
 	actor, err := r.repos.Actors.GetByDID(ctx, did)
 	if err != nil {
-		// "Actor not in the index" is still a legitimate purge
-		// target — there may be records authored by the DID
-		// before the actor row was indexed, and the operator
-		// wants those gone too. Surface a zero-handle preview
-		// rather than failing.
+		// "Actor not in the index" is a legitimate purge target —
+		// there may be records authored by the DID before the
+		// actor row was indexed, and the operator wants those
+		// gone too. But any OTHER DB error (connection dead,
+		// scan failure, statement-timeout fire) must not be
+		// collapsed into "actor absent": the operator would see
+		// `actorExists=false` and proceed against a phantom zero
+		// count. Distinguish via errors.Is(sql.ErrNoRows).
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("get actor: %w", err)
+		}
 		actor = nil
 	}
 
@@ -339,9 +446,13 @@ func (r *Resolver) PurgeActor(ctx context.Context, did, confirmToken string) (ma
 		}
 	}
 
+	// Structured audit log — see SECURITY.md operator contract for
+	// the retention requirement (≥90d GDPR-minimum, 1y recommended).
+	// `target_did` is the mutation input; previously a redundant
+	// `actor_did` carried the same value, which broke any downstream
+	// SIEM tooling assuming the two fields differ. Dropped.
 	slog.Info("actor purge",
 		"event", "actor_purge",
-		"actor_did", did,
 		"target_did", did,
 		"record_count", deletedRecords,
 		"actor_rows", deletedActor,
