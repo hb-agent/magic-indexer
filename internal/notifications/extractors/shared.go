@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GainForest/hypergoat/internal/atproto/did"
+	"github.com/GainForest/hypergoat/internal/metrics"
 	"github.com/GainForest/hypergoat/internal/notifications"
 )
 
@@ -39,16 +40,63 @@ func isValidDID(s string) bool {
 	return did.IsValid(s)
 }
 
-// extractContributorDID handles the ATProto union type on
-// `org.hypercerts.claim.activity#contributor.contributorIdentity`:
-// either a plain DID/identifier string, or a strongRef object.
-// strongRef is not supported in v1 — we'd have to resolve the referenced record.
+// extractContributorDID resolves an ATProto union on
+// `org.hypercerts.claim.activity#contributor.contributorIdentity`
+// to a DID, or to "" if no DID can be read.
+//
+// The lexicon-compliant shape is a bare string DID. Production
+// data from `certified.app` wraps it in an object with a `$type`
+// discriminator and an `identity` field; both shapes are accepted
+// as long as the resolved string passes did.IsValid. The
+// strong-ref variant of the union (com.atproto.repo.strongRef) is
+// not supported — those entries return "" and the caller drops
+// the contributor.
+//
+// Every call increments hypergoat_contributor_identity_total with
+// one of three outcomes: did (value resolved to a DID), non_did
+// (a string was read but failed did.IsValid — typically a
+// handle), unrecognized_shape (the value was neither a string nor
+// an object with a string .identity, or .identity was empty —
+// this is the operator's signal for strong-refs or unexpected
+// drift).
 func extractContributorDID(raw json.RawMessage) string {
-	// Try string form first.
+	// Bare-string variant: the lexicon-compliant shape.
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return strings.TrimSpace(s)
+		s = strings.TrimSpace(s)
+		switch {
+		case s == "":
+			metrics.ContributorIdentityUnrecognizedShape()
+			return ""
+		case did.IsValid(s):
+			metrics.ContributorIdentityDID()
+			return s
+		default:
+			metrics.ContributorIdentityNonDID()
+			return ""
+		}
 	}
+	// Object variant: production drift from certified.app.
+	var obj struct {
+		Identity string `json:"identity"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		ident := strings.TrimSpace(obj.Identity)
+		switch {
+		case ident == "":
+			// Object without .identity (strong-refs land here too).
+			metrics.ContributorIdentityUnrecognizedShape()
+			return ""
+		case did.IsValid(ident):
+			metrics.ContributorIdentityDID()
+			return ident
+		default:
+			metrics.ContributorIdentityNonDID()
+			return ""
+		}
+	}
+	// Neither shape parsed (array, number, malformed JSON, etc).
+	metrics.ContributorIdentityUnrecognizedShape()
 	return ""
 }
 

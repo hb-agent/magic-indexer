@@ -151,6 +151,7 @@ func init() {
 		serviceAuthDIDResolveServedStaleTotal,
 		notificationsRequestTotal,
 		pdsResolveTotal,
+		contributorIdentityTotal,
 	)
 }
 
@@ -391,4 +392,50 @@ func httpStatusString(code int) string {
 		return "other"
 	}
 	return strconv.Itoa(code)
+}
+
+// contributor_identity_total — outcomes of contributorIdentity
+// extraction at ingest time on org.hypercerts.claim.activity
+// records. The indexer's policy is "read the value only when it is
+// a DID"; this counter surfaces producer drift so operators can
+// nudge upstream writers that are still emitting handles or
+// unrecognised shapes. Mirrors the pds_resolve_total shape above.
+//
+// Outcomes:
+//   - did                 — value resolved to a valid DID
+//   - non_did             — value was a string (bare or object
+//                            .identity) but did not pass did.IsValid
+//   - unrecognized_shape  — value was neither a string nor an object
+//                            with a string .identity field, or the
+//                            contributorIdentity field was absent.
+
+var (
+	contributorIdentityTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hypergoat_contributor_identity_total",
+			Help: "Outcomes of contributorIdentity extraction at ingest. Outcome labels: did, non_did, unrecognized_shape.",
+		},
+		[]string{"outcome"},
+	)
+)
+
+// ContributorIdentityDID records a contributor whose identity
+// resolved to a valid DID.
+func ContributorIdentityDID() {
+	contributorIdentityTotal.WithLabelValues("did").Inc()
+}
+
+// ContributorIdentityNonDID records a contributor whose identity
+// was a string but did not pass strict DID validation (e.g. a
+// handle).
+func ContributorIdentityNonDID() {
+	contributorIdentityTotal.WithLabelValues("non_did").Inc()
+}
+
+// ContributorIdentityUnrecognizedShape records a contributor whose
+// identity was neither a string nor an object with a string
+// .identity field. A rising trend here is the operator's signal
+// that producers may be shipping strong-ref contributor identities.
+func ContributorIdentityUnrecognizedShape() {
+	contributorIdentityTotal.WithLabelValues("unrecognized_shape").Inc()
 }
