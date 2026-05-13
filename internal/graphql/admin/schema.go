@@ -418,6 +418,14 @@ func (b *SchemaBuilder) buildMutationType() *graphql.Object {
 					},
 				},
 				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					// Belt + braces: enforce admin at the schema shim
+					// too, matching every other admin mutation in this
+					// file. The resolver method also enforces; a future
+					// refactor that drops one must not silently expose
+					// the destructive surface.
+					if err := requireAdmin(p.Context); err != nil {
+						return nil, err
+					}
 					did, _ := p.Args["did"].(string)
 					return b.resolver.PreviewPurgeActor(p.Context, did)
 				},
@@ -436,6 +444,9 @@ func (b *SchemaBuilder) buildMutationType() *graphql.Object {
 					},
 				},
 				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					if err := requireAdmin(p.Context); err != nil {
+						return nil, err
+					}
 					did, _ := p.Args["did"].(string)
 					token, _ := p.Args["confirmToken"].(string)
 					return b.resolver.PurgeActor(p.Context, did, token)
