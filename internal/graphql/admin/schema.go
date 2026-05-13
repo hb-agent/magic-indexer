@@ -391,21 +391,37 @@ func (b *SchemaBuilder) buildMutationType() *graphql.Object {
 					return b.resolver.UpdateSettings(p.Context, domainPtr, adminPtr, relayPtr, plcPtr, jetPtr, scopesPtr)
 				},
 			},
+			"previewResetAll": &graphql.Field{
+				Type:        graphql.NewNonNull(ResetAllPreviewType),
+				Description: "Materialize the preview the operator confirms against before wiping the index. Returns per-table row counts plus an HMAC-signed confirmToken bound to (admin DID, total rows, scope=reset_all). Hand the token back to resetAll within the TTL.",
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					// Belt + braces: enforce admin at the schema
+					// shim too, matching every other admin mutation
+					// in this file. The resolver method also
+					// enforces; a future refactor that drops one
+					// must not silently expose the destructive
+					// surface.
+					if err := requireAdmin(p.Context); err != nil {
+						return nil, err
+					}
+					return b.resolver.PreviewResetAll(p.Context)
+				},
+			},
 			"resetAll": &graphql.Field{
-				Type:        graphql.NewNonNull(graphql.Boolean),
-				Description: "Delete all data (admin only, requires confirmation)",
+				Type:        graphql.NewNonNull(ResetAllResultType),
+				Description: "Delete every actor, record, activity, label, notification, OAuth grant and admin session in this instance. Requires a confirmToken from previewResetAll; the token is HMAC-signed and bound to (admin DID, total row count, scope=reset_all). Single-use; expires after the TTL on the preview. Config + lexicon + oauth_client + seeded label_definition rows are preserved.",
 				Args: graphql.FieldConfigArgument{
-					"confirm": &graphql.ArgumentConfig{
+					"confirmToken": &graphql.ArgumentConfig{
 						Type:        graphql.NewNonNull(graphql.String),
-						Description: "Must be 'RESET' to confirm",
+						Description: "Confirmation token returned by previewResetAll",
 					},
 				},
 				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 					if err := requireAdmin(p.Context); err != nil {
 						return nil, err
 					}
-					confirm, _ := p.Args["confirm"].(string)
-					return b.resolver.ResetAll(p.Context, confirm)
+					token, _ := p.Args["confirmToken"].(string)
+					return b.resolver.ResetAll(p.Context, token)
 				},
 			},
 			"previewPurgeActor": &graphql.Field{

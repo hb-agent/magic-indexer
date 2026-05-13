@@ -1181,30 +1181,218 @@ func (r *Resolver) UpdateSettings(ctx context.Context, domainAuthority, adminDid
 	return r.Settings(ctx)
 }
 
-// ResetAll deletes all data (requires confirmation).
-func (r *Resolver) ResetAll(ctx context.Context, confirm string) (bool, error) {
-	if confirm != "RESET" {
-		return false, fmt.Errorf("confirmation required: pass 'RESET' to confirm")
+// resetAllTables is the hard-listed deletion target set for the
+// resetAll admin mutation. ORDER MATTERS — child rows go before
+// parents so FK constraints don't reject the delete. Tables NOT in
+// this list are preserved intentionally:
+//
+//   - schema_migrations: bookkeeping, must outlive a reset.
+//   - config: operator settings (admin_dids, relay_url, ...) — a
+//     reset must not lock the operator out of their own instance.
+//   - lexicon: schema definitions. The point of resetAll is to wipe
+//     data, not unregister lexicons.
+//   - label_definition: includes the seeded Bluesky takedown
+//     vocabulary; preserved by design.
+//   - oauth_client: registered client apps. A reset invalidates
+//     every issued token (below) but keeps the registrations so
+//     existing apps can re-authenticate.
+//   - jetstream_cursor: operational state. Wiping this would force
+//     a re-backfill from the relay's earliest cursor.
+//
+// SOURCE OF TRUTH: the migration files in
+// internal/database/migrations/postgres/*.up.sql. When a new
+// migration adds a table whose contents are user/actor/activity
+// data, append it to this list. TODO(track-3 follow-up): when this
+// list outgrows ~30 entries, replace with the introspection
+// approach (SELECT FROM pg_tables WHERE schemaname='public') so it
+// can't rot quietly.
+var resetAllTables = []string{
+	// Notifications subsystem (migration 015). notification_participant
+	// has a FK to notification; child first.
+	"notification_participant",
+	"notification",
+	"actor_state",
+
+	// Moderation: reports + applied labels + per-user prefs
+	// (migrations 003, 004). label_definition is preserved.
+	"actor_label_preference",
+	"label",
+	"report",
+
+	// OAuth tokens / sessions / replay caches / requests
+	// (migration 001 + 016). oauth_client is preserved so
+	// registered apps can re-authenticate. All token / session
+	// tables FK to oauth_client with ON DELETE CASCADE; we
+	// delete them explicitly to make the count exact.
+	"oauth_authorization_code",
+	"oauth_atp_request",
+	"oauth_atp_session",
+	"oauth_auth_request",
+	"oauth_dpop_jti",
+	"oauth_dpop_nonce",
+	"oauth_par_request",
+	"oauth_refresh_token",
+	"oauth_access_token",
+	"admin_session",
+
+	// Activity log (migration 001).
+	"jetstream_activity",
+
+	// Records authored by every actor (migration 001).
+	"record",
+
+	// Actors themselves (migration 001).
+	"actor",
+}
+
+// PreviewResetAll materializes the row-count preview the operator
+// confirms against and returns an HMAC-signed token bound to
+// (admin_did, total_rows, exp, scope=reset_all). Mirrors the
+// PreviewPurgeActor contract; see internal/graphql/admin/purge.go.
+//
+// ResetAll is strictly more destructive than PurgeActor (wipes the
+// whole index, not one actor) and therefore must be at least as
+// hardened: same HMAC signer, same single-use + count-drift + scope
+// binding, same audit-log shape.
+func (r *Resolver) PreviewResetAll(ctx context.Context) (map[string]interface{}, error) {
+	if err := requireAdmin(ctx); err != nil {
+		return nil, err
+	}
+	if r.purgeTokenSigner == nil {
+		return nil, fmt.Errorf("resetAll mutation is not configured")
+	}
+	adminDID, _ := ctx.Value(contextKeyUserDID).(string)
+	if adminDID == "" {
+		return nil, fmt.Errorf("admin DID missing from context")
 	}
 
-	// Delete in order (respecting foreign key constraints)
-	if err := r.repos.Activity.DeleteAll(ctx); err != nil {
-		return false, fmt.Errorf("failed to delete activity: %w", err)
-	}
-	if err := r.repos.Reports.DeleteAll(ctx); err != nil {
-		return false, fmt.Errorf("failed to delete reports: %w", err)
-	}
-	if err := r.repos.Labels.DeleteAll(ctx); err != nil {
-		return false, fmt.Errorf("failed to delete labels: %w", err)
-	}
-	if err := r.repos.Records.DeleteAll(ctx); err != nil {
-		return false, fmt.Errorf("failed to delete records: %w", err)
-	}
-	if err := r.repos.Actors.DeleteAll(ctx); err != nil {
-		return false, fmt.Errorf("failed to delete actors: %w", err)
+	tables, totalRows, err := r.resetAllCounts(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("count rows: %w", err)
 	}
 
-	return true, nil
+	// TargetDID is empty for the reset_all scope — the operation
+	// has no single target. The signer's admin + count + scope
+	// bindings carry the security contract.
+	token, exp, err := r.purgeTokenSigner.Sign(ScopeResetAll, adminDID, "", totalRows)
+	if err != nil {
+		return nil, fmt.Errorf("sign reset token: %w", err)
+	}
+
+	return map[string]interface{}{
+		"totalRows":       totalRows,
+		"tables":          tables,
+		"confirmToken":    token,
+		"tokenExpiresAt":  exp.UTC().Format(time.RFC3339),
+		"tokenTtlSeconds": int(purgeTokenTTL / time.Second),
+	}, nil
+}
+
+// resetAllCounts returns per-table row counts plus the sum across
+// every entry in resetAllTables. Each count is a separate query;
+// the list is small (<20) so the round-trips are noise next to the
+// destructive delete that follows.
+func (r *Resolver) resetAllCounts(ctx context.Context) ([]map[string]interface{}, int64, error) {
+	db := r.repos.Records.DB()
+	tables := make([]map[string]interface{}, 0, len(resetAllTables))
+	var total int64
+	for _, table := range resetAllTables {
+		// Table names are hard-listed package constants; no SQL
+		// injection surface. quoteIdent defends future
+		// contributors who copy-paste this loop with a different
+		// source.
+		var count int64
+		// nolint:gosec // table names are validated package constants
+		query := fmt.Sprintf("SELECT COUNT(*) FROM %s", quoteIdent(table))
+		if err := db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+			return nil, 0, fmt.Errorf("count %s: %w", table, err)
+		}
+		tables = append(tables, map[string]interface{}{
+			"name":  table,
+			"count": count,
+		})
+		total += count
+	}
+	return tables, total, nil
+}
+
+// quoteIdent quotes a SQL identifier for Postgres. The input is
+// always a hard-listed table name from this package; this is
+// defense-in-depth for future code that might pass through
+// user-controlled input.
+func quoteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// ResetAll verifies the bound HMAC token, then truncates every
+// table in resetAllTables inside a single transaction. The whole
+// set commits or rolls back atomically. On commit, emits the
+// structured audit log line documented in SECURITY.md.
+func (r *Resolver) ResetAll(ctx context.Context, confirmToken string) (map[string]interface{}, error) {
+	if err := requireAdmin(ctx); err != nil {
+		return nil, err
+	}
+	if r.purgeTokenSigner == nil {
+		return nil, fmt.Errorf("resetAll mutation is not configured")
+	}
+	if confirmToken == "" {
+		return nil, fmt.Errorf("confirmToken is required")
+	}
+	adminDID, _ := ctx.Value(contextKeyUserDID).(string)
+	if adminDID == "" {
+		return nil, fmt.Errorf("admin DID missing from context")
+	}
+
+	// Re-count under fresh state so the token-bound total is
+	// verified against current rows. A drift between preview and
+	// confirm rejects with ErrPurgeTokenCountDrift and the
+	// operator re-previews — exactly the actor-purge flow.
+	_, totalRows, err := r.resetAllCounts(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("count rows: %w", err)
+	}
+	if err := r.purgeTokenSigner.Verify(confirmToken, ScopeResetAll, adminDID, "", totalRows); err != nil {
+		return nil, err
+	}
+
+	tx, err := r.repos.Records.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var totalDeleted int64
+	for _, table := range resetAllTables {
+		// nolint:gosec // table names are hard-listed package constants
+		query := fmt.Sprintf("DELETE FROM %s", quoteIdent(table))
+		res, err := tx.ExecContext(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("delete from %s: %w", table, err)
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			totalDeleted += n
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit reset tx: %w", err)
+	}
+
+	// Structured audit log — see SECURITY.md operator contract
+	// for the retention requirement (≥90d GDPR-minimum, 1y
+	// recommended). Shape mirrors actor_purge so log shippers
+	// can route both with one rule.
+	slog.Info("admin reset_all",
+		"event", "reset_all",
+		"requested_by_did", adminDID,
+		"rows_deleted", totalDeleted,
+		"tables_affected", len(resetAllTables),
+		"ts", time.Now().UTC().Format(time.RFC3339),
+	)
+
+	return map[string]interface{}{
+		"rowsDeleted":    totalDeleted,
+		"tablesAffected": len(resetAllTables),
+	}, nil
 }
 
 // PopulateActivity creates activity entries from existing records in the database.
