@@ -574,7 +574,7 @@ func buildBadgeAwardSubjectFilter(f FieldFilter, paramIdx int) (string, []interf
 	// jsonb_typeof + CASE per branch keeps the matcher predictable
 	// when the producer wrote either shape.
 	const subjectStringExpr = `CASE jsonb_typeof(r.json->'subject') WHEN 'string' THEN r.json->>'subject' ELSE NULL END`
-	const subjectUriExpr = `CASE jsonb_typeof(r.json->'subject') WHEN 'object' THEN r.json->'subject'->>'uri' ELSE NULL END`
+	const subjectURIExpr = `CASE jsonb_typeof(r.json->'subject') WHEN 'object' THEN r.json->'subject'->>'uri' ELSE NULL END`
 
 	switch f.Operator {
 	case OpEq:
@@ -584,7 +584,7 @@ func buildBadgeAwardSubjectFilter(f FieldFilter, paramIdx int) (string, []interf
 		// surface). DID was validated by the schema layer.
 		clause := fmt.Sprintf(
 			"((%s) = %s OR (%s) LIKE 'at://' || %s || '/%%')",
-			subjectStringExpr, didParam, subjectUriExpr, didParam,
+			subjectStringExpr, didParam, subjectURIExpr, didParam,
 		)
 		return clause, []interface{}{f.Value}, paramIdx + 1, nil
 	case OpIn:
@@ -595,7 +595,7 @@ func buildBadgeAwardSubjectFilter(f FieldFilter, paramIdx int) (string, []interf
 		// DID generates its own `at://<did>/%` pattern.
 		clause := fmt.Sprintf(
 			"((%s) = ANY(%s::text[]) OR EXISTS (SELECT 1 FROM unnest(%s::text[]) AS d WHERE (%s) LIKE 'at://' || d || '/%%'))",
-			subjectStringExpr, didsParam, didsParam, subjectUriExpr,
+			subjectStringExpr, didsParam, didsParam, subjectURIExpr,
 		)
 		return clause, []interface{}{values}, paramIdx + 1, nil
 	default:
