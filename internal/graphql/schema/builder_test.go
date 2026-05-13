@@ -436,8 +436,11 @@ func TestBadgeAwardWhereInput_HasSubjectFilter(t *testing.T) {
 	if !strings.Contains(desc, "DIDs only") {
 		t.Errorf("subject description missing DID-only policy callout: %q", desc)
 	}
-	if !strings.Contains(desc, "strong-ref") {
+	if !strings.Contains(desc, "strongRef") {
 		t.Errorf("subject description should explain the union shape: %q", desc)
+	}
+	if !strings.Contains(desc, "app.certified.defs#did") {
+		t.Errorf("subject description should name the defs#did ref: %q", desc)
 	}
 
 	// Absence assertion: subject must NOT leak to the activity
