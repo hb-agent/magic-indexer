@@ -152,6 +152,7 @@ func init() {
 		notificationsRequestTotal,
 		pdsResolveTotal,
 		contributorIdentityTotal,
+		graphqlQueryTimeoutTotal,
 	)
 }
 
@@ -438,4 +439,28 @@ func ContributorIdentityNonDID() {
 // that producers may be shipping strong-ref contributor identities.
 func ContributorIdentityUnrecognizedShape() {
 	contributorIdentityTotal.WithLabelValues("unrecognized_shape").Inc()
+}
+
+// graphql_query_timeout_total — public GraphQL requests that
+// exceeded the per-request deadline (issue #71's Layer 2). Today
+// the only route emitting this label is `public`; admin and
+// subscription paths are not bounded by the per-request
+// middleware. Mirrors the pds_resolve_total shape.
+var (
+	graphqlQueryTimeoutTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hypergoat_graphql_query_timeout_total",
+			Help: "GraphQL requests that exceeded the per-request deadline. Route labels: public.",
+		},
+		[]string{"route"},
+	)
+)
+
+// GraphQLQueryTimeout records a per-request deadline-exceeded
+// outcome on the given route. Today only "public" is emitted; the
+// label argument keeps the surface open without invariably opening
+// it to user input — every call site uses a hardcoded string
+// constant.
+func GraphQLQueryTimeout(route string) {
+	graphqlQueryTimeoutTotal.WithLabelValues(route).Inc()
 }

@@ -470,7 +470,7 @@ func TestHandleGraphiQL(t *testing.T) {
 
 func TestConnectDatabase(t *testing.T) {
 	t.Run("unsupported URL returns error", func(t *testing.T) {
-		_, err := ConnectDatabase("mysql://user:pass@localhost/db")
+		_, err := ConnectDatabase("mysql://user:pass@localhost/db", 0)
 		if err == nil {
 			t.Fatal("expected error for unsupported database URL")
 		}

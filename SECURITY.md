@@ -22,6 +22,42 @@ first is missing; the rest are validated inside `config.Validate()`.
 | `LABELER_DIDS` | Comma-separated labeler DIDs | Empty disables labeler ingestion. |
 | `DOMAIN_DID` | Indexer's own DID (`did:web:<host>` or `did:plc:…`) | Required to enable the `/notifications/graphql` service-auth endpoint (issue #57). Malformed values fail `Validate()` at startup; unset means the endpoint stays unmounted. Every service-auth JWT is validated against this as the `aud` claim. |
 | `OAUTH_LEGACY_DPOP_JKT_CUTOFF` | Unix timestamp of the DPoP binding deploy | Required. Refresh tokens issued before this timestamp are accepted unbound; tokens after must carry a matching DPoP JKT. |
+| `DB_STATEMENT_TIMEOUT_MS` | Pool-level Postgres `statement_timeout` (Layer 1 of issue #71). Default 30000. | Injected into every connection in the pool via `options=-c statement_timeout=`. Server-side hard kill — runs regardless of client liveness. Must be strictly greater than `GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS` (enforced at startup). If the operator already sets `statement_timeout` in `DATABASE_URL`, that value is preserved and the default is skipped (logged at INFO). `PGOPTIONS` env-var is overridden by the URL — operators relying on `PGOPTIONS` for `statement_timeout` must move the value to `DATABASE_URL`. |
+| `GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS` | Per-request budget on `/graphql` (Layer 2 of issue #71). Default 5000. | Installed by middleware on the public endpoint only. `/admin/graphql` and `/graphql/ws` are bounded by Layer 1 instead. Timed-out queries return HTTP 200 with a `QUERY_TIMEOUT` GraphQL error and the `X-Query-Timeout` response header. |
+
+## Query budgets (issue #71)
+
+The indexer caps DB query duration at two layers, both fail-safe:
+
+- **Layer 1 — `DB_STATEMENT_TIMEOUT_MS`** (default 30 s). Postgres-side
+  `statement_timeout` injected on every connection. Catches truly
+  stuck queries even when client-side cancellation fails (network
+  blip, pgx misbehaviour). Applies to **every** path — public, admin,
+  subscriptions, Jetstream.
+- **Layer 2 — `GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS`** (default 5 s). HTTP
+  middleware on `/graphql` wraps the request context with a tighter
+  deadline. The handler shapes the response when the deadline fires:
+  HTTP 200, header `X-Query-Timeout: <budget-ms>`, body with a
+  `QUERY_TIMEOUT` GraphQL error including `extensions.budgetMs` and
+  `extensions.retryable=false`.
+
+**Operator contract:**
+
+1. `DB_STATEMENT_TIMEOUT_MS` **must** be strictly greater than
+   `GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS`. Enforced by `config.Validate()`
+   at startup.
+2. Reverse-proxy read timeout (`proxy_read_timeout` for nginx,
+   `read_timeout` for Caddy, etc.) **must** be strictly greater than
+   `GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS`. If the proxy times out first,
+   the in-process budget never fires — you lose the metric signal
+   (`hypergoat_graphql_query_timeout_total`), Layer 1 still bounds DB
+   query duration but the client sees a generic proxy 504 instead of
+   the canonical `QUERY_TIMEOUT` shape.
+3. Tune Layer 2 from `httpRequestDuration{route="/graphql"}` p99 in
+   `/metrics`.
+4. Recommended Prometheus alert:
+   `rate(hypergoat_graphql_query_timeout_total[5m]) > N` where N is
+   your acceptable timeout rate.
 
 ## Rate limiting (**must** be handled at the reverse proxy)
 

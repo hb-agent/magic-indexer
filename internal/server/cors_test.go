@@ -248,3 +248,24 @@ func TestCORSMiddleware_PreflightShortCircuits(t *testing.T) {
 		t.Errorf("Allow-Origin = %q, want echo of request origin", got)
 	}
 }
+
+// TestCORSMiddleware_ExposesXQueryTimeout — browser-based clients
+// only see CORS-safelisted response headers unless explicitly
+// exposed. The X-Query-Timeout header from issue #71's timeout
+// shaping must be exposed so fetch / Apollo / urql can read it.
+func TestCORSMiddleware_ExposesXQueryTimeout(t *testing.T) {
+	mw := CORSMiddleware(CORSConfig{AllowedOrigins: []string{"https://certs.social"}})
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Origin", "https://certs.social")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got := rec.Header().Get("Access-Control-Expose-Headers")
+	if got != "X-Query-Timeout" {
+		t.Errorf("Access-Control-Expose-Headers = %q, want X-Query-Timeout", got)
+	}
+}

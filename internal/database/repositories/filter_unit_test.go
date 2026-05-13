@@ -145,3 +145,127 @@ func TestBuildSingleFilter_ContributorsFieldNameWithoutMarker(t *testing.T) {
 		t.Errorf("contributor SQL path leaked without marker flag:\n%s", clause)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// IsBadgeAwardSubject — issue #65 subject filter on badge.award.
+// Pure SQL-building tests; no database required.
+// ---------------------------------------------------------------------------
+
+func TestBuildSingleFilter_BadgeAwardSubject_Eq(t *testing.T) {
+	f := FieldFilter{
+		FieldName:           "subject",
+		Operator:            OpEq,
+		Value:               "did:plc:alice",
+		IsJSON:              true,
+		IsBadgeAwardSubject: true,
+	}
+	clause, params, nextIdx, err := buildSingleFilter(f, 1)
+	if err != nil {
+		t.Fatalf("buildSingleFilter: %v", err)
+	}
+	if nextIdx != 2 {
+		t.Errorf("nextIdx = %d, want 2", nextIdx)
+	}
+	if len(params) != 1 || params[0] != "did:plc:alice" {
+		t.Errorf("params = %v, want [\"did:plc:alice\"]", params)
+	}
+	// String-DID half + strong-ref-URI half, OR-composed.
+	if !strings.Contains(clause, "r.json->>'subject'") {
+		t.Errorf("clause missing string-DID extract: %s", clause)
+	}
+	if !strings.Contains(clause, "r.json->'subject'->>'uri'") {
+		t.Errorf("clause missing strong-ref-URI extract: %s", clause)
+	}
+	if !strings.Contains(clause, "LIKE 'at://' || $1 || '/%'") {
+		t.Errorf("clause missing at://<did>/ prefix pattern: %s", clause)
+	}
+	if !strings.Contains(clause, " OR ") {
+		t.Errorf("clause should OR the two shapes: %s", clause)
+	}
+}
+
+func TestBuildSingleFilter_BadgeAwardSubject_In(t *testing.T) {
+	f := FieldFilter{
+		FieldName:           "subject",
+		Operator:            OpIn,
+		Value:               []string{"did:plc:alice", "did:plc:bob"},
+		IsJSON:              true,
+		IsBadgeAwardSubject: true,
+	}
+	clause, params, nextIdx, err := buildSingleFilter(f, 1)
+	if err != nil {
+		t.Fatalf("buildSingleFilter: %v", err)
+	}
+	if nextIdx != 2 {
+		t.Errorf("nextIdx = %d, want 2", nextIdx)
+	}
+	// The IN case passes a single text[] param used for both halves.
+	if len(params) != 1 {
+		t.Errorf("params length = %d, want 1", len(params))
+	}
+	if !strings.Contains(clause, "= ANY($1::text[])") {
+		t.Errorf("clause missing ANY for string-DID half: %s", clause)
+	}
+	if !strings.Contains(clause, "FROM unnest($1::text[])") {
+		t.Errorf("clause missing unnest for strong-ref LIKE half: %s", clause)
+	}
+}
+
+func TestBuildSingleFilter_BadgeAwardSubject_UnsupportedOperator(t *testing.T) {
+	for _, op := range []FilterOperator{OpNeq, OpGt, OpLt, OpGte, OpLte, OpContains, OpStartsWith} {
+		f := FieldFilter{
+			FieldName:           "subject",
+			Operator:            op,
+			Value:               "did:plc:alice",
+			IsJSON:              true,
+			IsBadgeAwardSubject: true,
+		}
+		_, _, _, err := buildSingleFilter(f, 1)
+		if err == nil {
+			t.Errorf("op %s: expected unsupported-operator error, got nil", op)
+		}
+	}
+}
+
+// User-supplied DID never lands literally in the SQL string — only
+// as a placeholder. Mirrors the contributor-filter no-injection test.
+func TestBuildSingleFilter_BadgeAwardSubject_NoUserInputInSQL(t *testing.T) {
+	const malicious = "did:plc:'; DROP TABLE record; --"
+	f := FieldFilter{
+		FieldName:           "subject",
+		Operator:            OpEq,
+		Value:               malicious,
+		IsJSON:              true,
+		IsBadgeAwardSubject: true,
+	}
+	clause, params, _, err := buildSingleFilter(f, 1)
+	if err != nil {
+		t.Fatalf("buildSingleFilter: %v", err)
+	}
+	if strings.Contains(clause, "DROP TABLE") {
+		t.Errorf("user input leaked into SQL clause: %s", clause)
+	}
+	if params[0] != malicious {
+		t.Errorf("user input should land in the parameter slot verbatim, got %v", params)
+	}
+}
+
+// FieldName != "subject" with the marker set still uses the
+// badge-award branch — the marker drives behaviour, not FieldName.
+// This mirrors the contributor branch's contract.
+func TestBuildSingleFilter_BadgeAwardSubject_MarkerDrivesBehavior(t *testing.T) {
+	f := FieldFilter{
+		FieldName:           "irrelevant",
+		Operator:            OpEq,
+		Value:               "did:plc:alice",
+		IsJSON:              true,
+		IsBadgeAwardSubject: true,
+	}
+	clause, _, _, err := buildSingleFilter(f, 1)
+	if err != nil {
+		t.Fatalf("buildSingleFilter: %v", err)
+	}
+	if !strings.Contains(clause, "r.json->'subject'") {
+		t.Errorf("marker should force the subject-shaped SQL regardless of FieldName: %s", clause)
+	}
+}

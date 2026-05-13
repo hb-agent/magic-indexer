@@ -21,7 +21,7 @@ func newTestExecutor(t *testing.T) database.Executor {
 		t.Log("TEST_DATABASE_URL not set, using default:", url)
 	}
 
-	exec, err := postgres.NewExecutor(url)
+	exec, err := postgres.NewExecutor(url, 0)
 	if err != nil {
 		t.Fatalf("failed to create Postgres executor: %v", err)
 	}
