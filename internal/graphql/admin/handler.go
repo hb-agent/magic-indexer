@@ -10,6 +10,7 @@ import (
 
 	"github.com/graphql-go/graphql"
 
+	"github.com/GainForest/hypergoat/internal/atproto/did"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/graphql/depth"
 	"github.com/GainForest/hypergoat/internal/oauth"
@@ -144,7 +145,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Validate the DID format before trusting it —
 			// otherwise a caller with the API key could pass an
 			// arbitrary string and forge audit log entries.
-			if candidate != "" && oauth.HasDIDMethodPrefix(candidate) {
+			if candidate != "" && did.IsValid(candidate) {
 				userDID = candidate
 				slog.Info("[admin] Auth via X-User-DID + API key",
 					"did", userDID,

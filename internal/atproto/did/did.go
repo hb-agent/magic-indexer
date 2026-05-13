@@ -1,9 +1,11 @@
 // Package did provides the canonical input-validation predicate for
-// ATProto DID strings. Other packages may have looser checks tuned to
-// their own scopes (e.g. oauth.HasDIDMethodPrefix is a prefix-only
-// gate for token-bound DIDs); when validating attacker-influenced
-// input that flows into SQL parameters or log messages, use this
-// package.
+// ATProto DID strings. Use this package whenever validating
+// attacker-influenced input that flows into SQL parameters, URLs,
+// log messages, or config-key strings. Other packages may have
+// looser checks for their own narrow internal uses (e.g.
+// `config.looksLikeDID` is a startup-only typo gate that doesn't
+// import this package); those callers must not be relied on as
+// security boundaries.
 //
 // The predicate is intentionally stricter than the W3C DID syntax: it
 // accepts only `[a-z]+` for the method name and `[A-Za-z0-9:._-]` for

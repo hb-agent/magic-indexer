@@ -223,10 +223,11 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// looksLikeDID is a cheap syntactic check we can run at config load. A
-// stricter check lives in oauth.HasDIDMethodPrefix but that's in a downstream
-// package and importing it here would create a cycle. Adequate for the
-// "typo the env var" case.
+// looksLikeDID is a cheap syntactic check we can run at config load,
+// targeted at the "typo the env var" case. The canonical strict DID
+// validator is `internal/atproto/did.IsValid`; this looser check
+// stays here because config loading just needs to flag obvious
+// nonsense before deeper components see the value.
 func looksLikeDID(s string) bool {
 	return strings.HasPrefix(s, "did:plc:") || strings.HasPrefix(s, "did:web:")
 }

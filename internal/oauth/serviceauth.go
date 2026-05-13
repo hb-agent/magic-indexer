@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/GainForest/hypergoat/internal/atproto/did"
 )
 
 // Tuning constants. Left as consts (not env) to avoid speculative knobs —
@@ -209,7 +211,7 @@ func (v *ServiceAuthVerifier) keyFunc(token *jwt.Token) (any, error) {
 	if claims.Iss == "" {
 		return nil, fmt.Errorf("%w: missing iss", ErrServiceAuthMalformedHeader)
 	}
-	if !HasDIDMethodPrefix(claims.Iss) {
+	if !did.IsValid(claims.Iss) {
 		return nil, fmt.Errorf("%w: malformed iss %q", ErrServiceAuthUnsupportedDIDMethod, claims.Iss)
 	}
 

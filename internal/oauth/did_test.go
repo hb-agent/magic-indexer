@@ -90,25 +90,6 @@ func TestDIDDocument_GetHandle(t *testing.T) {
 	}
 }
 
-func TestHasDIDMethodPrefix(t *testing.T) {
-	tests := []struct {
-		did  string
-		want bool
-	}{
-		{"did:plc:example123", true},
-		{"did:web:example.com", true},
-		{"did:key:example", false},
-		{"invalid", false},
-		{"", false},
-	}
-
-	for _, tt := range tests {
-		if got := HasDIDMethodPrefix(tt.did); got != tt.want {
-			t.Errorf("HasDIDMethodPrefix(%q) = %v, want %v", tt.did, got, tt.want)
-		}
-	}
-}
-
 func TestIsDIDPLC(t *testing.T) {
 	tests := []struct {
 		did  string

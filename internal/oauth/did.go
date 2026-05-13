@@ -319,16 +319,6 @@ func parseDIDDocument(data []byte, expectedDID ...string) (*DIDDocument, error) 
 	return &doc, nil
 }
 
-// HasDIDMethodPrefix checks that a string starts with `did:plc:` or
-// `did:web:` — a coarse method-only gate sufficient for the oauth /
-// token-binding code paths it gates. This is **not** an input
-// validator; for attacker-influenced strings that flow into SQL or
-// log messages, use the strict predicate at
-// internal/atproto/did/did.go:IsValid instead.
-func HasDIDMethodPrefix(s string) bool {
-	return strings.HasPrefix(s, "did:plc:") || strings.HasPrefix(s, "did:web:")
-}
-
 // rejectPrivateHost errors out if host resolves to any loopback,
 // link-local, private, unspecified, or multicast address. Used to
 // block SSRF via attacker-controlled hostnames (did:web resolution).
