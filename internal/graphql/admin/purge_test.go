@@ -231,3 +231,69 @@ func TestNewPurgeTokenSigner_RejectsEmptySecret(t *testing.T) {
 		t.Error("NewPurgeTokenSigner(empty) succeeded; empty secret must be rejected")
 	}
 }
+
+// TestPurgeTokenSigner_VerifyReason covers the metric-label
+// reason strings returned by VerifyReason on each rejection
+// branch. The reasons feed
+// hypergoat_purge_token_rejected_total{reason}; cardinality must
+// stay bounded by exactly the seven sentinels listed below.
+func TestPurgeTokenSigner_VerifyReason(t *testing.T) {
+	s, nowPtr := newSigner(t)
+
+	// Happy path: empty reason, nil error.
+	ok, _, _ := s.Sign(ScopeActorPurge, "did:plc:admin", "did:plc:target", 1)
+	reason, err := s.VerifyReason(ok, ScopeActorPurge, "did:plc:admin", "did:plc:target", 1)
+	if err != nil {
+		t.Fatalf("VerifyReason(happy path) err = %v, want nil", err)
+	}
+	if reason != "" {
+		t.Errorf("VerifyReason(happy path) reason = %q, want \"\"", reason)
+	}
+
+	// Helper to assert on a single rejection.
+	assertReason := func(name, want string, token, scope, admin, target string, count int64) {
+		t.Helper()
+		gotReason, gotErr := s.VerifyReason(token, scope, admin, target, count)
+		if gotReason != want {
+			t.Errorf("%s: reason = %q, want %q (err = %v)", name, gotReason, want, gotErr)
+		}
+		if gotErr == nil {
+			t.Errorf("%s: error = nil, want non-nil", name)
+		}
+	}
+
+	// invalid: malformed shape.
+	assertReason("malformed", "invalid", "no-dot", ScopeActorPurge, "did:plc:admin", "did:plc:target", 1)
+
+	// scope_mismatch.
+	scopeTok, _, _ := s.Sign(ScopeActorPurge, "did:plc:admin", "did:plc:target", 1)
+	assertReason("scope_mismatch", "scope_mismatch", scopeTok, ScopeResetAll, "did:plc:admin", "did:plc:target", 1)
+
+	// wrong_admin.
+	adminTok, _, _ := s.Sign(ScopeActorPurge, "did:plc:adminA", "did:plc:target", 1)
+	assertReason("wrong_admin", "wrong_admin", adminTok, ScopeActorPurge, "did:plc:adminB", "did:plc:target", 1)
+
+	// wrong_target.
+	targetTok, _, _ := s.Sign(ScopeActorPurge, "did:plc:admin", "did:plc:targetA", 1)
+	assertReason("wrong_target", "wrong_target", targetTok, ScopeActorPurge, "did:plc:admin", "did:plc:targetB", 1)
+
+	// count_drift.
+	driftTok, _, _ := s.Sign(ScopeActorPurge, "did:plc:admin", "did:plc:target", 5)
+	assertReason("count_drift", "count_drift", driftTok, ScopeActorPurge, "did:plc:admin", "did:plc:target", 6)
+
+	// expired.
+	expTok, _, _ := s.Sign(ScopeActorPurge, "did:plc:admin", "did:plc:target", 1)
+	*nowPtr = nowPtr.Add(purgeTokenTTL + time.Second)
+	assertReason("expired", "expired", expTok, ScopeActorPurge, "did:plc:admin", "did:plc:target", 1)
+	*nowPtr = nowPtr.Add(-(purgeTokenTTL + time.Second)) // restore
+
+	// already_used: redeem twice. count=42 is distinct from every
+	// other sub-case so the signature key (a function of the
+	// signed payload bytes including count) doesn't collide with
+	// the happy-path token already in usedSigs.
+	dupTok, _, _ := s.Sign(ScopeActorPurge, "did:plc:admin", "did:plc:target", 42)
+	if _, err := s.VerifyReason(dupTok, ScopeActorPurge, "did:plc:admin", "did:plc:target", 42); err != nil {
+		t.Fatalf("VerifyReason(first redeem) = %v, want nil", err)
+	}
+	assertReason("already_used", "already_used", dupTok, ScopeActorPurge, "did:plc:admin", "did:plc:target", 42)
+}

@@ -3,9 +3,8 @@
 ## Unreleased — chore: review follow-ups for 2026-05-13 audit (P0 + selected P1)
 
 Lands the fixes from the six-reviewer audit recorded in
-`docs/review-2026-05-13/report.md`. Ten tracks complete (5 P0 + 5 P1);
-two remain for a follow-up (metrics + admin audit logs,
-resolver-level tests).
+`docs/review-2026-05-13/report.md`. Eleven tracks complete (5 P0 + 6 P1);
+one remains for a follow-up (resolver-level tests).
 
 ### Server
 
@@ -87,6 +86,42 @@ resolver-level tests).
   TABLE … ADD COLUMN … STORED` rewrites the table on Postgres
   < 18 — schedule a maintenance window for >10M-row deployments.
 
+- **feat(metrics)**: destructive-op + admin-mutation observability
+  (T-OBS-1 + T-OBS-2). Five new Prometheus series:
+  `hypergoat_purge_token_rejected_total{reason}` (bounded
+  seven-value reason set — never `err.Error()`),
+  `hypergoat_purge_actor_total{tap_status}`,
+  `hypergoat_purge_records_deleted` histogram
+  (1/10/100/1k/10k/100k/1M buckets),
+  `hypergoat_admin_settings_changed_total{field}`, and
+  `hypergoat_reset_all_total`. `PurgeTokenSigner` exposes
+  `VerifyReason` alongside `Verify` so the resolver can label the
+  metric without leaking the more granular reason into the error
+  contract (wrong_admin and wrong_target still collapse to
+  `ErrPurgeTokenInvalid`; the metric label distinguishes them).
+
+- **feat(admin)**: audit logs for every state-changing admin
+  mutation (T-OBS-2). `updateSettings` emits one
+  `event=admin_settings_changed` line per applied field with
+  `before` / `after` operator-controlled strings scrubbed through
+  `logsafe.String`. `addAdmin` and `removeAdmin` emit
+  `event=admin_added` / `event=admin_removed` with `actor_did`,
+  `target_did`, `total_admins`. Shape mirrors the `actor_purge` and
+  `reset_all` lines so a single log-aggregator rule routes the
+  whole admin surface. SECURITY.md grows an audit-log + metrics
+  table under "Admin surface".
+
+- **feat(logsafe)**: new `internal/logsafe` package with `DID(s)`
+  and `String(s)` helpers (Q-6). `DID` returns the input if it
+  passes `did.IsValid`, otherwise a sentinel `<invalid-did>` marker.
+  `String` replaces ASCII controls, DEL, U+2028, U+2029, and
+  invalid UTF-8 with U+FFFD and truncates at 256 bytes after
+  replacement so a hostile payload cannot pad past the cap.
+  Applied at every audit-log slog site (purge, resetAll, the new
+  admin-mutation events, the X-User-DID + API-key auth log) as
+  belt-and-braces against a future bug bypassing upstream DID
+  validation.
+
 ### Client
 
 - **fix(client)**: settings form hydration was using `useState(()=>…)`
@@ -106,9 +141,6 @@ resolver-level tests).
 
 The following review items remain backlog:
 
-- **Track 10** — purge metrics (`hypergoat_purge_token_rejected_total`)
-  + audit logs for `UpdateSettings` / `ResetAll` / admin-DID mutations
-  + `internal/logsafe` slog scrubber (T-OBS-1 + T-OBS-2 + Q-6).
 - **Track 12** — resolver-level tests for the purge subsystem +
   Postgres-backed shape tests for the new filters (T-COV-1 + T-COV-3).
 

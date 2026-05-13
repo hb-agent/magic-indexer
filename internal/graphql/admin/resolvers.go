@@ -23,6 +23,8 @@ import (
 	didpkg "github.com/GainForest/hypergoat/internal/atproto/did"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/lexicon"
+	"github.com/GainForest/hypergoat/internal/logsafe"
+	"github.com/GainForest/hypergoat/internal/metrics"
 	"github.com/GainForest/hypergoat/internal/oauth"
 )
 
@@ -631,6 +633,23 @@ func (r *Resolver) AddAdmin(ctx context.Context, did string) (bool, error) {
 		return false, fmt.Errorf("failed to update admin_dids: %w", err)
 	}
 
+	// Audit log + metric. target_did is the DID being granted
+	// admin; actor_did is the admin performing the grant. Both
+	// flow through logsafe.DID — defense-in-depth even though the
+	// upstream did.IsValid checks already validated them. The
+	// field label matches UpdateSettings(admin_dids) so the same
+	// dashboard counter captures every path that mutates the
+	// admin-DID set.
+	actorDID, _ := ctx.Value(contextKeyUserDID).(string)
+	slog.Info("admin added",
+		"event", "admin_added",
+		"actor_did", logsafe.DID(actorDID),
+		"target_did", logsafe.DID(did),
+		"total_admins", len(adminDids),
+		"ts", time.Now().UTC().Format(time.RFC3339),
+	)
+	metrics.AdminSettingsChanged(metrics.AdminSettingsFieldAdminDIDs)
+
 	return true, nil
 }
 
@@ -680,6 +699,21 @@ func (r *Resolver) RemoveAdmin(ctx context.Context, did string) (bool, error) {
 	if err := r.repos.Config.Set(ctx, "admin_dids", newAdminDidsStr); err != nil {
 		return false, fmt.Errorf("failed to update admin_dids: %w", err)
 	}
+
+	// Audit log + metric. Shape mirrors admin_added so log
+	// shippers can route both events with one rule. total_admins
+	// is the count *after* removal (== len(newAdminDids)) so an
+	// operator scanning the line knows the resulting admin set
+	// size.
+	actorDID, _ := ctx.Value(contextKeyUserDID).(string)
+	slog.Info("admin removed",
+		"event", "admin_removed",
+		"actor_did", logsafe.DID(actorDID),
+		"target_did", logsafe.DID(did),
+		"total_admins", len(newAdminDids),
+		"ts", time.Now().UTC().Format(time.RFC3339),
+	)
+	metrics.AdminSettingsChanged(metrics.AdminSettingsFieldAdminDIDs)
 
 	return true, nil
 }
@@ -1118,12 +1152,30 @@ func (r *Resolver) Reports(ctx context.Context, statusFilter *string, first int,
 // Mutation Resolvers
 // =============================================================================
 
-// UpdateSettings updates system settings.
+// UpdateSettings updates system settings. Every applied change
+// emits a structured audit log line (`event=admin_settings_changed
+// field=<name> before=… after=… actor_did=…`) and increments
+// hypergoat_admin_settings_changed_total{field=<name>}. Both `before`
+// and `after` go through logsafe.String — they are operator-supplied
+// URLs and free-form strings that must not forge log lines.
+//
+// Only fields actually applied (after validation) are audited; a
+// validation rejection returns early and the metric stays flat.
 func (r *Resolver) UpdateSettings(ctx context.Context, domainAuthority, adminDids, relayURL, plcDirectoryURL, jetstreamURL, oauthScopes *string) (map[string]interface{}, error) {
+	// adminDID is the calling admin — set by the auth middleware
+	// after did.IsValid. Used as actor_did on the audit line.
+	// Missing context value collapses to "" which logsafe.DID
+	// renders as the invalid-did sentinel, so a future bug that
+	// bypasses the middleware still produces a forensically
+	// usable log line.
+	actorDID, _ := ctx.Value(contextKeyUserDID).(string)
+
 	if domainAuthority != nil {
+		before, _ := r.repos.Config.Get(ctx, "domain_authority")
 		if err := r.repos.Config.Set(ctx, "domain_authority", *domainAuthority); err != nil {
 			return nil, fmt.Errorf("failed to update domain_authority: %w", err)
 		}
+		auditSettingsChanged(actorDID, metrics.AdminSettingsFieldDomainAuthority, before, *domainAuthority)
 	}
 
 	if adminDids != nil {
@@ -1140,45 +1192,77 @@ func (r *Resolver) UpdateSettings(ctx context.Context, domainAuthority, adminDid
 				return nil, fmt.Errorf("invalid admin DID: %q", d)
 			}
 		}
+		before, _ := r.repos.Config.Get(ctx, "admin_dids")
 		if err := r.repos.Config.Set(ctx, "admin_dids", *adminDids); err != nil {
 			return nil, fmt.Errorf("failed to update admin_dids: %w", err)
 		}
+		auditSettingsChanged(actorDID, metrics.AdminSettingsFieldAdminDIDs, before, *adminDids)
 	}
 
 	if relayURL != nil {
 		if err := validateOperatorURL("relay_url", *relayURL); err != nil {
 			return nil, err
 		}
+		before, _ := r.repos.Config.Get(ctx, "relay_url")
 		if err := r.repos.Config.Set(ctx, "relay_url", *relayURL); err != nil {
 			return nil, fmt.Errorf("failed to update relay_url: %w", err)
 		}
+		auditSettingsChanged(actorDID, metrics.AdminSettingsFieldRelayURL, before, *relayURL)
 	}
 
 	if plcDirectoryURL != nil {
 		if err := validateOperatorURL("plc_directory_url", *plcDirectoryURL); err != nil {
 			return nil, err
 		}
+		before, _ := r.repos.Config.Get(ctx, "plc_directory_url")
 		if err := r.repos.Config.Set(ctx, "plc_directory_url", *plcDirectoryURL); err != nil {
 			return nil, fmt.Errorf("failed to update plc_directory_url: %w", err)
 		}
+		auditSettingsChanged(actorDID, metrics.AdminSettingsFieldPLCDirectoryURL, before, *plcDirectoryURL)
 	}
 
 	if jetstreamURL != nil {
 		if err := validateJetstreamURL(*jetstreamURL); err != nil {
 			return nil, err
 		}
+		before, _ := r.repos.Config.Get(ctx, "jetstream_url")
 		if err := r.repos.Config.Set(ctx, "jetstream_url", *jetstreamURL); err != nil {
 			return nil, fmt.Errorf("failed to update jetstream_url: %w", err)
 		}
+		auditSettingsChanged(actorDID, metrics.AdminSettingsFieldJetstreamURL, before, *jetstreamURL)
 	}
 
 	if oauthScopes != nil {
+		before, _ := r.repos.Config.Get(ctx, "oauth_supported_scopes")
 		if err := r.repos.Config.Set(ctx, "oauth_supported_scopes", *oauthScopes); err != nil {
 			return nil, fmt.Errorf("failed to update oauth_supported_scopes: %w", err)
 		}
+		auditSettingsChanged(actorDID, metrics.AdminSettingsFieldOAuthSupportedScopes, before, *oauthScopes)
 	}
 
 	return r.Settings(ctx)
+}
+
+// auditSettingsChanged emits the structured per-field audit log
+// line and increments the matching metric. Centralised here so
+// every UpdateSettings branch (and AddAdmin / RemoveAdmin) renders
+// the same shape — log aggregators can route on a single
+// `event=admin_settings_changed` rule.
+//
+// `before` and `after` are operator-controlled strings (URLs,
+// DID lists) and MUST go through logsafe.String. actor_did goes
+// through logsafe.DID — the auth middleware already validated it
+// with did.IsValid; this is belt-and-braces.
+func auditSettingsChanged(actorDID, field, before, after string) {
+	slog.Info("admin settings changed",
+		"event", "admin_settings_changed",
+		"actor_did", logsafe.DID(actorDID),
+		"field", field,
+		"before", logsafe.String(before),
+		"after", logsafe.String(after),
+		"ts", time.Now().UTC().Format(time.RFC3339),
+	)
+	metrics.AdminSettingsChanged(field)
 }
 
 // resetAllTables is the hard-listed deletion target set for the
@@ -1351,7 +1435,14 @@ func (r *Resolver) ResetAll(ctx context.Context, confirmToken string) (map[strin
 	if err != nil {
 		return nil, fmt.Errorf("count rows: %w", err)
 	}
-	if err := r.purgeTokenSigner.Verify(confirmToken, ScopeResetAll, adminDID, "", totalRows); err != nil {
+	// VerifyReason returns the bounded metric reason (one of
+	// metrics.PurgeReason*) so a token-forge attempt against the
+	// resetAll surface is visible in
+	// hypergoat_purge_token_rejected_total just like an actor-purge
+	// forge attempt. Metric increments before the early-return so
+	// every failure mode is observed.
+	if reason, err := r.purgeTokenSigner.VerifyReason(confirmToken, ScopeResetAll, adminDID, "", totalRows); err != nil {
+		metrics.PurgeTokenRejected(reason)
 		return nil, err
 	}
 
@@ -1380,14 +1471,17 @@ func (r *Resolver) ResetAll(ctx context.Context, confirmToken string) (map[strin
 	// Structured audit log — see SECURITY.md operator contract
 	// for the retention requirement (≥90d GDPR-minimum, 1y
 	// recommended). Shape mirrors actor_purge so log shippers
-	// can route both with one rule.
+	// can route both with one rule. requested_by_did flows through
+	// logsafe.DID — defense-in-depth even though the admin DID
+	// was already validated by the auth middleware.
 	slog.Info("admin reset_all",
 		"event", "reset_all",
-		"requested_by_did", adminDID,
+		"requested_by_did", logsafe.DID(adminDID),
 		"rows_deleted", totalDeleted,
 		"tables_affected", len(resetAllTables),
 		"ts", time.Now().UTC().Format(time.RFC3339),
 	)
+	metrics.ResetAllCompleted()
 
 	return map[string]interface{}{
 		"rowsDeleted":    totalDeleted,

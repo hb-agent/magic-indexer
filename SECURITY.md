@@ -144,6 +144,37 @@ When `DOMAIN_DID` is set, `/notifications/graphql` is mounted behind a service-a
   name and variable keys are logged. Do not re-introduce value
   logging without an audit.
 
+### Audit logs and metrics
+
+Every admin mutation that changes state emits a structured `event=*`
+slog line and increments a Prometheus counter. Together they are the
+operator's primary forensic record: there is **no DB-side audit
+table**. Losing the log line means losing the audit. Configure your
+log shipper to retain `event=*` lines from the admin surface for at
+least 90 days (GDPR-minimum); one year is recommended if you
+anticipate compliance reviews. The slog values flow through
+`internal/logsafe` (`DID`, `String`) so control characters, ANSI
+escapes, and Unicode line separators cannot forge log lines even if
+upstream validation regresses.
+
+| Event                       | Mutation                  | Metric                                                  | Sample attributes                                          |
+| --------------------------- | ------------------------- | ------------------------------------------------------- | ---------------------------------------------------------- |
+| `actor_purge`               | `purgeActor`              | `hypergoat_purge_actor_total{tap_status}` + `hypergoat_purge_records_deleted` histogram | `target_did`, `record_count`, `requested_by_did`, `tap_status` |
+| `reset_all`                 | `resetAll`                | `hypergoat_reset_all_total`                            | `requested_by_did`, `rows_deleted`, `tables_affected`      |
+| `admin_settings_changed`    | `updateSettings`          | `hypergoat_admin_settings_changed_total{field}`        | `actor_did`, `field`, `before`, `after`                    |
+| `admin_added`               | `addAdmin`                | `hypergoat_admin_settings_changed_total{field=adminDids}` | `actor_did`, `target_did`, `total_admins`              |
+| `admin_removed`             | `removeAdmin`             | `hypergoat_admin_settings_changed_total{field=adminDids}` | `actor_did`, `target_did`, `total_admins`              |
+
+Token-rejection forensics for the two preview-confirm mutations
+(`purgeActor`, `resetAll`) live in
+`hypergoat_purge_token_rejected_total{reason}`. Reasons are bounded
+to a seven-value sentinel set
+(`invalid`/`expired`/`already_used`/`wrong_admin`/`count_drift`/
+`wrong_target`/`scope_mismatch`); `err.Error()` never flows into the
+label. Sustained `wrong_admin` traffic is the alertable signal for
+"admin A trying to redeem admin B's token"; `count_drift` is benign
+(ingest raced the operator) and routinely safe to alert below.
+
 ### Statistics / activity endpoints
 
 The GraphQL fields `statistics`, `activityBuckets`, `recentActivity`,
