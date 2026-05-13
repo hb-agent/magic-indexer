@@ -39,7 +39,23 @@ type FieldFilter struct {
 	// LexiconType is the lexicon property type ("string", "integer", etc.)
 	// used for SQL CAST decisions.
 	LexiconType string
+	// IsArrayContributor, when true, signals the special EXISTS-over-
+	// `json->'contributors'` SQL shape used by the
+	// `OrgHypercertsClaimActivityWhereInput.contributor` filter.
+	// FieldName is informational only on this path; the SQL hardcodes
+	// the JSON path. The marker is intentionally narrow — if a second
+	// collection adopts the same array-of-objects-with-identity shape,
+	// rename to a Kind enum at that time.
+	IsArrayContributor bool
 }
+
+// MaxArrayContributorScan caps the per-row scan of the contributors
+// array inside the contributor-filter EXISTS subquery. A record with
+// a contributors array longer than this becomes invisible to the
+// filter (fail-safe semantics). Mirrors
+// notifications.MaxContributorsBeforeReject so a record the
+// notifications layer rejects also fails to match the filter.
+const MaxArrayContributorScan = 200
 
 const (
 	// MaxFilterConditions is the maximum number of filter conditions per query.
@@ -339,6 +355,10 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 		return "", nil, paramIdx, err
 	}
 
+	if f.IsArrayContributor {
+		return buildContributorFilter(f, paramIdx)
+	}
+
 	switch f.Operator {
 	case OpEq:
 		if f.IsJSON {
@@ -457,6 +477,33 @@ func sqlOp(op FilterOperator) string {
 		return "<="
 	default:
 		return "="
+	}
+}
+
+// buildContributorFilter emits the special EXISTS-over-
+// `json->'contributors'` clause for the activity-contributor filter.
+// Guards (jsonb_typeof + jsonb_array_length) are authored first so
+// the planner short-circuits on cheap scalar checks before invoking
+// the set-returning function. COALESCE-of-both-shapes lets the same
+// SQL match contributor identities written either as a bare string
+// (lexicon-compliant) or as the production-drift object shape
+// {"$type":"...","identity":"<DID>"}.
+func buildContributorFilter(f FieldFilter, paramIdx int) (string, []interface{}, int, error) {
+	const tmplEq = `(jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d AND EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE COALESCE(c->>'contributorIdentity', c->'contributorIdentity'->>'identity') = %s))`
+	const tmplIn = `(jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d AND EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE COALESCE(c->>'contributorIdentity', c->'contributorIdentity'->>'identity') = ANY(%s::text[])))`
+
+	switch f.Operator {
+	case OpEq:
+		param := fmt.Sprintf("$%d", paramIdx)
+		clause := fmt.Sprintf(tmplEq, MaxArrayContributorScan, param)
+		return clause, []interface{}{f.Value}, paramIdx + 1, nil
+	case OpIn:
+		param := fmt.Sprintf("$%d", paramIdx)
+		values, _ := extractInValues(f.Value)
+		clause := fmt.Sprintf(tmplIn, MaxArrayContributorScan, param)
+		return clause, []interface{}{values}, paramIdx + 1, nil
+	default:
+		return "", nil, paramIdx, fmt.Errorf("operator %s not supported on contributor filter", f.Operator)
 	}
 }
 

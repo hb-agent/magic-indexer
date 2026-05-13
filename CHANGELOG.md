@@ -1,5 +1,94 @@
 # Changelog
 
+## Unreleased — feat: contributor filter on activity records + notifications fix
+
+Adds a server-side GraphQL filter `contributor: DIDFilterInput` on
+`OrgHypercertsClaimActivityWhereInput` so consumers (primarily
+`certified.app`'s profile page) can list every activity a user has
+been named on as a contributor in a paginated query — issue #64.
+The filter is **DID-only**: handle values are rejected at the GraphQL
+layer with an actionable error. Records whose contributor identity is
+a handle do not match — handle storage is a producer-side concern,
+not indexed as a queryable identity. Compose with the existing `did`
+filter via `_or` for "authored OR contributed" in a single query.
+
+### Schema changes
+
+- New field `contributor: DIDFilterInput` on the activity WhereInput
+  only (`internal/graphql/schema/where.go:wantsContributorFilter`
+  gates the inclusion; absence asserted on `app.certified.badge.award`).
+- Field exposes `eq` and `in` (via the existing `DIDFilterInput`). No
+  other operators are introduced; non-DID values are rejected at the
+  resolver before SQL is built.
+
+### Data model
+
+- No migrations, no new tables. The filter rides the existing
+  `(collection, indexed_at DESC, uri DESC)` keyset index. The
+  `idx_record_json_gin` GIN index does not assist this filter (its
+  `jsonb_path_ops` opclass supports `@>` etc., not the EXISTS-over-
+  `jsonb_array_elements` shape the filter uses).
+
+### SQL
+
+- New `FieldFilter.IsArrayContributor` marker; when set,
+  `buildSingleFilter` emits a guarded EXISTS subquery over
+  `json->'contributors'` that COALESCEs the two contributor-identity
+  shapes (bare string and `{$type,identity}` object) so both match.
+- Two cheap guards precede the EXISTS: `jsonb_typeof = 'array'` (so a
+  pathological record with a non-array `contributors` does not raise
+  and brick all queries) and `jsonb_array_length <= 200` (caps per-
+  row scan cost; oversized records are fail-safe invisible to the
+  filter). `MaxArrayContributorScan` mirrors the existing
+  `notifications.MaxContributorsBeforeReject`.
+
+### Input validation
+
+- Introduces `internal/atproto/did/IsValid` as the canonical input-
+  validation DID predicate. Strict: lowercase method prefix
+  required (`did:[a-z]+:`), no leading/trailing whitespace, length
+  [8, 256], charset `[A-Za-z0-9:._-]`. Filter values are validated
+  before reaching the SQL layer; an invalid value yields a clear
+  GraphQL error including the rejected entry.
+- Pre-existing `oauth.IsValidDID` (prefix-only) renamed to
+  `oauth.HasDIDMethodPrefix` to remove the foot-gun. Behaviour
+  unchanged at all six call sites.
+
+### Notifications extractor fix (folded into this release)
+
+- `extractContributorDID` now reads the production object shape
+  (`{$type, identity}`) in addition to the lexicon-compliant bare
+  string. Before this fix, `ReasonActivityContributor` notifications
+  were silently dropped for every record `certified.app` wrote.
+  Released as a separate commit so a partial revert is possible.
+
+### Metrics
+
+- New `hypergoat_contributor_identity_total{outcome}` counter,
+  incremented per contributor at ingest. Outcomes: `did` (resolved
+  to a valid DID), `non_did` (string read but failed validation —
+  typically a handle), `unrecognized_shape` (no string read — covers
+  strong-refs and other drift). Mirrors the `pds_resolve_total`
+  shape. A rising `non_did` trend nudges producers; a rising
+  `unrecognized_shape` trend signals strong-refs entering production.
+
+### Follow-up issues filed alongside this PR
+
+- Ingest-time hard cap on `contributors` array length (the SQL
+  bound is the query-side defence; record persistence is unbounded
+  today).
+- Per-query `statement_timeout` on the public GraphQL endpoint.
+- Strong-ref variant support, gated on the
+  `unrecognized_shape` metric trending up.
+
+### Process
+
+- Implemented under the deep-flow process (see `AGENTS.md`).
+- Plan + 5-reviewer round (schema, SQL, security, performance,
+  ergonomics) at `docs/issue-64/`. One Critical (unbounded
+  contributors-array DoS surface) plus 18 Major findings accepted
+  and folded into the plan + implementation.
+
 ## 2026-05-09 — feat: server-side excludePds filter and pds field on every record
 
 Adds a server-side filter that lets GraphQL clients exclude records authored from specific PDSes — primarily intended for hiding test-PDS content from public feeds (see consumer issue: hb-agent/maearth-social#10). Also exposes the resolved PDS endpoint as a new `pds: String` field on every record's GraphQL node so clients can render badges or branch logic on it.

@@ -7,10 +7,28 @@ import (
 
 	"github.com/graphql-go/graphql"
 
+	"github.com/GainForest/hypergoat/internal/atproto/did"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 	"github.com/GainForest/hypergoat/internal/graphql/types"
 	"github.com/GainForest/hypergoat/internal/lexicon"
 )
+
+// wantsContributorFilter reports whether a lexicon's generated
+// WhereInput should carry the special contributor filter field.
+// Today this is a single-collection list; when a second collection
+// adopts the same array-of-contributors-with-DID-identity shape,
+// add it here (and rename FieldFilter.IsArrayContributor to a Kind
+// enum at that time).
+func wantsContributorFilter(lexID string) bool {
+	return lexID == "org.hypercerts.claim.activity"
+}
+
+// contributorFieldDescription is the GraphQL field description for
+// the contributor filter — pinned verbatim so consumers see the
+// policy at the schema-introspection boundary. See
+// docs/issue-64/plan.md "Field description (pinned text)" for
+// rationale.
+const contributorFieldDescription = `Filter to activities where any contributors[*].contributorIdentity resolves to one of these DIDs. DIDs only — handle values are rejected at the GraphQL layer. Records whose contributor identity is a handle (not a DID) silently do not match — handle storage is a producer-side concern, not indexed as a queryable identity here. The strong-ref contributor variant (com.atproto.repo.strongRef) is not currently supported. To express "authored OR contributed" as a single query, compose with the did filter via _or: where: { _or: [ { did: { eq: "did:plc:me" } }, { contributor: { in: ["did:plc:me"] } } ] }.`
 
 // buildWhereInputType generates a per-collection WhereInput InputObject type
 // from the lexicon's main record definition. Returns nil if the lexicon has
@@ -38,6 +56,15 @@ func buildWhereInputType(lex *lexicon.Lexicon) *graphql.InputObject {
 	fields["did"] = &graphql.InputObjectFieldConfig{
 		Type:        types.DIDFilterInput,
 		Description: "Filter by record author DID (column-level, optimized)",
+	}
+
+	// Singular is deliberate: the predicate is per-record ("the record
+	// has a matching contributor"), not per-contributor.
+	if wantsContributorFilter(lex.ID) {
+		fields["contributor"] = &graphql.InputObjectFieldConfig{
+			Type:        types.DIDFilterInput,
+			Description: contributorFieldDescription,
+		}
 	}
 
 	// Guard: if only the `did` field exists (no filterable properties), still
@@ -126,6 +153,20 @@ func extractFieldFiltersRecursive(whereArg interface{}, lex *lexicon.Lexicon, de
 
 		filterMap, ok := filterInput.(map[string]interface{})
 		if !ok {
+			continue
+		}
+
+		// Special-case: contributor filter on collections that opt in.
+		// Validates DIDs up front and emits a single FieldFilter with
+		// the array-contributor SQL marker. Returns from the per-field
+		// loop body via `continue` so the standard handler below does
+		// not also process this field.
+		if fieldName == "contributor" && lex != nil && wantsContributorFilter(lex.ID) {
+			f, err := buildContributorFieldFilter(filterMap)
+			if err != nil {
+				return repositories.FilterGroup{}, fmt.Errorf("field %q: %w", fieldName, err)
+			}
+			group.Filters = append(group.Filters, f)
 			continue
 		}
 
@@ -225,4 +266,56 @@ func capitalize(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// buildContributorFieldFilter parses the `contributor` filter input
+// (a DIDFilterInput shape, accepting `eq` and `in` only) and builds
+// a FieldFilter with IsArrayContributor=true. Every value is
+// validated as a DID up front so the SQL layer sees only sanitised
+// strings.
+func buildContributorFieldFilter(filterMap map[string]interface{}) (repositories.FieldFilter, error) {
+	if eqVal, ok := filterMap["eq"]; ok {
+		s, ok := eqVal.(string)
+		if !ok {
+			return repositories.FieldFilter{}, fmt.Errorf("eq value must be a string DID, got %T", eqVal)
+		}
+		if !did.IsValid(s) {
+			return repositories.FieldFilter{}, fmt.Errorf("contributor filter values must be DIDs (did:...); resolve handles to DIDs in the session layer — handle values are not indexed as a queryable identity (rejected value: %q)", s)
+		}
+		return repositories.FieldFilter{
+			FieldName:          "contributors",
+			Operator:           repositories.OpEq,
+			Value:              s,
+			IsJSON:             true,
+			IsArrayContributor: true,
+		}, nil
+	}
+	if inVal, ok := filterMap["in"]; ok {
+		raw, ok := inVal.([]interface{})
+		if !ok {
+			return repositories.FieldFilter{}, fmt.Errorf("in value must be a list of DIDs, got %T", inVal)
+		}
+		if len(raw) > repositories.MaxInListSize {
+			return repositories.FieldFilter{}, fmt.Errorf("in list exceeds maximum of %d values", repositories.MaxInListSize)
+		}
+		values := make([]string, 0, len(raw))
+		for i, item := range raw {
+			s, ok := item.(string)
+			if !ok {
+				return repositories.FieldFilter{}, fmt.Errorf("in[%d] must be a string DID, got %T", i, item)
+			}
+			if !did.IsValid(s) {
+				return repositories.FieldFilter{}, fmt.Errorf("contributor filter values must be DIDs (did:...); resolve handles to DIDs in the session layer — handle values are not indexed as a queryable identity (rejected value: %q)", s)
+			}
+			values = append(values, s)
+		}
+		return repositories.FieldFilter{
+			FieldName:          "contributors",
+			Operator:           repositories.OpIn,
+			Value:              values,
+			IsJSON:             true,
+			IsArrayContributor: true,
+		}, nil
+	}
+	return repositories.FieldFilter{}, fmt.Errorf("contributor filter requires `eq` or `in`")
 }

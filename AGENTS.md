@@ -1027,6 +1027,17 @@ Other things that came up in review and were intentionally
   label is *not* hidden by default. Clients must pass
   `excludeLabels: ["!takedown"]` explicitly. This is a
   deliberate product decision (the indexer is labeler-neutral).
+- **`contributorIdentity` is read as a DID or not at all** for
+  the `org.hypercerts.claim.activity` collection. Handle-form
+  identities are treated as missing — the GraphQL `contributor`
+  filter rejects handle inputs and stored handle entries
+  silently do not match. This is enforcement-by-reading: we
+  nudge producers to write DIDs without rewriting any PDS
+  records ourselves. Watch
+  `hypergoat_contributor_identity_total{outcome="non_did"}`
+  to see producer drift; `outcome="unrecognized_shape"` is
+  the signal that strong-refs may be entering production.
+  See `docs/issue-64/plan.md`.
 
 ---
 
