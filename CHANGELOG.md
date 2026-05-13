@@ -3,11 +3,32 @@
 ## Unreleased — chore: review follow-ups for 2026-05-13 audit (P0 + selected P1)
 
 Lands the first wave of fixes from the six-reviewer audit recorded in
-`docs/review-2026-05-13/report.md`. Seven tracks complete (5 P0 + 2 P1);
-five remain for a follow-up (ResetAll hardening, FilterKind refactor,
-new-filter indexes, metrics + admin audit logs, resolver-level tests).
+`docs/review-2026-05-13/report.md`. Eight tracks complete (5 P0 + 3 P1);
+four remain for a follow-up (FilterKind refactor, new-filter indexes,
+metrics + admin audit logs, resolver-level tests).
 
 ### Server
+
+- **feat(admin)**: `resetAll` matches the actor-purge contract.
+  `previewResetAll` materializes per-table row counts and mints an
+  HMAC-signed `confirmToken` bound to (admin DID, total rows, exp,
+  scope=`reset_all`). `resetAll(confirmToken)` verifies the token,
+  re-counts under fresh state (drift rejects with the existing
+  `ErrPurgeTokenCountDrift` sentinel), and runs every DELETE in one
+  transaction over a hard-listed table set covering records, actors,
+  activity, labels, reports, notifications, OAuth tokens / sessions /
+  replay caches, and admin sessions. `config`, `lexicon`,
+  `oauth_client`, `label_definition`, and `jetstream_cursor` are
+  preserved by design so the reset doesn't lock the operator out.
+  Emits a structured audit log line (`event=reset_all
+  requested_by_did=… rows_deleted=… tables_affected=… ts=…`) matching
+  the `actor_purge` shape — SECURITY.md operator contract documents
+  the ≥90d retention requirement. The signer now carries an explicit
+  scope claim so an `actor_purge` token cannot cross-redeem into
+  `resetAll` (and vice versa); claim shape bumped to v2 with the
+  documented one-TTL window of invalidation on deploy. Client
+  `mutations.ts` ships the new shape; the settings page UI follows in
+  a separate track. Closes SEC-2 + A-1.
 
 - **fix(db)**: migration 021 drops the legacy `idx_record_json_gin` and
   recreates it as `idx_record_json_gin_path_ops` with `jsonb_path_ops`.
@@ -66,8 +87,6 @@ new-filter indexes, metrics + admin audit logs, resolver-level tests).
 
 The following review items remain backlog:
 
-- **Track 3** — `ResetAll` HMAC hardening + complete deletion list +
-  structured audit log (SEC-2 + A-1).
 - **Track 8** — `FilterKind` enum + per-lexicon descriptor registry to
   collapse the two per-collection filter builders (Q-2 + A-2).
 - **Track 9** — partial-GIN expression index for contributors + subject

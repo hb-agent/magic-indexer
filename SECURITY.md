@@ -202,6 +202,64 @@ to bound fat-finger damage. No additional limit is wired
 specifically for purge; tighten the proxy rule if your threat
 model requires it.
 
+### Reset all data (`previewResetAll` / `resetAll`)
+
+Two admin mutations support wiping the entire index — every actor,
+record, activity row, label, report, notification, OAuth grant,
+and admin session. The contract mirrors `purgeActor` exactly,
+because `resetAll` is strictly more destructive (whole instance,
+not one DID) and must be at least as hardened:
+
+- `previewResetAll` returns per-table row counts plus an
+  HMAC-signed `confirmToken` bound to (requesting admin DID,
+  total rows across the deletion list, expiry, scope=reset_all).
+  The signing key is `SECRET_KEY_BASE`; the TTL is 5 minutes;
+  the token is single-use, enforced by signature in an
+  **in-memory** set that is cleared on process restart. Within
+  the 5-minute TTL window after a crash, a captured token could
+  be redeemed once more — still bound to the same admin DID and
+  total-row count. The TTL is the hard replay bound. Scope
+  binding means an actor-purge token cannot cross-redeem into
+  this mutation (or vice versa).
+- `resetAll(confirmToken)` re-counts rows before verifying the
+  bound token (so count drift between preview and reset rejects
+  the token), then commits a single SQL transaction that
+  deletes from every table in the resolver's hard-listed
+  deletion set. **The deletion list explicitly preserves**:
+  `config` (operator settings — so the reset doesn't lock the
+  admin out), `lexicon` (schema definitions), `oauth_client`
+  (registered app metadata, separate from issued tokens),
+  `label_definition` (seeded Bluesky vocabulary), and
+  `jetstream_cursor` (operational state). The list is the
+  source of truth — see `resetAllTables` in
+  `internal/graphql/admin/resolvers.go`. When a migration adds
+  a table whose contents are user / actor / activity data,
+  append it.
+
+Every successful reset emits a structured log line:
+
+```
+event=reset_all requested_by_did=… rows_deleted=… \
+tables_affected=… ts=…
+```
+
+**Operator contract**: this log line is the audit trail.
+Configure your log shipper to retain `event=reset_all` lines for
+**at least 90 days** (GDPR-minimum) and prefer **one year** if
+you anticipate audit reviews of destructive admin actions. There
+is no DB-side audit table by design — losing the log line means
+losing the audit, and the reset itself deletes any DB-side
+trail that might otherwise have survived. **A process crash
+between the SQL commit and the `slog` call can also lose the
+audit line** (low probability, no auto-recovery); operators
+detecting this case will see a populated `admin_session`-less
+instance with no `event=reset_all` line preceding it.
+
+The same `/admin/graphql` rate limit (default 60 req/min/IP)
+governs this mutation; treat it as a noise filter, not a
+defence — a single legitimate operator never approaches the
+rate, and an attacker with admin auth can already do worse.
+
 ## Metrics
 
 `/metrics` is unauthenticated and exposes Prometheus text format.
