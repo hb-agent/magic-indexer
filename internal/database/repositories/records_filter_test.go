@@ -792,3 +792,151 @@ func TestGetByCollectionFiltered_Contributor_ExclusivelyEnforcesGuards_OK(t *tes
 		t.Errorf("expected 1 record at array-size boundary, got %d", len(got))
 	}
 }
+
+func TestGetByCollectionFiltered_Contributor_PaginationKeyset(t *testing.T) {
+	// Acceptance criterion E: keyset cursor advances correctly under
+	// the contributor filter. Seed 5 records all matching the same
+	// contributor DID; page with limit=2 and verify each page returns
+	// the expected slice in expected order, with the final page
+	// returning the tail.
+	db := testutil.SetupTestDB(t)
+	ctx := context.Background()
+	const col = "org.hypercerts.claim.activity"
+
+	// Five matching records authored by distinct DIDs so URIs sort
+	// stably. indexed_at is set by the DB at insert time; the
+	// loop's insert order determines the DESC ordering.
+	uris := make([]string, 5)
+	for i := 0; i < 5; i++ {
+		uri := fmt.Sprintf("at://did:plc:author%d/%s/r%d", i, col, i)
+		uris[i] = uri
+		body := `{"contributors":[{"contributorIdentity":"did:plc:target"}]}`
+		if _, err := db.Records.Insert(ctx, uri, fmt.Sprintf("cid%d", i),
+			fmt.Sprintf("did:plc:author%d", i), col, body); err != nil {
+			t.Fatalf("insert %s: %v", uri, err)
+		}
+	}
+
+	fg := contributorFilterGroup(repositories.OpEq, "did:plc:target")
+	// Default sort is indexed_at DESC; format matches the keyset
+	// timestamp Postgres returns.
+	tsFormat := "2006-01-02T15:04:05.999999Z07:00"
+
+	// Page 1: newest two.
+	page1, err := db.Records.GetByCollectionFiltered(ctx, col, 2, "", "",
+		repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("page 1 expected 2 records, got %d", len(page1))
+	}
+	advance := func(page []*repositories.Record) (string, string) {
+		last := page[len(page)-1]
+		return last.IndexedAt.Format(tsFormat), last.URI
+	}
+	// Page 2: next two.
+	afterTS, afterURI := advance(page1)
+	page2, err := db.Records.GetByCollectionFiltered(ctx, col, 2, afterTS, afterURI,
+		repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+	if len(page2) != 2 {
+		t.Fatalf("page 2 expected 2 records, got %d", len(page2))
+	}
+	// Page 3: the tail.
+	afterTS, afterURI = advance(page2)
+	page3, err := db.Records.GetByCollectionFiltered(ctx, col, 2, afterTS, afterURI,
+		repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("page 3: %v", err)
+	}
+	if len(page3) != 1 {
+		t.Fatalf("page 3 expected 1 record (tail), got %d", len(page3))
+	}
+	// Page 4: empty.
+	afterTS, afterURI = advance(page3)
+	page4, err := db.Records.GetByCollectionFiltered(ctx, col, 2, afterTS, afterURI,
+		repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("page 4: %v", err)
+	}
+	if len(page4) != 0 {
+		t.Errorf("page 4 expected 0 records (past tail), got %d", len(page4))
+	}
+	// No URI appears twice across pages.
+	seen := map[string]bool{}
+	for _, page := range [][]*repositories.Record{page1, page2, page3} {
+		for _, rec := range page {
+			if seen[rec.URI] {
+				t.Errorf("URI %s appeared on more than one page", rec.URI)
+			}
+			seen[rec.URI] = true
+		}
+	}
+	if len(seen) != 5 {
+		t.Errorf("expected 5 unique URIs across pages, got %d", len(seen))
+	}
+}
+
+func TestGetByCollectionFiltered_Contributor_ComposeWithExcludePds(t *testing.T) {
+	// Both filters AND together: a record matches only if its
+	// contributor is `did:plc:target` AND its author's PDS is not in
+	// the exclude list.
+	db := seedContributorRecords(t)
+	ctx := context.Background()
+
+	// Resolve author1's PDS to "https://blocked.example" so it gets
+	// excluded; author3 remains NULL pds (passes through).
+	if err := db.Actors.SetPDS(ctx, "did:plc:author1", "https://blocked.example"); err != nil {
+		t.Fatalf("set pds: %v", err)
+	}
+
+	fg := contributorFilterGroup(repositories.OpEq, "did:plc:alice")
+	got, err := db.Records.GetByCollectionFiltered(ctx, "org.hypercerts.claim.activity",
+		100, "", "",
+		repositories.RecordFilter{PDSExclude: []string{"https://blocked.example"}},
+		nil, fg)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	// did:plc:alice was a contributor on r1 (author1, now excluded)
+	// and r3 (author3, NULL pds → passes through). Result should be
+	// just r3.
+	if len(got) != 1 || got[0].URI != "at://did:plc:author3/org.hypercerts.claim.activity/r3" {
+		t.Errorf("expected only r3 after excludePds, got %d: %+v", len(got), got)
+	}
+}
+
+func TestGetByCollectionFiltered_Contributor_StoredDIDWithWhitespace(t *testing.T) {
+	// Symmetric policy with the extractor: a stored DID with stray
+	// whitespace is data-quality noise, not a match. The SQL matches
+	// bytes exactly so `"  did:plc:alice  "` (with padding) does not
+	// match a filter for `"did:plc:alice"`. Operators detect this via
+	// the contributor_identity_total{outcome="non_did"} counter.
+	db := testutil.SetupTestDB(t)
+	ctx := context.Background()
+	const col = "org.hypercerts.claim.activity"
+
+	if _, err := db.Records.Insert(ctx,
+		"at://did:plc:padded/"+col+"/r1", "cidpadded", "did:plc:padded", col,
+		`{"contributors":[{"contributorIdentity":"  did:plc:alice  "}]}`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if _, err := db.Records.Insert(ctx,
+		"at://did:plc:clean/"+col+"/r1", "cidclean", "did:plc:clean", col,
+		`{"contributors":[{"contributorIdentity":"did:plc:alice"}]}`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	fg := contributorFilterGroup(repositories.OpEq, "did:plc:alice")
+	got, err := db.Records.GetByCollectionFiltered(ctx, col, 100, "", "",
+		repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(got) != 1 || got[0].URI != "at://did:plc:clean/"+col+"/r1" {
+		t.Errorf("expected only the unpadded record to match, got %d: %+v", len(got), got)
+	}
+}

@@ -64,6 +64,17 @@ func TestBuildContributorFieldFilter_InValidDIDs(t *testing.T) {
 	}
 }
 
+func TestBuildContributorFieldFilter_RejectsEmptyInList(t *testing.T) {
+	in := map[string]interface{}{"in": []interface{}{}}
+	_, err := buildContributorFieldFilter(in)
+	if err == nil {
+		t.Fatal("expected error for empty in: [] list")
+	}
+	if !strings.Contains(err.Error(), "at least one") {
+		t.Errorf("error should mention 'at least one': %v", err)
+	}
+}
+
 func TestBuildContributorFieldFilter_InRejectsHandleInList(t *testing.T) {
 	in := map[string]interface{}{"in": []interface{}{"did:plc:alice", "bob.example.com"}}
 	_, err := buildContributorFieldFilter(in)

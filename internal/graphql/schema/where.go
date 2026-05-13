@@ -295,6 +295,9 @@ func buildContributorFieldFilter(filterMap map[string]interface{}) (repositories
 		if !ok {
 			return repositories.FieldFilter{}, fmt.Errorf("in value must be a list of DIDs, got %T", inVal)
 		}
+		if len(raw) == 0 {
+			return repositories.FieldFilter{}, fmt.Errorf("contributor in: list must contain at least one DID")
+		}
 		if len(raw) > repositories.MaxInListSize {
 			return repositories.FieldFilter{}, fmt.Errorf("in list exceeds maximum of %d values", repositories.MaxInListSize)
 		}

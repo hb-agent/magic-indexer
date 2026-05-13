@@ -482,15 +482,23 @@ func sqlOp(op FilterOperator) string {
 
 // buildContributorFilter emits the special EXISTS-over-
 // `json->'contributors'` clause for the activity-contributor filter.
-// Guards (jsonb_typeof + jsonb_array_length) are authored first so
-// the planner short-circuits on cheap scalar checks before invoking
-// the set-returning function. COALESCE-of-both-shapes lets the same
-// SQL match contributor identities written either as a bare string
-// (lexicon-compliant) or as the production-drift object shape
+//
+// The clause is wrapped in a CASE expression because Postgres does
+// not guarantee left-to-right evaluation of AND operands in WHERE.
+// Without CASE, the planner is free to invoke jsonb_array_length or
+// jsonb_array_elements before the jsonb_typeof guard — both raise
+// on a non-array operand, so a single stored record whose
+// `contributors` is mis-shaped would brick every filtered query.
+// CASE is the documented escape hatch for forcing evaluation order
+// (https://www.postgresql.org/docs/current/sql-expressions.html).
+//
+// COALESCE-of-both-shapes lets the same SQL match contributor
+// identities written either as a bare string (lexicon-compliant)
+// or as the production-drift object shape
 // {"$type":"...","identity":"<DID>"}.
 func buildContributorFilter(f FieldFilter, paramIdx int) (string, []interface{}, int, error) {
-	const tmplEq = `(jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d AND EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE COALESCE(c->>'contributorIdentity', c->'contributorIdentity'->>'identity') = %s))`
-	const tmplIn = `(jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d AND EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE COALESCE(c->>'contributorIdentity', c->'contributorIdentity'->>'identity') = ANY(%s::text[])))`
+	const tmplEq = `(CASE WHEN jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d THEN EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE COALESCE(c->>'contributorIdentity', c->'contributorIdentity'->>'identity') = %s) ELSE FALSE END)`
+	const tmplIn = `(CASE WHEN jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d THEN EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE COALESCE(c->>'contributorIdentity', c->'contributorIdentity'->>'identity') = ANY(%s::text[])) ELSE FALSE END)`
 
 	switch f.Operator {
 	case OpEq:

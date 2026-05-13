@@ -29,25 +29,24 @@ func TestBuildSingleFilter_Contributor_Eq(t *testing.T) {
 	if params[0] != "did:plc:alice" {
 		t.Errorf("params[0] = %v, want did:plc:alice", params[0])
 	}
-	// Guards must be present and ordered cheap-first.
+	// Guards must be present, and the whole shape must be a CASE WHEN
+	// wrapper so Postgres is forced to evaluate the guards before the
+	// EXISTS subquery (AND ordering in WHERE is otherwise not
+	// guaranteed by the planner).
 	wantSubstrings := []string{
+		"CASE WHEN",
 		"jsonb_typeof(r.json->'contributors') = 'array'",
 		"jsonb_array_length(r.json->'contributors') <= 200",
+		"THEN EXISTS",
 		"jsonb_array_elements(r.json->'contributors')",
 		`COALESCE(c->>'contributorIdentity', c->'contributorIdentity'->>'identity')`,
 		"= $1",
+		"ELSE FALSE END",
 	}
 	for _, sub := range wantSubstrings {
 		if !strings.Contains(clause, sub) {
 			t.Errorf("clause missing %q\nfull clause: %s", sub, clause)
 		}
-	}
-	// Guards before EXISTS.
-	if strings.Index(clause, "jsonb_typeof") > strings.Index(clause, "EXISTS") {
-		t.Errorf("jsonb_typeof guard must appear before EXISTS:\n%s", clause)
-	}
-	if strings.Index(clause, "jsonb_array_length") > strings.Index(clause, "EXISTS") {
-		t.Errorf("jsonb_array_length guard must appear before EXISTS:\n%s", clause)
 	}
 }
 

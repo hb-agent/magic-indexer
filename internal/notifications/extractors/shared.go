@@ -4,7 +4,6 @@ package extractors
 import (
 	"bytes"
 	"encoding/json"
-	"strings"
 	"time"
 
 	"github.com/GainForest/hypergoat/internal/atproto/did"
@@ -33,13 +32,6 @@ func clampSortAt(createdAt string) time.Time {
 	return parsed
 }
 
-// isValidDID is a thin alias for the canonical did.IsValid predicate.
-// Retained as a package-level shim for call-site brevity in the
-// extractor files; new callers should import did.IsValid directly.
-func isValidDID(s string) bool {
-	return did.IsValid(s)
-}
-
 // extractContributorDID resolves an ATProto union on
 // `org.hypercerts.claim.activity#contributor.contributorIdentity`
 // to a DID, or to "" if no DID can be read.
@@ -60,37 +52,47 @@ func isValidDID(s string) bool {
 // this is the operator's signal for strong-refs or unexpected
 // drift).
 func extractContributorDID(raw json.RawMessage) string {
-	// Bare-string variant: the lexicon-compliant shape.
+	// Bare-string variant: the lexicon-compliant shape. The match is
+	// byte-exact (no TrimSpace) so the extractor's notion of "is this
+	// a DID?" stays symmetric with the SQL filter, which also matches
+	// bytes exactly. A stored DID with stray whitespace is therefore
+	// non_did at the metric and invisible to both surfaces.
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		s = strings.TrimSpace(s)
 		switch {
-		case s == "":
-			metrics.ContributorIdentityUnrecognizedShape()
-			return ""
 		case did.IsValid(s):
 			metrics.ContributorIdentityDID()
 			return s
 		default:
+			// Includes the empty-string case. Per the plan: any string
+			// (empty or otherwise) that fails did.IsValid is non_did.
+			// unrecognized_shape is reserved for non-string shapes —
+			// the operator's signal for strong-refs entering production.
 			metrics.ContributorIdentityNonDID()
 			return ""
 		}
 	}
 	// Object variant: production drift from certified.app.
 	var obj struct {
-		Identity string `json:"identity"`
+		// Use a pointer so we can distinguish "no .identity field" from
+		// "identity is the empty string". Both still resolve to the same
+		// metric outcome (unrecognized_shape vs non_did respectively),
+		// but the distinction tells operators which class of drift they
+		// are seeing.
+		Identity *string `json:"identity"`
 	}
 	if err := json.Unmarshal(raw, &obj); err == nil {
-		ident := strings.TrimSpace(obj.Identity)
 		switch {
-		case ident == "":
-			// Object without .identity (strong-refs land here too).
+		case obj.Identity == nil:
+			// Object without .identity at all (strong-refs land here).
 			metrics.ContributorIdentityUnrecognizedShape()
 			return ""
-		case did.IsValid(ident):
+		case did.IsValid(*obj.Identity):
 			metrics.ContributorIdentityDID()
-			return ident
+			return *obj.Identity
 		default:
+			// .identity present but not a DID (handle, empty string,
+			// garbage). Same bucket as the bare-string fail case.
 			metrics.ContributorIdentityNonDID()
 			return ""
 		}

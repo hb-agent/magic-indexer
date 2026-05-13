@@ -98,16 +98,18 @@ func TestExtractContributorDID_ObjectVariantHandle(t *testing.T) {
 }
 
 func TestExtractContributorDID_EmptyBareString(t *testing.T) {
+	// Empty bare string is non_did per the plan: it is a string, just
+	// not a DID. unrecognized_shape is reserved for non-string shapes.
 	raw := json.RawMessage(`""`)
 	var got string
-	delta := counterDelta(t, "hypergoat_contributor_identity_total", "unrecognized_shape", func() {
+	delta := counterDelta(t, "hypergoat_contributor_identity_total", "non_did", func() {
 		got = extractContributorDID(raw)
 	})
 	if got != "" {
 		t.Errorf("got %q, want \"\"", got)
 	}
 	if delta != 1 {
-		t.Errorf("unrecognized_shape outcome delta = %v, want 1", delta)
+		t.Errorf("non_did outcome delta = %v, want 1", delta)
 	}
 }
 
@@ -146,19 +148,20 @@ func TestExtractContributorDID_ObjectNonStringIdentity(t *testing.T) {
 }
 
 func TestExtractContributorDID_NullLiteral(t *testing.T) {
-	// JSON null literal: both unmarshals succeed with zero values;
-	// bare-string branch wins first and reports unrecognized_shape
-	// (empty string).
+	// JSON null literal: json.Unmarshal into *string succeeds, leaving
+	// the target unchanged at its zero value ("" — also valid empty
+	// bare-string semantics). Classification: non_did (empty string is
+	// a string, just not a DID).
 	raw := json.RawMessage(`null`)
 	var got string
-	delta := counterDelta(t, "hypergoat_contributor_identity_total", "unrecognized_shape", func() {
+	delta := counterDelta(t, "hypergoat_contributor_identity_total", "non_did", func() {
 		got = extractContributorDID(raw)
 	})
 	if got != "" {
 		t.Errorf("got %q, want \"\"", got)
 	}
 	if delta != 1 {
-		t.Errorf("unrecognized_shape outcome delta = %v, want 1", delta)
+		t.Errorf("non_did outcome delta = %v, want 1", delta)
 	}
 }
 
@@ -177,18 +180,21 @@ func TestExtractContributorDID_MalformedJSON(t *testing.T) {
 }
 
 func TestExtractContributorDID_WhitespaceWrappedDID(t *testing.T) {
-	// Leading/trailing whitespace is trimmed before validation, so a
-	// stored DID with stray padding still matches.
+	// Whitespace-padded stored DIDs are non_did. The extractor no
+	// longer trims, keeping its decision symmetric with the SQL
+	// filter (which also matches bytes exactly). Stored DIDs with
+	// stray whitespace are a data-quality issue surfaced by the
+	// non_did metric.
 	raw := json.RawMessage(`"  did:plc:alice  "`)
 	var got string
-	delta := counterDelta(t, "hypergoat_contributor_identity_total", "did", func() {
+	delta := counterDelta(t, "hypergoat_contributor_identity_total", "non_did", func() {
 		got = extractContributorDID(raw)
 	})
-	if got != "did:plc:alice" {
-		t.Errorf("got %q, want %q", got, "did:plc:alice")
+	if got != "" {
+		t.Errorf("got %q, want \"\" (whitespace-bearing input is non_did)", got)
 	}
 	if delta != 1 {
-		t.Errorf("did outcome delta = %v, want 1", delta)
+		t.Errorf("non_did outcome delta = %v, want 1", delta)
 	}
 }
 
