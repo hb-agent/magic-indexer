@@ -117,8 +117,15 @@ export default function SettingsPage() {
     return () => clearInterval(id);
   }, [purgePreview]);
 
-  // Update form when settings load
-  useState(() => {
+  // Hydrate form state when settings load from the server.
+  //
+  // Was previously `useState(() => { ... })`, which uses the lazy-init
+  // form — that runs ONCE on first render (when `settings` is still
+  // undefined from React Query's pending state) and then never again,
+  // so the form inputs never populated. Data loss was prevented only by
+  // the resolver's `!= nil` guard and the `|| undefined` pattern below;
+  // the user-visible bug was "I can't see my current settings."
+  useEffect(() => {
     if (settings) {
       setDomainAuthority(settings.domainAuthority);
       setRelayUrl(settings.relayUrl);
@@ -126,7 +133,7 @@ export default function SettingsPage() {
       setJetstreamUrl(settings.jetstreamUrl);
       setOauthScopes(settings.oauthSupportedScopes);
     }
-  });
+  }, [settings]);
 
   // Update settings mutation
   const updateMutation = useMutation({
