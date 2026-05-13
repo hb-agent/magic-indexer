@@ -122,3 +122,29 @@ export interface CollectionOverviewResponse {
 export interface ValidationStatsResponse {
   validationStats: ValidationStats;
 }
+
+export interface PurgeActorPreview {
+  did: string;
+  recordCount: number;
+  actorExists: boolean;
+  handle: string;
+  latestIndexedAt: string;
+  confirmToken: string;
+  tokenExpiresAt: string;
+  tokenTtlSeconds: number;
+}
+
+export interface PreviewPurgeActorResponse {
+  previewPurgeActor: PurgeActorPreview;
+}
+
+export interface PurgeActorResult {
+  did: string;
+  recordsDeleted: number;
+  actorRowsDeleted: number;
+  tapStatus: string;
+}
+
+export interface PurgeActorResponse {
+  purgeActor: PurgeActorResult;
+}

@@ -345,6 +345,73 @@ var CollectionValidationCountType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// PurgeActorPreviewType is what previewPurgeActor returns to the
+// operator. Contains the counts they confirm against plus the
+// HMAC-signed `confirmToken` they hand back to purgeActor. See
+// internal/graphql/admin/purge.go.
+var PurgeActorPreviewType = graphql.NewObject(graphql.ObjectConfig{
+	Name:        "PurgeActorPreview",
+	Description: "Preview of what an actor purge would delete, plus a single-use confirmation token",
+	Fields: graphql.Fields{
+		"did": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "The DID that would be purged",
+		},
+		"recordCount": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Int),
+			Description: "Number of records that would be deleted",
+		},
+		"actorExists": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Boolean),
+			Description: "Whether the indexer has an actor row for this DID",
+		},
+		"handle": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "Actor handle if known (empty when actorExists=false)",
+		},
+		"latestIndexedAt": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "Actor's last-indexed-at timestamp in RFC3339 (empty when actorExists=false)",
+		},
+		"confirmToken": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "HMAC-signed token bound to (admin_did, target_did, record_count). Pass back to purgeActor before tokenExpiresAt",
+		},
+		"tokenExpiresAt": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "RFC3339 timestamp at which confirmToken stops being accepted",
+		},
+		"tokenTtlSeconds": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Int),
+			Description: "Seconds the token is valid for, for client-side countdown display",
+		},
+	},
+})
+
+// PurgeActorResultType is what purgeActor returns on success.
+var PurgeActorResultType = graphql.NewObject(graphql.ObjectConfig{
+	Name:        "PurgeActorResult",
+	Description: "Result of an actor purge operation",
+	Fields: graphql.Fields{
+		"did": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "The DID that was purged",
+		},
+		"recordsDeleted": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Int),
+			Description: "Number of records actually deleted in the SQL transaction",
+		},
+		"actorRowsDeleted": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.Int),
+			Description: "1 if the actor row was present and deleted, 0 otherwise",
+		},
+		"tapStatus": &graphql.Field{
+			Type:        graphql.NewNonNull(graphql.String),
+			Description: "Post-commit Tap removal status: removed | failed | skipped",
+		},
+	},
+})
+
 // CollectionOverviewType represents per-collection record and validation counts.
 var CollectionOverviewType = graphql.NewObject(graphql.ObjectConfig{
 	Name:        "CollectionOverview",

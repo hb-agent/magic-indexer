@@ -745,6 +745,41 @@ func (r *RecordsRepository) DeleteAll(ctx context.Context) error {
 	return err
 }
 
+// BeginTx is a thin pass-through to the underlying executor so
+// admin operations that span multiple repos (e.g. actor purge —
+// delete records and actor row atomically) can share a single
+// transaction without each repo carrying its own BeginTx surface.
+func (r *RecordsRepository) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	return r.db.BeginTx(ctx, opts)
+}
+
+// CountByDID returns the number of records authored by a single DID.
+// Used by the purge preview to give the operator a number to confirm
+// against before the destructive call.
+func (r *RecordsRepository) CountByDID(ctx context.Context, did string) (int64, error) {
+	var count int64
+	sqlStr := fmt.Sprintf("SELECT COUNT(*) FROM record WHERE did = %s", r.db.Placeholder(1))
+	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(did)}, &count)
+	return count, err
+}
+
+// DeleteByDIDTx removes every record owned by a single DID inside an
+// existing transaction. The actor-purge admin mutation pairs this with
+// ActorsRepository.DeleteByDIDTx so both deletes commit (or fail)
+// atomically. Returns the number of rows deleted.
+func (r *RecordsRepository) DeleteByDIDTx(ctx context.Context, tx *sql.Tx, did string) (int64, error) {
+	sqlStr := fmt.Sprintf("DELETE FROM record WHERE did = %s", r.db.Placeholder(1))
+	res, err := tx.ExecContext(ctx, sqlStr, did)
+	if err != nil {
+		return 0, fmt.Errorf("delete records by did: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	return n, nil
+}
+
 // GetCount returns the total number of records.
 func (r *RecordsRepository) GetCount(ctx context.Context) (int64, error) {
 	var count int64

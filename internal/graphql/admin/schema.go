@@ -408,6 +408,39 @@ func (b *SchemaBuilder) buildMutationType() *graphql.Object {
 					return b.resolver.ResetAll(p.Context, confirm)
 				},
 			},
+			"previewPurgeActor": &graphql.Field{
+				Type:        graphql.NewNonNull(PurgeActorPreviewType),
+				Description: "Materialize the preview the operator confirms against before purging an actor. Returns counts and an HMAC-signed confirmToken bound to (admin DID, target DID, record count). Hand the token back to purgeActor within the TTL.",
+				Args: graphql.FieldConfigArgument{
+					"did": &graphql.ArgumentConfig{
+						Type:        graphql.NewNonNull(graphql.String),
+						Description: "Target DID to preview",
+					},
+				},
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					did, _ := p.Args["did"].(string)
+					return b.resolver.PreviewPurgeActor(p.Context, did)
+				},
+			},
+			"purgeActor": &graphql.Field{
+				Type:        graphql.NewNonNull(PurgeActorResultType),
+				Description: "Delete every record and the actor row for a single DID. Requires a confirmToken from previewPurgeActor; the token is HMAC-signed and bound to the requesting admin DID, the target DID, and the record count at preview time. Single-use; expires after the TTL on the preview.",
+				Args: graphql.FieldConfigArgument{
+					"did": &graphql.ArgumentConfig{
+						Type:        graphql.NewNonNull(graphql.String),
+						Description: "Target DID to purge",
+					},
+					"confirmToken": &graphql.ArgumentConfig{
+						Type:        graphql.NewNonNull(graphql.String),
+						Description: "Confirmation token returned by previewPurgeActor",
+					},
+				},
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					did, _ := p.Args["did"].(string)
+					token, _ := p.Args["confirmToken"].(string)
+					return b.resolver.PurgeActor(p.Context, did, token)
+				},
+			},
 			"populateActivity": &graphql.Field{
 				Type:        graphql.NewNonNull(graphql.Int),
 				Description: "Populate activity entries from existing records (admin only). Returns count of entries created.",

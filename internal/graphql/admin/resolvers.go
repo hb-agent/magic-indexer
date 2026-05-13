@@ -133,6 +133,13 @@ type Resolver struct {
 	lexiconChangeCallback  LexiconChangeCallback
 	schemaValidateCallback SchemaValidateCallback
 	processRestartCallback ProcessRestartCallback
+	// Actor-purge plumbing (Track E). Both are optional — when
+	// purgeTokenSigner is nil the preview / confirm mutations
+	// return a clear "not configured" error rather than panicking;
+	// when tapRemover is nil (TAP_ENABLED=false) the Tap leg of
+	// the purge is silently skipped.
+	purgeTokenSigner *PurgeTokenSigner
+	tapRemover       TapRemover
 }
 
 // NewResolver creates a new admin resolver.

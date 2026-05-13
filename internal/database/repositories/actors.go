@@ -187,6 +187,24 @@ func (r *ActorsRepository) DeleteAll(ctx context.Context) error {
 	return err
 }
 
+// DeleteByDIDTx removes the actor row for a single DID inside an
+// existing transaction. Used by the actor-purge admin mutation so
+// record and actor deletion commit (or fail) atomically. Returns the
+// number of rows affected — caller should treat 0 as "actor was
+// already absent" rather than an error.
+func (r *ActorsRepository) DeleteByDIDTx(ctx context.Context, tx *sql.Tx, did string) (int64, error) {
+	sqlStr := fmt.Sprintf("DELETE FROM actor WHERE did = %s", r.db.Placeholder(1))
+	res, err := tx.ExecContext(ctx, sqlStr, did)
+	if err != nil {
+		return 0, fmt.Errorf("delete actor: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	return n, nil
+}
+
 // Exists checks if an actor exists by DID.
 func (r *ActorsRepository) Exists(ctx context.Context, did string) (bool, error) {
 	var count int64

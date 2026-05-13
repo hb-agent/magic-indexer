@@ -220,6 +220,13 @@ func run() error {
 		// restart callback signals serve() to gracefully shut down so
 		// the new schema is picked up on the next boot.
 		configureLexiconUploadHooks(adminHandler, registry, bg)
+		// Wire actor-purge mutation. The token signer is keyed off
+		// SECRET_KEY_BASE; if absent (already fatal at config.Validate
+		// time, but defensive), purge mutations return a clear
+		// "not configured" error rather than crashing. Tap admin
+		// client is wired only when TAP_ENABLED=true so deployments
+		// without Tap don't try to dial localhost:2480/admin.
+		configurePurgeMutations(adminHandler, cfg)
 	}
 
 	// Start background workers (activity cleanup)
@@ -892,6 +899,34 @@ func configureBackfillCallbacks(adminHandler *admin.Handler, cfg *config.Config,
 //     graceful HTTP shutdown and returns a sentinel error that main
 //     converts into a non-zero exit code, triggering the orchestrator
 //     (Railway, Docker, …) to restart us with the new lexicons in DB.
+//
+// configurePurgeMutations wires the Track E actor-purge surface on
+// the admin resolver. The HMAC token signer is keyed off
+// SECRET_KEY_BASE (already required by config.Validate); when
+// TAP_ENABLED=true and TAP_ADMIN_PASSWORD is set, a Tap admin
+// client is wired so the resolver can fire a best-effort
+// post-commit /repos/remove call. Either dependency missing is
+// recoverable — the resolver surfaces a clear "not configured" or
+// "tap_status=skipped" rather than panicking.
+func configurePurgeMutations(adminHandler *admin.Handler, cfg *config.Config) {
+	if adminHandler == nil {
+		return
+	}
+	signer, err := admin.NewPurgeTokenSigner([]byte(cfg.SecretKeyBase))
+	if err != nil {
+		slog.Warn("actor purge: token signer not configured; previewPurgeActor / purgeActor will reject calls",
+			"err", err)
+		return
+	}
+	adminHandler.Resolver().SetPurgeTokenSigner(signer)
+
+	if cfg.TapEnabled && cfg.TapAdminPassword != "" {
+		tapAdmin := tap.NewAdminClient(cfg.TapURL, cfg.TapAdminPassword)
+		adminHandler.Resolver().SetTapRemover(tapAdmin)
+		slog.Info("actor purge: Tap removal wired (best-effort, post-commit)")
+	}
+}
+
 func configureLexiconUploadHooks(adminHandler *admin.Handler, registry *lexicon.Registry, bg *backgroundServices) {
 	if adminHandler == nil {
 		return
