@@ -15,10 +15,12 @@ import {
   Input,
   Alert,
 } from "@/components/ui";
+import { useAuth } from "@/lib/auth";
 import type { SettingsResponse, OAuthClientsResponse } from "@/types";
 
 export default function SettingsPage() {
   const queryClient = useQueryClient();
+  const { session: authSession } = useAuth();
 
   // Fetch settings
   const { data: settingsData, isLoading } = useQuery({
@@ -34,6 +36,18 @@ export default function SettingsPage() {
 
   const settings = settingsData?.settings;
   const oauthClients = oauthData?.oauthClients ?? [];
+
+  // Admin gate. The server enforces auth via ADMIN_API_KEY +
+  // X-User-DID + admin_dids membership; this gate is UX only —
+  // it stops non-admins from seeing destructive controls they
+  // can't usefully operate. Single source of truth is the
+  // server-known list returned by GET_SETTINGS, joined with
+  // the iron-session DID surfaced via /api/status.
+  const isAdmin =
+    !!authSession && (settings?.adminDids ?? []).includes(authSession.did);
+  const adminTooltip = authSession
+    ? `Your DID (${authSession.did}) must appear in settings.adminDids to edit this.`
+    : "Sign in with an admin DID to edit this.";
 
   // Form state
   const [domainAuthority, setDomainAuthority] = useState("");
@@ -127,6 +141,16 @@ export default function SettingsPage() {
         </Alert>
       )}
 
+      {!isAdmin && (
+        <div
+          id="admin-gate-hint"
+          className="rounded-xl border border-amber-200/60 bg-amber-50/40 p-4 text-sm text-amber-900"
+        >
+          <p className="font-medium">Read-only view</p>
+          <p className="mt-1 text-amber-800/90">{adminTooltip}</p>
+        </div>
+      )}
+
       {/* Basic Settings */}
       <div className="space-y-4">
         <h3 className="font-[family-name:var(--font-garamond)] text-xl text-zinc-900">
@@ -139,12 +163,16 @@ export default function SettingsPage() {
             value={domainAuthority}
             onChange={(e) => setDomainAuthority(e.target.value)}
             hint="The domain that owns this AppView instance"
+            disabled={!isAdmin}
+            aria-describedby={!isAdmin ? "admin-gate-hint" : undefined}
           />
           <div className="flex justify-end pt-2">
             <Button
               variant="primary"
               onClick={handleSaveSettings}
               loading={updateMutation.isPending}
+              disabled={!isAdmin}
+              title={!isAdmin ? adminTooltip : undefined}
             >
               Save Settings
             </Button>
@@ -163,30 +191,40 @@ export default function SettingsPage() {
             placeholder="https://relay1.us-west.bsky.network"
             value={relayUrl}
             onChange={(e) => setRelayUrl(e.target.value)}
+            disabled={!isAdmin}
+            aria-describedby={!isAdmin ? "admin-gate-hint" : undefined}
           />
           <Input
             label="PLC Directory URL"
             placeholder="https://plc.directory"
             value={plcDirectoryUrl}
             onChange={(e) => setPlcDirectoryUrl(e.target.value)}
+            disabled={!isAdmin}
+            aria-describedby={!isAdmin ? "admin-gate-hint" : undefined}
           />
           <Input
             label="Jetstream URL"
             placeholder="wss://jetstream2.us-west.bsky.network/subscribe"
             value={jetstreamUrl}
             onChange={(e) => setJetstreamUrl(e.target.value)}
+            disabled={!isAdmin}
+            aria-describedby={!isAdmin ? "admin-gate-hint" : undefined}
           />
           <Input
             label="OAuth Supported Scopes"
             placeholder="atproto transition:generic"
             value={oauthScopes}
             onChange={(e) => setOauthScopes(e.target.value)}
+            disabled={!isAdmin}
+            aria-describedby={!isAdmin ? "admin-gate-hint" : undefined}
           />
           <div className="flex justify-end pt-2">
             <Button
               variant="primary"
               onClick={handleSaveSettings}
               loading={updateMutation.isPending}
+              disabled={!isAdmin}
+              title={!isAdmin ? adminTooltip : undefined}
             >
               Save Settings
             </Button>
@@ -248,35 +286,39 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* Danger Zone */}
-      <div className="space-y-4">
-        <h3 className="font-[family-name:var(--font-garamond)] text-xl text-red-600">
-          Danger Zone
-        </h3>
-        <div className="rounded-xl border border-red-200/60 bg-red-50/30 p-6 space-y-4">
-          <p className="text-sm text-zinc-600">
-            Reset all data including records, actors, and activity. This action cannot be undone.
-          </p>
-          <div className="flex flex-col sm:flex-row items-start sm:items-end gap-4">
-            <div className="w-full sm:w-auto">
-              <Input
-                label="Type RESET to confirm"
-                placeholder="RESET"
-                value={resetConfirmation}
-                onChange={(e) => setResetConfirmation(e.target.value)}
-              />
+      {/* Danger Zone — hidden entirely for non-admins so the
+          destructive surface area shrinks. The reset mutation
+          itself is also server-gated; this only removes the UI. */}
+      {isAdmin && (
+        <div className="space-y-4">
+          <h3 className="font-[family-name:var(--font-garamond)] text-xl text-red-600">
+            Danger Zone
+          </h3>
+          <div className="rounded-xl border border-red-200/60 bg-red-50/30 p-6 space-y-4">
+            <p className="text-sm text-zinc-600">
+              Reset all data including records, actors, and activity. This action cannot be undone.
+            </p>
+            <div className="flex flex-col sm:flex-row items-start sm:items-end gap-4">
+              <div className="w-full sm:w-auto">
+                <Input
+                  label="Type RESET to confirm"
+                  placeholder="RESET"
+                  value={resetConfirmation}
+                  onChange={(e) => setResetConfirmation(e.target.value)}
+                />
+              </div>
+              <Button
+                variant="destructive"
+                onClick={handleReset}
+                disabled={resetConfirmation !== "RESET"}
+                loading={resetMutation.isPending}
+              >
+                Reset All Data
+              </Button>
             </div>
-            <Button
-              variant="destructive"
-              onClick={handleReset}
-              disabled={resetConfirmation !== "RESET"}
-              loading={resetMutation.isPending}
-            >
-              Reset All Data
-            </Button>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
