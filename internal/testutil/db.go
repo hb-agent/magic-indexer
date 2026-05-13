@@ -104,7 +104,11 @@ func newTestExecutor(t *testing.T) database.Executor {
 		t.Fatalf("Unrecognized TEST_DATABASE_URL %q: expected postgres:// or postgresql:// prefix", url)
 	}
 
-	exec, err := postgres.NewExecutor(url)
+	// Tests use no server-side statement_timeout cap (issue #71's
+	// Layer 1) — test harnesses set deadlines via context.Context as
+	// needed. Tests that exercise the timeout path inject the value
+	// directly via TEST-only env handling.
+	exec, err := postgres.NewExecutor(url, 0)
 	if err != nil {
 		t.Fatalf("Failed to create Postgres test database at %s: %v", redact(url), err)
 	}

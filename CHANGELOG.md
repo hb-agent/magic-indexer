@@ -1,5 +1,93 @@
 # Changelog
 
+## Unreleased — feat: layered query budgets on /graphql (issue #71)
+
+Caps the time any single query can hold a connection on the shared
+Postgres pool. Two layers, both fail-safe:
+
+- **Layer 1 — `DB_STATEMENT_TIMEOUT_MS`** (default 30 s). Injected
+  into every connection via `options=-c statement_timeout=<ms>`.
+  Server-side hard kill, runs regardless of client liveness.
+  Applies to every path — public, admin, subscriptions, Jetstream.
+- **Layer 2 — `GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS`** (default 5 s).
+  HTTP middleware on `/graphql` wraps the request context with a
+  tighter deadline. The handler shapes the response when the
+  deadline fires.
+
+### Response shape (pinned)
+
+Timed-out queries return HTTP 200 with a `Cache-Control: no-store`
+response, an `X-Query-Timeout: <budget-ms>` header (exposed via
+CORS so browser clients can read it), and the canonical GraphQL
+error body:
+
+```json
+{
+  "data": <partial data preserved>,
+  "errors": [{
+    "message": "query exceeded server time budget",
+    "extensions": {
+      "code": "QUERY_TIMEOUT",
+      "budgetMs": 5000,
+      "retryable": false
+    }
+  }]
+}
+```
+
+`extensions.retryable: false` is load-bearing — without it,
+Apollo/urql `RetryLink` middlewares retry timeouts and pile on the
+pool. `extensions.code = "QUERY_TIMEOUT"` is SCREAMING_SNAKE_CASE
+— the new convention for `extensions.code` strings across the
+codebase (initial reserved set: `QUERY_TIMEOUT`, `QUERY_TOO_DEEP`,
+`QUERY_TOO_LARGE`, `UNAUTHENTICATED`, `INTERNAL_ERROR`).
+
+### Operator contract
+
+- `DB_STATEMENT_TIMEOUT_MS` must be strictly greater than
+  `GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS`. Enforced at startup.
+- Reverse-proxy `proxy_read_timeout` must be strictly greater than
+  `GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS` or the proxy cuts the response
+  before the in-process budget fires, losing the metric signal.
+- Both budgets log via `LogConfig()` at startup so the deploy
+  record shows the configured values.
+
+### URL-merge semantics
+
+If `DATABASE_URL` already carries an explicit
+`-c statement_timeout=` directive, the operator's value is
+preserved (logged at INFO at startup). Multi-flag `options` values
+(`-c statement_timeout=… -c search_path=…`) survive intact. The
+adjacent `idle_in_transaction_session_timeout` GUC name is
+explicitly disambiguated via a regex anchor so the injector does
+not false-match it. `PGOPTIONS` env-var is overridden by the URL —
+documented in SECURITY.md.
+
+### pgx v5 pool behaviour
+
+When the per-request context deadline fires, pgx v5's
+`DeadlineContextWatcherHandler` closes the underlying TCP
+connection and asynchronously sends a CancelRequest on a fresh
+side connection. Server-side cancel lands; the pool re-opens a
+fresh connection on the next acquire. Under sustained timeout
+pressure the pool churns — acceptable v1 cost; future work would
+register `CancelRequestContextWatcherHandler` to keep the
+connection alive across cancels.
+
+### Metrics
+
+New `hypergoat_graphql_query_timeout_total{route="public"}`
+counter. Recommended Prometheus alert:
+`rate(hypergoat_graphql_query_timeout_total[5m]) > N`.
+
+### Out of scope (deferred to follow-up issues)
+
+- Per-admin / per-subscription middleware (Layer 1 covers them).
+- `X-Query-Budget-Ms` request-header override — name reserved.
+- `CancelRequestContextWatcherHandler` to keep connections.
+- `idle_in_transaction_session_timeout` and `lock_timeout`
+  companion budgets via the same URL mechanism.
+
 ## Unreleased — feat: contributor filter on activity records + notifications fix
 
 Adds a server-side GraphQL filter `contributor: DIDFilterInput` on

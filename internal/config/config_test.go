@@ -247,6 +247,18 @@ func TestRedactPassword(t *testing.T) {
 }
 
 func TestConfigValidate(t *testing.T) {
+	// validBudgets is the baseline pair every passing test case carries
+	// so the new issue-71 Layer-1/Layer-2 ordering rules don't reject
+	// otherwise-valid fixtures by accident.
+	validBudgets := func(c Config) Config {
+		if c.DBStatementTimeoutMs == 0 {
+			c.DBStatementTimeoutMs = 30000
+		}
+		if c.GraphQLPublicQueryTimeoutMs == 0 {
+			c.GraphQLPublicQueryTimeoutMs = 5000
+		}
+		return c
+	}
 	tests := []struct {
 		name    string
 		config  Config
@@ -254,63 +266,118 @@ func TestConfigValidate(t *testing.T) {
 	}{
 		{
 			name: "valid config",
-			config: Config{
+			config: validBudgets(Config{
 				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
 				Port:                     8080,
 				OAuthLegacyDPoPJKTCutoff: 1744416000,
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "secret key too short",
-			config: Config{
+			config: validBudgets(Config{
 				SecretKeyBase:            "short_key",
 				Port:                     8080,
 				OAuthLegacyDPoPJKTCutoff: 1744416000,
-			},
+			}),
 			wantErr: true,
 		},
 		{
 			name: "port too low",
-			config: Config{
+			config: validBudgets(Config{
 				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
 				Port:                     0,
 				OAuthLegacyDPoPJKTCutoff: 1744416000,
-			},
+			}),
 			wantErr: true,
 		},
 		{
 			name: "port too high",
-			config: Config{
+			config: validBudgets(Config{
 				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
 				Port:                     70000,
 				OAuthLegacyDPoPJKTCutoff: 1744416000,
-			},
+			}),
 			wantErr: true,
 		},
 		{
 			name: "dev placeholder secret rejected",
-			config: Config{
+			config: validBudgets(Config{
 				SecretKeyBase:            devSecretKeyBase,
 				Port:                     8080,
 				OAuthLegacyDPoPJKTCutoff: 1744416000,
-			},
+			}),
 			wantErr: true,
 		},
 		{
 			name: "missing OAUTH_LEGACY_DPOP_JKT_CUTOFF rejected (fail-closed)",
-			config: Config{
+			config: validBudgets(Config{
 				SecretKeyBase: "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
 				Port:          8080,
-			},
+			}),
 			wantErr: true,
 		},
 		{
 			name: "negative OAUTH_LEGACY_DPOP_JKT_CUTOFF rejected",
-			config: Config{
+			config: validBudgets(Config{
 				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
 				Port:                     8080,
 				OAuthLegacyDPoPJKTCutoff: -1,
+			}),
+			wantErr: true,
+		},
+		{
+			name: "issue #71: DB_STATEMENT_TIMEOUT_MS too low",
+			config: Config{
+				SecretKeyBase:               "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                        8080,
+				OAuthLegacyDPoPJKTCutoff:    1744416000,
+				DBStatementTimeoutMs:        500,
+				GraphQLPublicQueryTimeoutMs: 100,
+			},
+			wantErr: true,
+		},
+		{
+			name: "issue #71: GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS too low",
+			config: Config{
+				SecretKeyBase:               "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                        8080,
+				OAuthLegacyDPoPJKTCutoff:    1744416000,
+				DBStatementTimeoutMs:        30000,
+				GraphQLPublicQueryTimeoutMs: 50,
+			},
+			wantErr: true,
+		},
+		{
+			name: "issue #71: Layer 1 <= Layer 2 rejected",
+			config: Config{
+				SecretKeyBase:               "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                        8080,
+				OAuthLegacyDPoPJKTCutoff:    1744416000,
+				DBStatementTimeoutMs:        5000,
+				GraphQLPublicQueryTimeoutMs: 5000,
+			},
+			wantErr: true,
+		},
+		{
+			name: "issue #71: Layer 1 only slightly > Layer 2 accepted",
+			config: Config{
+				SecretKeyBase:               "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                        8080,
+				OAuthLegacyDPoPJKTCutoff:    1744416000,
+				DBStatementTimeoutMs:        5001,
+				GraphQLPublicQueryTimeoutMs: 5000,
+			},
+			wantErr: false,
+		},
+		{
+			name: "issue #71: Layer 2 exceeding chi outer timeout rejected",
+			config: Config{
+				SecretKeyBase:               "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                        8080,
+				OAuthLegacyDPoPJKTCutoff:    1744416000,
+				DBStatementTimeoutMs:        120000,
+				GraphQLPublicQueryTimeoutMs: HTTPRouterTimeoutMs, // == outer ceiling, must be rejected
 			},
 			wantErr: true,
 		},

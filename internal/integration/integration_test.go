@@ -602,7 +602,7 @@ func TestPublicGraphQL_LabelFilter(t *testing.T) {
 		Lexicons: db.Lexicons,
 		Labels:   labels,
 	}
-	handler, err := hgraphql.NewHandler(registry, repos)
+	handler, err := hgraphql.NewHandler(registry, repos, 0)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -672,7 +672,7 @@ func TestPublicGraphQL_ExcludePdsFilter(t *testing.T) {
 		Lexicons: db.Lexicons,
 		Labels:   repositories.NewLabelsRepository(db.Executor),
 	}
-	handler, err := hgraphql.NewHandler(registry, repos)
+	handler, err := hgraphql.NewHandler(registry, repos, 0)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}

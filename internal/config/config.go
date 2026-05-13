@@ -84,7 +84,28 @@ type Config struct {
 
 	// Notifications
 	NotificationsEnabled bool // Enable the notifications subsystem (default false)
+
+	// Query budgets (issue #71). Two-layer defence against runaway
+	// queries holding pool connections. Both are operator-tunable.
+	// DBStatementTimeoutMs is injected as Postgres `statement_timeout`
+	// on every connection in the pool — a server-side hard kill that
+	// runs regardless of client liveness. GraphQLPublicQueryTimeoutMs
+	// is a tighter per-request budget applied only on `/graphql` via
+	// the QueryTimeoutMiddleware. Validate() enforces that Layer 1
+	// (DB) is strictly greater than Layer 2 (public budget), and
+	// that Layer 2 is less than the chi outer router timeout, so the
+	// per-request budget always fires first under normal conditions.
+	DBStatementTimeoutMs        int
+	GraphQLPublicQueryTimeoutMs int
 }
+
+// HTTPRouterTimeoutMs is the outer chi `middleware.Timeout`
+// applied at the router level (`cmd/hypergoat/main.go`). It's
+// declared here so `config.Validate()` can enforce that the
+// per-request Layer-2 budget never exceeds it — if it did, chi
+// would fire first and the in-process budget shape would be a lie.
+// Hoisted from main.go to give Validate() a single source of truth.
+const HTTPRouterTimeoutMs = 60000
 
 // Load reads configuration from environment variables.
 // It loads .env file if present and applies defaults.
@@ -153,6 +174,11 @@ func Load() (*Config, error) {
 		ValidationMode:             getEnv("VALIDATION_MODE", "disabled"),
 
 		NotificationsEnabled: getEnvBool("NOTIFICATIONS_ENABLED", false),
+
+		// Query budgets (issue #71). Defaults are conservative; tune
+		// based on httpRequestDuration p99 from /metrics.
+		DBStatementTimeoutMs:        getEnvInt("DB_STATEMENT_TIMEOUT_MS", 30000),
+		GraphQLPublicQueryTimeoutMs: getEnvInt("GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS", 5000),
 	}
 
 	// Generate SecretKeyBase if not provided
@@ -220,6 +246,36 @@ func (c *Config) Validate() error {
 		)
 	}
 
+	// Query budgets (issue #71). Layer 1 is the pool-level
+	// statement_timeout safety net; Layer 2 is the per-request budget
+	// on /graphql. The per-request budget must fire first under
+	// normal conditions; the pool ceiling catches stuck queries the
+	// per-request layer can't.
+	if c.DBStatementTimeoutMs < 1000 {
+		return fmt.Errorf(
+			"DB_STATEMENT_TIMEOUT_MS = %d is too small; minimum is 1000 (1 second)",
+			c.DBStatementTimeoutMs,
+		)
+	}
+	if c.GraphQLPublicQueryTimeoutMs < 100 {
+		return fmt.Errorf(
+			"GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS = %d is too small; minimum is 100",
+			c.GraphQLPublicQueryTimeoutMs,
+		)
+	}
+	if c.DBStatementTimeoutMs <= c.GraphQLPublicQueryTimeoutMs {
+		return fmt.Errorf(
+			"DB_STATEMENT_TIMEOUT_MS (%d) must be strictly greater than GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS (%d) — the pool-level safety net must outlast the per-request budget",
+			c.DBStatementTimeoutMs, c.GraphQLPublicQueryTimeoutMs,
+		)
+	}
+	if c.GraphQLPublicQueryTimeoutMs >= HTTPRouterTimeoutMs {
+		return fmt.Errorf(
+			"GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS (%d) must be strictly less than the chi router outer timeout (%d ms) — otherwise chi fires first and the per-request budget value advertised to clients is a lie",
+			c.GraphQLPublicQueryTimeoutMs, HTTPRouterTimeoutMs,
+		)
+	}
+
 	return nil
 }
 
@@ -266,6 +322,8 @@ func (c *Config) LogConfig() {
 		"backfill_on_start", c.BackfillOnStart,
 		"allowed_origins", c.AllowedOrigins,
 		"labeler_dids_count", labelerDIDsCount(c.LabelerDIDs),
+		"db_statement_timeout_ms", c.DBStatementTimeoutMs,
+		"graphql_public_query_timeout_ms", c.GraphQLPublicQueryTimeoutMs,
 	)
 
 	if c.AdminAPIKey != "" {

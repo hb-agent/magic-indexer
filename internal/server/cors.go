@@ -192,6 +192,14 @@ func CORSMiddleware(cfg CORSConfig) func(http.Handler) http.Handler {
 
 			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", allowedHeaders)
+			// X-Query-Timeout (issue #71): browsers expose only the
+			// CORS-safelisted response headers to JS unless this list
+			// names a custom header. Without this, fetch-based
+			// GraphQL clients see `undefined` and lose the timeout
+			// signal — extensions.budgetMs in the response body is
+			// still the source of truth, but the header is useful
+			// for curl / server logs and for clients that read it.
+			w.Header().Set("Access-Control-Expose-Headers", "X-Query-Timeout")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 
 			// Handle preflight
