@@ -288,6 +288,16 @@ func (b *ObjectBuilder) buildUnionType(contextLexiconID, fieldName string, refs 
 
 		switch def := resolved.(type) {
 		case *lexicon.ObjectDef:
+			// A zero-property ObjectDef means the parser routed a
+			// non-object type (e.g. `{"type": "string"}`) through
+			// parseObjectDef. graphql-go refuses to register an
+			// object type with no fields, so fold it in with the
+			// other primitive variants and let the union collapse
+			// to JSONScalar below.
+			if len(def.Properties) == 0 {
+				hasPrimitives = true
+				continue
+			}
 			objType := b.BuildObjectType(fullRef, def)
 			objectTypes = append(objectTypes, objType)
 		case *lexicon.RecordDef:
