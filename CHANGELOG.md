@@ -1,5 +1,87 @@
 # Changelog
 
+## Unreleased — chore: review follow-ups for 2026-05-13 audit (P0 + selected P1)
+
+Lands the first wave of fixes from the six-reviewer audit recorded in
+`docs/review-2026-05-13/report.md`. Seven tracks complete (5 P0 + 2 P1);
+five remain for a follow-up (ResetAll hardening, FilterKind refactor,
+new-filter indexes, metrics + admin audit logs, resolver-level tests).
+
+### Server
+
+- **fix(db)**: migration 021 drops the legacy `idx_record_json_gin` and
+  recreates it as `idx_record_json_gin_path_ops` with `jsonb_path_ops`.
+  Migration 013 had been a silent no-op against 001 (same index name +
+  `IF NOT EXISTS`) and its down dropped the 001 index — rollback degraded
+  the index permanently. 013 is now neutralised (`SELECT 1`); the new
+  `TestMigrations_UniqueIndexNames` guard parses every `.up.sql` and
+  blocks the foot-gun recurring.
+
+- **fix(admin)**: close `did.IsValid` rollout gap across five resolver
+  entry points (`PreviewPurgeActor`, `PurgeActor`, `AddAdmin`,
+  `RemoveAdmin`, `BackfillActor`), the OAuth login-hint discriminator,
+  and the lexicon validator's `FormatDID` case. `strings.HasPrefix(s,
+  "did:")` outside `internal/atproto/did/` is now blocked by
+  `scripts/lint-no-did-prefix.sh` (wired into `make lint`). Per-line
+  opt-out via the `// allow-did-prefix:<reason>` marker for genuine
+  format-discriminator (not validation) cases.
+
+- **fix(admin)**: authenticate `/admin/graphql` requests before body
+  decode and depth check. Unauthenticated probes used to measure the
+  body-size cap, burn lexer CPU on depth-checking probe queries, and
+  fingerprint the admin schema via timing.
+
+- **fix(db)**: pgx `CancelRequestContextWatcherHandler` (5.3+) replaces
+  the default `DeadlineContextWatcherHandler`. Under the Layer-2 5s
+  request budget, every public timeout was churning one TCP+TLS
+  handshake (default handler asyncCloses the connection). New handler
+  sends CancelRequest on a sideband connection (100ms delay) and lets
+  the original connection return to the pool. DeadlineDelay (10s)
+  remains a hard fallback if CancelRequest itself stalls.
+
+- **fix(admin)**: purge resolver hardening — claim version field for
+  forward-compatibility, distinct `ErrPurgeTokenCountDrift` sentinel
+  (so a benign ingest race is distinguishable from active token
+  tampering), `sql.ErrNoRows` distinguished from other DB errors in
+  `PreviewPurgeActor`, redundant `actor_did` audit field dropped,
+  periodic sweeper goroutine bounds the used-sig set to 4096 entries
+  with periodic prune. Flaky tamper-the-signature test fixed.
+
+### Client
+
+- **fix(client)**: settings form hydration was using `useState(()=>…)`
+  as if it were `useEffect`, so the form never populated from server
+  state on first load. Replaced with `useEffect(…, [settings])`. Data
+  loss was prevented by the resolver's `|| undefined` guard; the
+  visible bug was "I can't see my current settings."
+
+- **fix(client)**: OAuth `returnTo` validated at the write site
+  (`/api/login`) via `new URL(returnTo, env.PUBLIC_URL).origin ===
+  base.origin`. The previous `startsWith("/") && !startsWith("//")`
+  guard at the callback was insufficient against `/\evil.com`,
+  `/%2f%2fevil.com`, and leading-whitespace tricks. Defense in depth;
+  browser mitigations made the live exploit narrow.
+
+### Deferred to follow-up
+
+The following review items remain backlog:
+
+- **Track 3** — `ResetAll` HMAC hardening + complete deletion list +
+  structured audit log (SEC-2 + A-1).
+- **Track 8** — `FilterKind` enum + per-lexicon descriptor registry to
+  collapse the two per-collection filter builders (Q-2 + A-2).
+- **Track 9** — partial-GIN expression index for contributors + subject
+  DID materialization to make the new filters indexable (P-2 + P-3).
+- **Track 10** — purge metrics (`hypergoat_purge_token_rejected_total`)
+  + audit logs for `UpdateSettings` / `ResetAll` / admin-DID mutations
+  + `internal/logsafe` slog scrubber (T-OBS-1 + T-OBS-2 + Q-6).
+- **Track 12** — resolver-level tests for the purge subsystem +
+  Postgres-backed shape tests for the new filters (T-COV-1 + T-COV-3).
+
+See `docs/review-2026-05-13/implementation-plan.md` for full
+tracking; `report.md` and the round-1/round-2 review docs for
+provenance.
+
 ## Unreleased — feat: layered query budgets on /graphql (issue #71)
 
 Caps the time any single query can hold a connection on the shared

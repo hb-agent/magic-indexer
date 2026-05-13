@@ -464,9 +464,10 @@ func (r *Resolver) TriggerBackfill(ctx context.Context) (bool, error) {
 
 // BackfillActor queues a single actor for backfill.
 func (r *Resolver) BackfillActor(ctx context.Context, did string) (bool, error) {
-	// Validate DID format
-	if !strings.HasPrefix(did, "did:") {
-		return false, fmt.Errorf("invalid DID format")
+	// Strict DID validation: prefix-only checks let newline / control-char
+	// payloads into the actor table and log lines (commit c069afa).
+	if !didpkg.IsValid(did) {
+		return false, fmt.Errorf("invalid DID")
 	}
 
 	// Ensure actor exists (creates if not)
@@ -597,9 +598,12 @@ func (r *Resolver) DeleteOAuthClient(ctx context.Context, clientID string) (bool
 
 // AddAdmin adds a DID to the admin list.
 func (r *Resolver) AddAdmin(ctx context.Context, did string) (bool, error) {
-	// Validate DID format
-	if !strings.HasPrefix(did, "did:") {
-		return false, fmt.Errorf("invalid DID format")
+	// Strict DID validation: admin_dids is a CSV; a newline-bearing DID
+	// would silently grant admin to a forged second entry on the next
+	// read. Matches the discipline enforced by UpdateSettings (#64,
+	// commit c069afa).
+	if !didpkg.IsValid(did) {
+		return false, fmt.Errorf("invalid DID")
 	}
 
 	// Get current admin DIDs
@@ -632,6 +636,15 @@ func (r *Resolver) AddAdmin(ctx context.Context, did string) (bool, error) {
 
 // RemoveAdmin removes a DID from the admin list.
 func (r *Resolver) RemoveAdmin(ctx context.Context, did string) (bool, error) {
+	// Strict DID validation on the input even though the function is
+	// only removing — a malformed input would otherwise produce a
+	// confusing "DID is not an admin" error for a value that was never
+	// a valid DID, and would log a forged-shape value into the audit
+	// trail (track 10 wires audit logs here).
+	if !didpkg.IsValid(did) {
+		return false, fmt.Errorf("invalid DID")
+	}
+
 	// Get current admin DIDs
 	adminDidsStr, _ := r.repos.Config.Get(ctx, "admin_dids")
 	if adminDidsStr == "" {

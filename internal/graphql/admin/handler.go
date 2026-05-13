@@ -101,36 +101,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "admin graphql requires POST", http.StatusMethodNotAllowed)
 		return
 	}
-	// Cap body size to prevent memory exhaustion via huge JSON.
-	// 2 MiB gives admin tooling a bit more room than the public
-	// endpoint.
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
-	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
 
-	// Pre-execution depth guard. See depth.Check docs.
-	if err := depth.Check(params.Query, maxAdminQueryDepth); err != nil {
-		if errors.Is(err, depth.ErrTooDeep) {
-			http.Error(w, "query rejected: nested too deeply", http.StatusBadRequest)
-			return
-		}
-		http.Error(w, "query rejected", http.StatusBadRequest)
-		return
-	}
-
-	// Log mutation requests — but only the operation name and the
-	// variable *keys*, not the values. Values may contain tokens,
-	// PII, or attacker-controlled strings that would forge log
-	// lines if dumped verbatim.
-	if strings.Contains(params.Query, "mutation") {
-		slog.Info("[admin] Mutation request",
-			"operation", params.OperationName,
-			"variable_keys", variableKeys(params.Variables))
-	}
-
-	// Get authentication info from context (set by middleware) or X-User-DID header
+	// Authenticate BEFORE body decode and depth check. The earlier
+	// ordering (decode → depth-check → auth) let unauthenticated
+	// probes measure body-size limits, burn lexer CPU on the depth
+	// check, and distinguish "GraphQL server with admin schema" from
+	// a 401 wall. Auth is now the first gate the request passes
+	// after the method check.
 	ctx := r.Context()
 	userDID := oauth.UserIDFromContext(ctx)
 	apiKeyAuth := false
@@ -169,6 +146,35 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if userDID == "" && !apiKeyAuth {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
+	}
+
+	// Cap body size to prevent memory exhaustion via huge JSON.
+	// 2 MiB gives admin tooling a bit more room than the public
+	// endpoint.
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Pre-execution depth guard. See depth.Check docs.
+	if err := depth.Check(params.Query, maxAdminQueryDepth); err != nil {
+		if errors.Is(err, depth.ErrTooDeep) {
+			http.Error(w, "query rejected: nested too deeply", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "query rejected", http.StatusBadRequest)
+		return
+	}
+
+	// Log mutation requests — but only the operation name and the
+	// variable *keys*, not the values. Values may contain tokens,
+	// PII, or attacker-controlled strings that would forge log
+	// lines if dumped verbatim.
+	if strings.Contains(params.Query, "mutation") {
+		slog.Info("[admin] Mutation request",
+			"operation", params.OperationName,
+			"variable_keys", variableKeys(params.Variables))
 	}
 	handle := "" // Would need to resolve from DID
 

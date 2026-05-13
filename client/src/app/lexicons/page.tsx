@@ -234,6 +234,17 @@ function TreeBranch({
   );
 }
 
+// Batch-aware registration status: operators paste multiple NSIDs
+// (comma- or newline-separated) and we surface per-item state in a
+// persistent list. Hoisted to module scope so it's defined once
+// rather than rebinding on every render of LexiconsPage.
+type BatchStatus = "pending" | "success" | "error" | "skipped";
+interface BatchItem {
+  nsid: string;
+  status: BatchStatus;
+  message?: string;
+}
+
 export default function LexiconsPage() {
   const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState("");
@@ -249,17 +260,9 @@ export default function LexiconsPage() {
   });
 
   // Batch-aware registration status. Operators paste multiple
-  // NSIDs (comma- or newline-separated) and we surface per-item
-  // pending/success/error state in a persistent list so they can
-  // see exactly which entries succeeded and which need attention.
-  // Auto-clearing alerts thrash for batches >1 item and lose error
-  // detail, so the list stays put until the operator dismisses it.
-  type BatchStatus = "pending" | "success" | "error" | "skipped";
-  interface BatchItem {
-    nsid: string;
-    status: BatchStatus;
-    message?: string;
-  }
+  // NSIDs (comma- or newline-separated) — see module-scope BatchStatus
+  // / BatchItem types above. Persistent list (auto-clearing alerts
+  // thrash for batches >1 item and lose error detail).
   const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
   const [batchRunning, setBatchRunning] = useState(false);
 

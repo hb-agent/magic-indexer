@@ -1,5 +1,23 @@
 -- no-transaction
--- This migration must run outside a transaction because CREATE INDEX CONCURRENTLY
--- cannot execute inside a transaction block. The migration runner must detect the
--- "-- no-transaction" sentinel and execute this file without wrapping it in BEGIN/COMMIT.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_record_json_gin ON record USING gin (json jsonb_path_ops);
+-- HISTORICAL — neutralised by migration 021.
+--
+-- This migration originally tried to upgrade `idx_record_json_gin` (created
+-- in 001 with the default `jsonb_ops` operator class) to `jsonb_path_ops`,
+-- but reused the same index name with `IF NOT EXISTS` — making it a silent
+-- no-op against every environment that already ran 001 first. The CREATE
+-- INDEX statement has been removed because:
+--
+--   1. Every environment that ran this migration in order saw it as a
+--      no-op (the index already existed from 001 with `jsonb_ops`), so
+--      removing the statement doesn't change applied behaviour.
+--   2. The intended path_ops index now lives under a distinct name
+--      (`idx_record_json_gin_path_ops`) created in migration 021, which
+--      also drops the legacy `idx_record_json_gin`.
+--   3. The duplicate-name guard in `migrations_indexnames_test.go` requires
+--      every CREATE INDEX name to be unique across migrations (so
+--      `IF NOT EXISTS` cannot silently no-op a follow-up migration);
+--      leaving the CREATE here would re-trigger that guard.
+--
+-- The migration still records as applied via its version number; this file
+-- is intentionally a no-op for fresh installs.
+SELECT 1;

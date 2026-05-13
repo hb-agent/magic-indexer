@@ -20,6 +20,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/rivo/uniseg"
+
+	didpkg "github.com/GainForest/hypergoat/internal/atproto/did"
 )
 
 // Validator checks records against their lexicon definitions.
@@ -441,7 +443,11 @@ func validateFormat(value, format string) bool {
 	case FormatATURI:
 		return strings.HasPrefix(value, "at://")
 	case FormatDID:
-		return strings.HasPrefix(value, "did:")
+		// Strict DID validation — replaces the prefix-only check the
+		// #64 migration retired (commit c069afa). Lexicon records that
+		// claim a DID-formatted string must actually be a valid DID,
+		// not just any string starting with "did:".
+		return didpkg.IsValid(value)
 	case FormatHandle:
 		return value != "" && strings.Contains(value, ".")
 	case FormatCID, FormatNSID, FormatLanguage, FormatRecordKey, FormatTID:
