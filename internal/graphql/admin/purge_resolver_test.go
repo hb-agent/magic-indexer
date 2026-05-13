@@ -113,13 +113,7 @@ func seedRecords(t *testing.T, db *testutil.TestDB, did, col string, n int) {
 	t.Helper()
 	ctx := context.Background()
 	for i := 0; i < n; i++ {
-		uri := did + "/" + col + "/r" + itoa(i)
-		uri = "at://" + uri[len("at://"):] // keep the canonical at:// prefix
-		if i == 0 {
-			uri = "at://" + did + "/" + col + "/r0"
-		} else {
-			uri = "at://" + did + "/" + col + "/r" + itoa(i)
-		}
+		uri := "at://" + did + "/" + col + "/r" + itoa(i)
 		if _, err := db.Records.Insert(ctx, uri, "cid"+itoa(i), did, col, `{"v":1}`); err != nil {
 			t.Fatalf("seed record %d: %v", i, err)
 		}

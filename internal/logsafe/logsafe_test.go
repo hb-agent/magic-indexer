@@ -47,8 +47,8 @@ func TestString_PassesThroughCleanInput(t *testing.T) {
 		"",
 		"hello",
 		"https://example.com/path?q=1",
-		"did:plc:abc",                       // happy path
-		"unicode-printable: αβγ δεζ — ✓",  // multi-byte UTF-8 passes
+		"did:plc:abc", // happy path
+		"unicode-printable: αβγ δεζ — ✓", // multi-byte UTF-8 passes
 	}
 	for _, c := range cases {
 		if got := String(c); got != c {

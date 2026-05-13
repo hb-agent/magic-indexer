@@ -8,14 +8,14 @@
 // Two helpers cover the surface we audit:
 //
 //   - DID:    fast happy path for values that callers *expect* are
-//             valid DIDs. Returns the sentinel "<invalid-did>" if
-//             validation fails so the audit log still records the
-//             presence of an attribute, just without a forgeable
-//             value.
+//     valid DIDs. Returns the sentinel "<invalid-did>" if
+//     validation fails so the audit log still records the
+//     presence of an attribute, just without a forgeable
+//     value.
 //   - String: byte-for-byte scrub of arbitrary operator-controlled
-//             input (URLs, free-form fields). Truncates at
-//             maxLogValueLen and replaces every control char and
-//             both Unicode line-separator codepoints with U+FFFD.
+//     input (URLs, free-form fields). Truncates at
+//     maxLogValueLen and replaces every control char and
+//     both Unicode line-separator codepoints with U+FFFD.
 //
 // These helpers exist because slog audit lines are the security
 // boundary, not the format. Applying them at every emission site
@@ -106,8 +106,8 @@ func String(s string) string {
 	// Worst case is replacement of every byte with a 3-byte
 	// U+FFFD encoding; cap by maxLogValueLen since we truncate
 	// at that boundary anyway.
-	if cap := maxLogValueLen; cap < len(s) {
-		b.Grow(cap)
+	if maxLogValueLen < len(s) {
+		b.Grow(maxLogValueLen)
 	} else {
 		b.Grow(len(s))
 	}
@@ -131,9 +131,10 @@ func String(s string) string {
 			needsReplace = true
 		}
 
-		if needsReplace {
+		switch {
+		case needsReplace:
 			enc = replacement
-		} else if size == 1 {
+		case size == 1:
 			// Cheap path: write a single byte without allocating
 			// a transient string for the rune.
 			if written+1 > maxLogValueLen {
@@ -143,7 +144,7 @@ func String(s string) string {
 			written++
 			i += size
 			continue
-		} else {
+		default:
 			enc = string(r)
 		}
 

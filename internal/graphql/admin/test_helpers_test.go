@@ -20,9 +20,9 @@ import (
 // Thread-safe so a future race test that fires purges in parallel
 // doesn't fight the stub's bookkeeping.
 type stubTapRemover struct {
-	mu       sync.Mutex
-	err      error
-	callLog  [][]string
+	mu      sync.Mutex
+	err     error
+	callLog [][]string
 }
 
 // setErr configures the next (and subsequent) RemoveRepos call to
