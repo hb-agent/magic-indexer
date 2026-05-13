@@ -49,3 +49,47 @@ export const env = {
   // between OAuth sign-in and the shared-secret admin API.
   ADMIN_API_KEY: getEnv("ADMIN_API_KEY", ""),
 };
+
+// Fail-fast on a self-referential backend URL.
+//
+// A common misconfiguration is pointing the client at itself —
+// e.g. setting HYPERGOAT_URL=https://magic-indexer-admin.vercel.app
+// when that's the *client's* origin, not the backend's. Requests
+// then loop, the GraphQL queries 404, and the failure mode reads
+// like "the API is broken" rather than "the env is wrong."
+//
+// Compare origins (not the full URL — paths can legitimately
+// differ). Only fire when both halves of the comparison resolve;
+// preview deployments where PUBLIC_URL is unset and Vercel hands
+// out a dynamic branch URL fall through unscathed.
+//
+// Dev: throw at module load — the loop closes before code ships.
+// Production: console.error and continue — don't hard-brick a
+// live deploy over a config typo when the alternative is "serve
+// traffic with a noisy log line."
+function originOf(url: string): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+const clientOrigin =
+  originOf(env.PUBLIC_URL) ??
+  originOf(getEnv("NEXT_PUBLIC_VERCEL_BRANCH_URL")) ??
+  originOf(getEnv("VERCEL_BRANCH_URL"));
+const backendOrigin = originOf(env.HYPERGOAT_URL);
+
+if (clientOrigin && backendOrigin && clientOrigin === backendOrigin) {
+  const msg =
+    `[fatal-config] HYPERGOAT_URL points at the client's own origin (${clientOrigin}). ` +
+    `Requests will loop. Set HYPERGOAT_URL to the backend's URL (the Railway / Go server), ` +
+    `not the client's URL (Vercel / Next.js).`;
+  if (process.env.NODE_ENV === "production") {
+    console.error(msg);
+  } else {
+    throw new Error(msg);
+  }
+}
