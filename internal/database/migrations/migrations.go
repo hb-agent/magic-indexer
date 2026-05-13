@@ -18,6 +18,14 @@ import (
 //go:embed postgres/*.sql
 var postgresMigrations embed.FS
 
+// PostgresFS returns the embedded Postgres migration filesystem.
+// Exposed so package-level tests can inspect the migration set
+// without spinning up a database connection (see
+// migrations_indexnames_test.go, which guards against duplicate
+// CREATE INDEX names across migration files — a foot-gun that
+// caused 013 to silently no-op against 001).
+func PostgresFS() embed.FS { return postgresMigrations }
+
 // Migration represents a single migration.
 type Migration struct {
 	Version string
