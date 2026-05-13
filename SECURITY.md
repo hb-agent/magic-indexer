@@ -108,6 +108,54 @@ When `DOMAIN_DID` is set, `/notifications/graphql` is mounted behind a service-a
   name and variable keys are logged. Do not re-introduce value
   logging without an audit.
 
+### Statistics / activity endpoints
+
+The GraphQL fields `statistics`, `activityBuckets`, `recentActivity`,
+and `collectionOverview` are **admin-gated** in this codebase. They
+return aggregate operational data (record / actor counts, recent
+ingestion events, per-collection sizes) that we do not consider safe
+to expose anonymously. Adopters coming from upstream projects with
+laxer defaults should not assume these are publicly readable here —
+they are not, and exposing them is a deliberate operator choice, not
+a one-line config flip.
+
+### Actor purge (`previewPurgeActor` / `purgeActor`)
+
+Two admin mutations support GDPR-style takedowns and test-data
+cleanup. Both are gated by the existing admin auth (above):
+
+- `previewPurgeActor(did)` returns counts plus an HMAC-signed
+  `confirmToken` bound to (requesting admin DID, target DID,
+  record count at preview time, expiry). The signing key is
+  `SECRET_KEY_BASE`; the TTL is 5 minutes; the token is
+  single-use, enforced by signature in an in-memory set.
+- `purgeActor(did, confirmToken)` re-counts records before
+  verifying the bound token (so count drift between preview
+  and purge rejects the token), then commits a SQL-only
+  transaction deleting records and the actor row. Tap state is
+  removed best-effort *after* the commit because Tap is an
+  HTTP sidecar and cannot enlist in `sql.BeginTx`; a Tap
+  failure does not roll back the SQL commit.
+
+Every successful purge emits a structured log line:
+
+```
+event=actor_purge actor_did=… target_did=… record_count=… \
+requested_by_did=… tap_status=removed|failed|skipped ts=…
+```
+
+**Operator contract**: this log line is the audit trail. Configure
+your log shipper to retain `event=actor_purge` lines for **at
+least 90 days** (GDPR-minimum) and prefer **one year** if you
+anticipate takedown disputes. There is no DB-side audit table by
+design — losing the log line means losing the audit.
+
+The rate limit on `/admin/graphql` (see "Rate limiting" above —
+default 60 req/min/IP) also governs `purgeActor` and is intended
+to bound fat-finger damage. No additional limit is wired
+specifically for purge; tighten the proxy rule if your threat
+model requires it.
+
 ## Metrics
 
 `/metrics` is unauthenticated and exposes Prometheus text format.
