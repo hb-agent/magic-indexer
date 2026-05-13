@@ -117,11 +117,11 @@ func TestBuildContributorFieldFilter_RejectsUppercaseMethodPrefix(t *testing.T) 
 
 func TestWantsContributorFilter(t *testing.T) {
 	cases := map[string]bool{
-		"org.hypercerts.claim.activity":     true,
-		"org.hypercerts.claim.collection":   false,
-		"app.certified.badge.award":         false,
+		"org.hypercerts.claim.activity":        true,
+		"org.hypercerts.claim.collection":      false,
+		"app.certified.badge.award":            false,
 		"app.certified.temp.graph.endorsement": false,
-		"":                                  false,
+		"":                                     false,
 	}
 	for lexID, want := range cases {
 		if got := wantsContributorFilter(lexID); got != want {

@@ -21,7 +21,7 @@ func TestIsValid(t *testing.T) {
 		{"min-length boundary", "did:a:bcde", true}, // length 9
 
 		// Length bounds.
-		{"too short", "did:p:a", false},                       // length 7
+		{"too short", "did:p:a", false}, // length 7
 		{"empty", "", false},
 		{"way too long", "did:plc:" + string(make([]byte, 250)), false},
 

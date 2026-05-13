@@ -32,14 +32,20 @@ func TestBuildSingleFilter_Contributor_Eq(t *testing.T) {
 	// Guards must be present, and the whole shape must be a CASE WHEN
 	// wrapper so Postgres is forced to evaluate the guards before the
 	// EXISTS subquery (AND ordering in WHERE is otherwise not
-	// guaranteed by the planner).
+	// guaranteed by the planner). The per-element candidate also uses
+	// CASE to disambiguate the contributor-identity union by JSON
+	// type — `->>` on a JSON object returns the object's text
+	// serialisation, not NULL, so the previous COALESCE approach
+	// silently matched zero rows for the object variant.
 	wantSubstrings := []string{
 		"CASE WHEN",
 		"jsonb_typeof(r.json->'contributors') = 'array'",
 		"jsonb_array_length(r.json->'contributors') <= 200",
 		"THEN EXISTS",
 		"jsonb_array_elements(r.json->'contributors')",
-		`COALESCE(c->>'contributorIdentity', c->'contributorIdentity'->>'identity')`,
+		`CASE jsonb_typeof(c->'contributorIdentity')`,
+		`WHEN 'string' THEN c->>'contributorIdentity'`,
+		`WHEN 'object' THEN c->'contributorIdentity'->>'identity'`,
 		"= $1",
 		"ELSE FALSE END",
 	}

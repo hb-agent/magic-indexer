@@ -374,7 +374,7 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 			return clause, []interface{}{string(jsonBytes)}, paramIdx + 1, nil
 		}
 		param := fmt.Sprintf("$%d", paramIdx)
-		return fmt.Sprintf("%s = %s", f.FieldName, param), []interface{}{f.Value}, paramIdx + 1, nil
+		return fmt.Sprintf("%s = %s", qualifyColumn(f.FieldName), param), []interface{}{f.Value}, paramIdx + 1, nil
 
 	case OpNeq:
 		expr := jsonExtract(f.FieldName, f.IsJSON)
@@ -422,9 +422,17 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 }
 
 // jsonExtract returns the SQL expression for extracting a JSON field as text.
+//
+// Column-level (non-JSON) field references are qualified with the
+// `r.` alias because `GetByCollectionFiltered` LEFT JOINs `actor`,
+// and the `did` column exists on both `record` and `actor`. Without
+// qualification, Postgres raises `column reference "did" is
+// ambiguous (SQLSTATE 42702)`. The only column-level field today is
+// `did`; adding more would require either a per-field qualification
+// map or assuming every column lives on `r`. Keeping it explicit.
 func jsonExtract(fieldName string, isJSON bool) string {
 	if !isJSON {
-		return fieldName
+		return qualifyColumn(fieldName)
 	}
 	parts := strings.Split(fieldName, "__")
 	if len(parts) == 1 {
@@ -480,6 +488,13 @@ func sqlOp(op FilterOperator) string {
 	}
 }
 
+// qualifyColumn prefixes a column-level field reference with the
+// `r.` alias used by `GetByCollectionFiltered`'s FROM clause. See
+// jsonExtract for the disambiguation rationale.
+func qualifyColumn(name string) string {
+	return "r." + name
+}
+
 // buildContributorFilter emits the special EXISTS-over-
 // `json->'contributors'` clause for the activity-contributor filter.
 //
@@ -497,8 +512,14 @@ func sqlOp(op FilterOperator) string {
 // or as the production-drift object shape
 // {"$type":"...","identity":"<DID>"}.
 func buildContributorFilter(f FieldFilter, paramIdx int) (string, []interface{}, int, error) {
-	const tmplEq = `(CASE WHEN jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d THEN EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE COALESCE(c->>'contributorIdentity', c->'contributorIdentity'->>'identity') = %s) ELSE FALSE END)`
-	const tmplIn = `(CASE WHEN jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d THEN EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE COALESCE(c->>'contributorIdentity', c->'contributorIdentity'->>'identity') = ANY(%s::text[])) ELSE FALSE END)`
+	// CASE-per-element to disambiguate the contributor-identity union.
+	// `c->>'contributorIdentity'` on a JSON object returns the object's
+	// JSON-text serialisation rather than NULL, which would defeat a
+	// COALESCE between the two shapes. jsonb_typeof gates the access
+	// so we only read each shape when the data actually matches.
+	const candidateExpr = `CASE jsonb_typeof(c->'contributorIdentity') WHEN 'string' THEN c->>'contributorIdentity' WHEN 'object' THEN c->'contributorIdentity'->>'identity' END`
+	tmplEq := `(CASE WHEN jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d THEN EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE (` + candidateExpr + `) = %s) ELSE FALSE END)`
+	tmplIn := `(CASE WHEN jsonb_typeof(r.json->'contributors') = 'array' AND jsonb_array_length(r.json->'contributors') <= %d THEN EXISTS (SELECT 1 FROM jsonb_array_elements(r.json->'contributors') AS c WHERE (` + candidateExpr + `) = ANY(%s::text[])) ELSE FALSE END)`
 
 	switch f.Operator {
 	case OpEq:

@@ -212,4 +212,3 @@ func TestExtractContributorDID_PrefersBareStringWhenBothShapeParseable(t *testin
 		t.Errorf("got %q, want %q", got, "did:plc:wins")
 	}
 }
-

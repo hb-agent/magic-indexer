@@ -887,10 +887,12 @@ func TestGetByCollectionFiltered_Contributor_ComposeWithExcludePds(t *testing.T)
 	db := seedContributorRecords(t)
 	ctx := context.Background()
 
-	// Resolve author1's PDS to "https://blocked.example" so it gets
-	// excluded; author3 remains NULL pds (passes through).
-	if err := db.Actors.SetPDS(ctx, "did:plc:author1", "https://blocked.example"); err != nil {
-		t.Fatalf("set pds: %v", err)
+	// UpsertWithPDS creates the actor row in the same call that sets
+	// the PDS. Records.Insert does NOT create an actor row, so a bare
+	// SetPDS (pure UPDATE) would silently no-op against the missing
+	// row and the filter would have nothing to exclude.
+	if err := db.Actors.UpsertWithPDS(ctx, "did:plc:author1", "", "https://blocked.example"); err != nil {
+		t.Fatalf("upsert pds: %v", err)
 	}
 
 	fg := contributorFilterGroup(repositories.OpEq, "did:plc:alice")
