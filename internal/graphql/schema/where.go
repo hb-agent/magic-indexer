@@ -42,7 +42,7 @@ func wantsBadgeAwardSubjectFilter(lexID string) bool {
 
 // badgeAwardSubjectDescription is pinned verbatim so consumers see
 // the policy at schema introspection.
-const badgeAwardSubjectDescription = `Filter badge awards by the subject DID. Matches awards whose subject is either a bare DID string (app.certified.defs#did) or a strong-ref whose URI starts with at://<did>/ (com.atproto.repo.strongRef). DIDs only — handle values are rejected at the GraphQL layer. Compose with the did filter via _or to express "issued by me OR targeting me": where: { _or: [ { did: { eq: "did:plc:me" } }, { subject: { eq: "did:plc:me" } } ] }.`
+const badgeAwardSubjectDescription = `Filter badge awards by the subject DID. Matches awards whose subject resolves to the given DID across both lexicon refs of the subject union: app.certified.defs#did (object form {did: "did:plc:..."}) and com.atproto.repo.strongRef (object form {uri: "at://did:plc:.../...", cid: "..."} — DID is the at-uri authority). DIDs only — handle values are rejected at the GraphQL layer. Compose with the did filter via _or to express "issued by me OR targeting me": where: { _or: [ { did: { eq: "did:plc:me" } }, { subject: { eq: "did:plc:me" } } ] }.`
 
 // buildWhereInputType generates a per-collection WhereInput InputObject type
 // from the lexicon's main record definition. Returns nil if the lexicon has

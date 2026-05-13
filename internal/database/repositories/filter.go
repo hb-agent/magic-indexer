@@ -552,15 +552,25 @@ func buildContributorFilter(f FieldFilter, paramIdx int) (string, []interface{},
 
 // buildBadgeAwardSubjectFilter handles the special SQL shape for the
 // `subject` filter on app.certified.badge.award (issue #65). The
-// `subject` field is a union of:
+// `subject` field is a union of two lexicon refs:
 //
-//   - bare DID string: `"subject": "did:plc:abc"`
-//   - strong-ref:      `"subject": {"uri": "at://did:plc:abc/.../...", "cid": "..."}`
+//   - app.certified.defs#did  → object `{"did": "did:plc:abc"}`
+//   - com.atproto.repo.strongRef → object `{"uri": "at://did:plc:abc/.../...", "cid": "..."}`
+//
+// Production data confirms `subject` is ALWAYS an object — the
+// defs#did ref resolves to an object-with-`did`-property, not a bare
+// string. (PR #75 originally assumed a bare-string branch existed and
+// missed 70% of records; this revision adds the defs#did object
+// branch.)
 //
 // We match either by:
 //
-//   - Direct string equality on `json->>'subject'`.
-//   - Prefix match on `json->'subject'->>'uri'` against `at://<did>/`.
+//   - Direct string equality on `json->'subject'->>'did'`  (defs#did)
+//   - Prefix match on `json->'subject'->>'uri'` against `at://<did>/`
+//     (strongRef)
+//
+// The legacy bare-string branch is kept defensively in case a producer
+// writes that shape; production data has none today.
 //
 // Caller has already DID-validated the input; the LIKE pattern uses
 // the trailing `/` to ensure we only match URIs whose first path
@@ -572,8 +582,11 @@ func buildContributorFilter(f FieldFilter, paramIdx int) (string, []interface{},
 // candidate DIDs.
 func buildBadgeAwardSubjectFilter(f FieldFilter, paramIdx int) (string, []interface{}, int, error) {
 	// jsonb_typeof + CASE per branch keeps the matcher predictable
-	// when the producer wrote either shape.
-	const subjectStringExpr = `CASE jsonb_typeof(r.json->'subject') WHEN 'string' THEN r.json->>'subject' ELSE NULL END`
+	// across every shape we've observed in the wild. Object-with-`did`
+	// and object-with-`uri` share the `WHEN 'object'` arm because their
+	// `did` / `uri` extractions are independent — at most one yields a
+	// non-null per row.
+	const subjectStringExpr = `CASE jsonb_typeof(r.json->'subject') WHEN 'string' THEN r.json->>'subject' WHEN 'object' THEN r.json->'subject'->>'did' ELSE NULL END`
 	const subjectURIExpr = `CASE jsonb_typeof(r.json->'subject') WHEN 'object' THEN r.json->'subject'->>'uri' ELSE NULL END`
 
 	switch f.Operator {

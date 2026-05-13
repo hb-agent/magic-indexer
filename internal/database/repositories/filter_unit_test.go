@@ -169,9 +169,10 @@ func TestBuildSingleFilter_BadgeAwardSubject_Eq(t *testing.T) {
 	if len(params) != 1 || params[0] != "did:plc:alice" {
 		t.Errorf("params = %v, want [\"did:plc:alice\"]", params)
 	}
-	// String-DID half + strong-ref-URI half, OR-composed.
-	if !strings.Contains(clause, "r.json->>'subject'") {
-		t.Errorf("clause missing string-DID extract: %s", clause)
+	// defs#did object half + strong-ref-URI half, OR-composed.
+	// The bare-string branch is also present (defensive) but optional.
+	if !strings.Contains(clause, "r.json->'subject'->>'did'") {
+		t.Errorf("clause missing defs#did object-property extract: %s", clause)
 	}
 	if !strings.Contains(clause, "r.json->'subject'->>'uri'") {
 		t.Errorf("clause missing strong-ref-URI extract: %s", clause)
@@ -247,6 +248,40 @@ func TestBuildSingleFilter_BadgeAwardSubject_NoUserInputInSQL(t *testing.T) {
 	}
 	if params[0] != malicious {
 		t.Errorf("user input should land in the parameter slot verbatim, got %v", params)
+	}
+}
+
+// Pin the three subject shapes the SQL must cover. Production data
+// (sampled 2026-05-13) shows ALL records use one of:
+//
+//   - defs#did:   {"did": "did:plc:..."}              — 70% of records
+//   - strongRef:  {"uri": "at://did:plc:.../...", "cid": "..."}
+//
+// plus a defensive bare-string branch for resilience. A future change
+// that drops any of these branches must update this test deliberately.
+func TestBuildSingleFilter_BadgeAwardSubject_AllThreeShapesCovered(t *testing.T) {
+	f := FieldFilter{
+		FieldName:           "subject",
+		Operator:            OpEq,
+		Value:               "did:plc:alice",
+		IsJSON:              true,
+		IsBadgeAwardSubject: true,
+	}
+	clause, _, _, err := buildSingleFilter(f, 1)
+	if err != nil {
+		t.Fatalf("buildSingleFilter: %v", err)
+	}
+	// defs#did object shape: r.json->'subject'->>'did'
+	if !strings.Contains(clause, "r.json->'subject'->>'did'") {
+		t.Errorf("missing defs#did object shape (r.json->'subject'->>'did'): %s", clause)
+	}
+	// strongRef shape: r.json->'subject'->>'uri'
+	if !strings.Contains(clause, "r.json->'subject'->>'uri'") {
+		t.Errorf("missing strongRef shape (r.json->'subject'->>'uri'): %s", clause)
+	}
+	// Defensive bare-string shape: r.json->>'subject'
+	if !strings.Contains(clause, "r.json->>'subject'") {
+		t.Errorf("missing defensive bare-string shape (r.json->>'subject'): %s", clause)
 	}
 }
 
