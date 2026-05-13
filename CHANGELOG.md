@@ -3,8 +3,7 @@
 ## Unreleased — chore: review follow-ups for 2026-05-13 audit (P0 + selected P1)
 
 Lands the fixes from the six-reviewer audit recorded in
-`docs/review-2026-05-13/report.md`. Eleven tracks complete (5 P0 + 6 P1);
-one remains for a follow-up (resolver-level tests).
+`docs/review-2026-05-13/report.md`. All twelve tracks complete (5 P0 + 6 P1 + 1 coverage).
 
 ### Server
 
@@ -122,6 +121,19 @@ one remains for a follow-up (resolver-level tests).
   belt-and-braces against a future bug bypassing upstream DID
   validation.
 
+- **test(coverage)**: resolver-level + Postgres-backed shape tests
+  for the purge subsystem and new filter SQL (T-COV-1 + T-COV-3).
+  `purge_resolver_test.go` covers admin gating, DID validation,
+  transaction boundary, tap-status classification, audit-log
+  emission, and metric increments — the gaps the existing
+  signer-only tests left open. `records_filter_test.go` grows
+  Postgres-backed table-driven tests pinning the contributor and
+  BadgeAward-subject SQL against every production shape (bare
+  string, strongRef, defs#did for subject; bare string + object
+  form for contributor) plus the subject_did generated column
+  and the array-size + non-array guards. Locally these need a
+  live Postgres (`TEST_DATABASE_URL`); CI provides one.
+
 ### Client
 
 - **fix(client)**: settings form hydration was using `useState(()=>…)`
@@ -136,13 +148,6 @@ one remains for a follow-up (resolver-level tests).
   guard at the callback was insufficient against `/\evil.com`,
   `/%2f%2fevil.com`, and leading-whitespace tricks. Defense in depth;
   browser mitigations made the live exploit narrow.
-
-### Deferred to follow-up
-
-The following review items remain backlog:
-
-- **Track 12** — resolver-level tests for the purge subsystem +
-  Postgres-backed shape tests for the new filters (T-COV-1 + T-COV-3).
 
 See `docs/review-2026-05-13/implementation-plan.md` for full
 tracking; `report.md` and the round-1/round-2 review docs for
