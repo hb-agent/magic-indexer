@@ -2,10 +2,10 @@
 
 ## Unreleased — chore: review follow-ups for 2026-05-13 audit (P0 + selected P1)
 
-Lands the first wave of fixes from the six-reviewer audit recorded in
-`docs/review-2026-05-13/report.md`. Eight tracks complete (5 P0 + 3 P1);
-four remain for a follow-up (FilterKind refactor, new-filter indexes,
-metrics + admin audit logs, resolver-level tests).
+Lands the fixes from the six-reviewer audit recorded in
+`docs/review-2026-05-13/report.md`. Ten tracks complete (5 P0 + 5 P1);
+two remain for a follow-up (metrics + admin audit logs,
+resolver-level tests).
 
 ### Server
 
@@ -68,6 +68,25 @@ metrics + admin audit logs, resolver-level tests).
   periodic sweeper goroutine bounds the used-sig set to 4096 entries
   with periodic prune. Flaky tamper-the-signature test fixed.
 
+- **perf(db)**: index the new filter shapes from PRs #64 + #75 so
+  they can survive the 5s `/graphql` budget on busy collections
+  (P-2 + P-3). Four migrations: 023 adds an IMMUTABLE wrapper
+  function `record_contributor_identities(jsonb)` (Postgres rejects
+  inline subqueries in index expressions, SQLSTATE 0A000, so the
+  ARRAY-subquery has to live inside a function); 024 adds the
+  partial GIN expression index `idx_record_contributor_identities`
+  scoped to `org.hypercerts.claim.activity`; 025 adds the STORED
+  generated column `record.subject_did` over the three BadgeAward
+  subject shapes (bare-string `at://...`, strongRef object,
+  `app.certified.defs#did` object); 026 adds the partial btree
+  `idx_record_subject_did` scoped to `app.certified.badge.award`.
+  `internal/database/repositories/filter.go` rewrites the
+  KindArrayContributor and KindUnionSubject SQL to target the new
+  indexes (`@>` / `&&` on the wrapper function; `=` / `= ANY` on
+  the generated column). Operator note: migration 025's `ALTER
+  TABLE … ADD COLUMN … STORED` rewrites the table on Postgres
+  < 18 — schedule a maintenance window for >10M-row deployments.
+
 ### Client
 
 - **fix(client)**: settings form hydration was using `useState(()=>…)`
@@ -87,10 +106,6 @@ metrics + admin audit logs, resolver-level tests).
 
 The following review items remain backlog:
 
-- **Track 8** — `FilterKind` enum + per-lexicon descriptor registry to
-  collapse the two per-collection filter builders (Q-2 + A-2).
-- **Track 9** — partial-GIN expression index for contributors + subject
-  DID materialization to make the new filters indexable (P-2 + P-3).
 - **Track 10** — purge metrics (`hypergoat_purge_token_rejected_total`)
   + audit logs for `UpdateSettings` / `ResetAll` / admin-DID mutations
   + `internal/logsafe` slog scrubber (T-OBS-1 + T-OBS-2 + Q-6).
