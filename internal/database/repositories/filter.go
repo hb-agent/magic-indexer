@@ -47,6 +47,16 @@ type FieldFilter struct {
 	// collection adopts the same array-of-objects-with-identity shape,
 	// rename to a Kind enum at that time.
 	IsArrayContributor bool
+
+	// IsBadgeAwardSubject, when true, signals the special "match
+	// against subject-as-DID-string OR subject-as-strongRef-uri" SQL
+	// shape used by the `AppCertifiedBadgeAwardWhereInput.subject`
+	// filter (issue #65). The badge.award lexicon's `subject` is a
+	// union of `app.certified.defs#did` (bare DID string) and
+	// `com.atproto.repo.strongRef` (object with `uri` starting with
+	// `at://<did>/...`). FieldName is informational; SQL hardcodes
+	// the JSON path. Narrow marker like IsArrayContributor.
+	IsBadgeAwardSubject bool
 }
 
 // MaxArrayContributorScan caps the per-row scan of the contributors
@@ -359,6 +369,10 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 		return buildContributorFilter(f, paramIdx)
 	}
 
+	if f.IsBadgeAwardSubject {
+		return buildBadgeAwardSubjectFilter(f, paramIdx)
+	}
+
 	switch f.Operator {
 	case OpEq:
 		if f.IsJSON {
@@ -533,6 +547,59 @@ func buildContributorFilter(f FieldFilter, paramIdx int) (string, []interface{},
 		return clause, []interface{}{values}, paramIdx + 1, nil
 	default:
 		return "", nil, paramIdx, fmt.Errorf("operator %s not supported on contributor filter", f.Operator)
+	}
+}
+
+// buildBadgeAwardSubjectFilter handles the special SQL shape for the
+// `subject` filter on app.certified.badge.award (issue #65). The
+// `subject` field is a union of:
+//
+//   - bare DID string: `"subject": "did:plc:abc"`
+//   - strong-ref:      `"subject": {"uri": "at://did:plc:abc/.../...", "cid": "..."}`
+//
+// We match either by:
+//
+//   - Direct string equality on `json->>'subject'`.
+//   - Prefix match on `json->'subject'->>'uri'` against `at://<did>/`.
+//
+// Caller has already DID-validated the input; the LIKE pattern uses
+// the trailing `/` to ensure we only match URIs whose first path
+// segment is exactly the DID (rules out `at://did:plc:foo-something/...`
+// matching `did:plc:foo`).
+//
+// Note: this is single-value-OR-list, NOT array-of-subjects. Each
+// record has exactly one subject; we match it against one or many
+// candidate DIDs.
+func buildBadgeAwardSubjectFilter(f FieldFilter, paramIdx int) (string, []interface{}, int, error) {
+	// jsonb_typeof + CASE per branch keeps the matcher predictable
+	// when the producer wrote either shape.
+	const subjectStringExpr = `CASE jsonb_typeof(r.json->'subject') WHEN 'string' THEN r.json->>'subject' ELSE NULL END`
+	const subjectUriExpr = `CASE jsonb_typeof(r.json->'subject') WHEN 'object' THEN r.json->'subject'->>'uri' ELSE NULL END`
+
+	switch f.Operator {
+	case OpEq:
+		didParam := fmt.Sprintf("$%d", paramIdx)
+		// LIKE pattern is `at://<did>/%` — concatenated server-side so
+		// the user-supplied DID stays parameterised (no SQL injection
+		// surface). DID was validated by the schema layer.
+		clause := fmt.Sprintf(
+			"((%s) = %s OR (%s) LIKE 'at://' || %s || '/%%')",
+			subjectStringExpr, didParam, subjectUriExpr, didParam,
+		)
+		return clause, []interface{}{f.Value}, paramIdx + 1, nil
+	case OpIn:
+		didsParam := fmt.Sprintf("$%d", paramIdx)
+		values, _ := extractInValues(f.Value)
+		// For the IN case: string-equals-ANY OR strong-ref-uri-LIKE-ANY.
+		// The LIKE-ANY half uses an unnested subquery so each candidate
+		// DID generates its own `at://<did>/%` pattern.
+		clause := fmt.Sprintf(
+			"((%s) = ANY(%s::text[]) OR EXISTS (SELECT 1 FROM unnest(%s::text[]) AS d WHERE (%s) LIKE 'at://' || d || '/%%'))",
+			subjectStringExpr, didsParam, didsParam, subjectUriExpr,
+		)
+		return clause, []interface{}{values}, paramIdx + 1, nil
+	default:
+		return "", nil, paramIdx, fmt.Errorf("operator %s not supported on badge-award subject filter", f.Operator)
 	}
 }
 

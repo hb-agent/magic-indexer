@@ -381,6 +381,77 @@ func TestActivityWhereInput_HasContributorFilter(t *testing.T) {
 	}
 }
 
+// TestBadgeAwardWhereInput_HasSubjectFilter pins the contract that
+// the AppCertifiedBadgeAwardWhereInput carries a `subject` filter
+// (typed DIDFilterInput) and the filter does NOT leak to other
+// collections (issue #65).
+func TestBadgeAwardWhereInput_HasSubjectFilter(t *testing.T) {
+	lexicons, err := loadLexiconsFromDir("../../../testdata/lexicons")
+	if err != nil {
+		t.Fatalf("load lexicons: %v", err)
+	}
+	registry := lexicon.NewRegistry()
+	for _, lex := range lexicons {
+		registry.Register(lex)
+	}
+	builder := NewBuilder(registry)
+	schema, err := builder.Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	queryFields := schema.QueryType().Fields()
+	whereFieldsFor := func(t *testing.T, fieldName string) graphql.InputObjectFieldMap {
+		t.Helper()
+		field, ok := queryFields[fieldName]
+		if !ok {
+			t.Fatalf("query field %q not found", fieldName)
+		}
+		for _, arg := range field.Args {
+			if arg.Name() != "where" {
+				continue
+			}
+			io, ok := arg.Type.(*graphql.InputObject)
+			if !ok {
+				t.Fatalf("where arg on %q is not an InputObject (got %T)", fieldName, arg.Type)
+			}
+			return io.Fields()
+		}
+		return nil
+	}
+
+	awardWhere := whereFieldsFor(t, "appCertifiedBadgeAward")
+	subject, ok := awardWhere["subject"]
+	if !ok {
+		names := make([]string, 0, len(awardWhere))
+		for k := range awardWhere {
+			names = append(names, k)
+		}
+		t.Fatalf("subject field missing on badge-award WhereInput; got: %v", names)
+	}
+	if subject.Type.Name() != "DIDFilterInput" {
+		t.Errorf("subject field type = %s, want DIDFilterInput", subject.Type.Name())
+	}
+	desc := subject.Description()
+	if !strings.Contains(desc, "DIDs only") {
+		t.Errorf("subject description missing DID-only policy callout: %q", desc)
+	}
+	if !strings.Contains(desc, "strong-ref") {
+		t.Errorf("subject description should explain the union shape: %q", desc)
+	}
+
+	// Absence assertion: subject must NOT leak to the activity
+	// WhereInput (or any other unrelated collection).
+	activityWhere := whereFieldsFor(t, "orgHypercertsClaimActivity")
+	if _, leaked := activityWhere["subject"]; leaked {
+		names := make([]string, 0, len(activityWhere))
+		for k := range activityWhere {
+			names = append(names, k)
+		}
+		t.Errorf("subject field leaked to activity WhereInput; fields: %v", names)
+	}
+}
+
 func TestUnionTypes(t *testing.T) {
 	// Load lexicons
 	activityData, _ := os.ReadFile("../../../testdata/lexicons/org/hypercerts/claim/activity.json")
