@@ -1,6 +1,7 @@
 package repositories
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -328,5 +329,383 @@ func TestBuildSingleFilter_BadgeAwardSubject_MarkerDrivesBehavior(t *testing.T) 
 	}
 	if !strings.Contains(clause, "r.subject_did") {
 		t.Errorf("marker should force the subject_did-targeted SQL regardless of FieldName: %s", clause)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Case-insensitive operators: eqi / ini
+// -----------------------------------------------------------------------------
+
+// TestBuildSingleFilter_Eqi_ShapeAndLowering pins the emitted SQL
+// for OpEqi: both sides ASCII-folded via `lower(... COLLATE "C")`,
+// parameter bound as a `string` pre-lowered with asciiToLower so
+// it stays byte-identical to the Postgres side under non-ASCII inputs.
+func TestBuildSingleFilter_Eqi_ShapeAndLowering(t *testing.T) {
+	f := FieldFilter{
+		FieldName: "type",
+		Operator:  OpEqi,
+		Value:     "Project",
+		IsJSON:    true,
+	}
+	clause, params, nextIdx, err := buildSingleFilter(f, 1)
+	if err != nil {
+		t.Fatalf("buildSingleFilter: %v", err)
+	}
+	if nextIdx != 2 {
+		t.Errorf("nextIdx = %d, want 2", nextIdx)
+	}
+	wantClause := `lower((json->>'type') COLLATE "C") = $1`
+	if clause != wantClause {
+		t.Errorf("clause mismatch\n got: %s\nwant: %s", clause, wantClause)
+	}
+	if len(params) != 1 {
+		t.Fatalf("params len = %d, want 1", len(params))
+	}
+	s, ok := params[0].(string)
+	if !ok {
+		t.Fatalf("params[0] type = %T, want string", params[0])
+	}
+	if s != "project" {
+		t.Errorf("params[0] = %q, want %q (ASCII-folded)", s, "project")
+	}
+}
+
+// TestBuildSingleFilter_Ini_ShapeAndLowering pins the emitted SQL
+// for OpIni: column side ASCII-folded, parameter bound as
+// `[]string` (not `[]interface{}`) so the pq/pgx driver maps it
+// straight to a Postgres text[].
+func TestBuildSingleFilter_Ini_ShapeAndLowering(t *testing.T) {
+	f := FieldFilter{
+		FieldName: "type",
+		Operator:  OpIni,
+		Value:     []interface{}{"Project", "FAVORITES", "research"},
+		IsJSON:    true,
+	}
+	clause, params, nextIdx, err := buildSingleFilter(f, 3)
+	if err != nil {
+		t.Fatalf("buildSingleFilter: %v", err)
+	}
+	if nextIdx != 4 {
+		t.Errorf("nextIdx = %d, want 4", nextIdx)
+	}
+	wantClause := `lower((json->>'type') COLLATE "C") = ANY($3::text[])`
+	if clause != wantClause {
+		t.Errorf("clause mismatch\n got: %s\nwant: %s", clause, wantClause)
+	}
+	if len(params) != 1 {
+		t.Fatalf("params len = %d, want 1", len(params))
+	}
+	values, ok := params[0].([]string)
+	if !ok {
+		t.Fatalf("params[0] type = %T, want []string", params[0])
+	}
+	want := []string{"project", "favorites", "research"}
+	if len(values) != len(want) {
+		t.Fatalf("len(values) = %d, want %d", len(values), len(want))
+	}
+	for i := range want {
+		if values[i] != want[i] {
+			t.Errorf("values[%d] = %q, want %q (ASCII-folded)", i, values[i], want[i])
+		}
+	}
+}
+
+// TestBuildSingleFilter_Ini_NullElementMirrorsIn pins parity with
+// OpIn's null-element branch. In practice unreachable through the
+// `[String!]` GraphQL surface, but the emitter symmetry keeps the
+// code shapes aligned and the behaviour predictable for direct
+// FieldFilter consumers.
+func TestBuildSingleFilter_Ini_NullElementMirrorsIn(t *testing.T) {
+	f := FieldFilter{
+		FieldName: "type",
+		Operator:  OpIni,
+		Value:     []interface{}{"Project", nil, "FAVORITES"},
+		IsJSON:    true,
+	}
+	clause, _, _, err := buildSingleFilter(f, 1)
+	if err != nil {
+		t.Fatalf("buildSingleFilter: %v", err)
+	}
+	wantClause := `(lower((json->>'type') COLLATE "C") = ANY($1::text[]) OR json->>'type' IS NULL)`
+	if clause != wantClause {
+		t.Errorf("clause mismatch\n got: %s\nwant: %s", clause, wantClause)
+	}
+}
+
+// TestBuildSingleFilter_Eqi_AdversarialValue pins that user input
+// never reaches the emitted SQL string — even when the value is a
+// SQL-injection payload, LIKE metacharacter, NUL byte, or
+// whitespace, the SQL text is the canonical shape with the
+// parameter bound separately, and the parameter holds the
+// byte-for-byte ASCII-folded input.
+func TestBuildSingleFilter_Eqi_AdversarialValue(t *testing.T) {
+	cases := []string{
+		`'; DROP TABLE record; --`,
+		`"`,
+		`\`,
+		`%`,
+		`_`,
+		"\x00",
+		" project ",
+		"\nNEWLINE\t",
+		`x' OR '1'='1`,
+	}
+	// Canonical shape — adversarial input must NEVER affect it.
+	const wantClause = `lower((json->>'type') COLLATE "C") = $1`
+	for _, in := range cases {
+		t.Run(fmt.Sprintf("%q", in), func(t *testing.T) {
+			f := FieldFilter{
+				FieldName: "type",
+				Operator:  OpEqi,
+				Value:     in,
+				IsJSON:    true,
+			}
+			clause, params, _, err := buildSingleFilter(f, 1)
+			if err != nil {
+				t.Fatalf("buildSingleFilter: %v", err)
+			}
+			if clause != wantClause {
+				t.Errorf("clause shape diverged on adversarial input\n got:  %s\n want: %s", clause, wantClause)
+			}
+			// Per-input substring guard: a multi-character adversarial
+			// input must NOT appear as a substring of the SQL string
+			// (single-byte inputs like `"` overlap with our literal
+			// `COLLATE "C"` and are skipped by length).
+			if len(in) >= 2 && strings.Contains(clause, in) {
+				t.Errorf("clause leaked user input %q:\n%s", in, clause)
+			}
+			s, _ := params[0].(string)
+			if s != asciiToLower(in) {
+				t.Errorf("param = %q, want %q (pre-lowered)", s, asciiToLower(in))
+			}
+		})
+	}
+}
+
+// TestBuildSingleFilter_Eqi_FieldNameInjectionRejected pins that
+// the field-name validator runs before SQL emission. A crafted
+// field name with metacharacters must be refused, not interpolated.
+func TestBuildSingleFilter_Eqi_FieldNameInjectionRejected(t *testing.T) {
+	f := FieldFilter{
+		FieldName: "type'); DROP TABLE record; --",
+		Operator:  OpEqi,
+		Value:     "project",
+		IsJSON:    true,
+	}
+	_, _, _, err := buildSingleFilter(f, 1)
+	if err == nil {
+		t.Fatalf("expected field-name validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid field name") {
+		t.Errorf("error message should mention field-name validation; got: %v", err)
+	}
+}
+
+// TestValidate_Eqi_RejectsNonString pins the type contract for
+// OpEqi: the operator only accepts strings.
+func TestValidate_Eqi_RejectsNonString(t *testing.T) {
+	f := FieldFilter{FieldName: "type", Operator: OpEqi, Value: 42, IsJSON: true}
+	err := f.Validate()
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "eqi") || !strings.Contains(err.Error(), "string") {
+		t.Errorf("error should mention eqi and string requirement; got: %v", err)
+	}
+}
+
+// TestValidate_Eqi_RejectsColumnLevel pins the defense-in-depth
+// guard. The GraphQL surface only routes `did` through
+// DIDFilterInput (no eqi), so this case is unreachable from the
+// API, but the validator still refuses it with an actionable
+// message pointing the consumer to `eq`.
+func TestValidate_Eqi_RejectsColumnLevel(t *testing.T) {
+	f := FieldFilter{FieldName: "did", Operator: OpEqi, Value: "did:plc:abc", IsJSON: false}
+	err := f.Validate()
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "eqi") || !strings.Contains(err.Error(), "eq") {
+		t.Errorf("error should mention eqi and the eq alternative; got: %v", err)
+	}
+}
+
+// TestValidate_Ini_EmptyListRejected pins R1 item 2 — an empty
+// list is a programmer error, not "match nothing". Both `ini` and
+// `in` enforce this; their error messages reference MaxInListSize.
+func TestValidate_Ini_EmptyListRejected(t *testing.T) {
+	cases := []struct {
+		op  FilterOperator
+		val interface{}
+	}{
+		{OpIni, []interface{}{}},
+		{OpIni, []string{}},
+		{OpIn, []interface{}{}},
+		{OpIn, []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.op), func(t *testing.T) {
+			f := FieldFilter{FieldName: "type", Operator: tc.op, Value: tc.val, IsJSON: true}
+			err := f.Validate()
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "1 to 50") {
+				t.Errorf("error should mention unified 1 to 50 range; got: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidate_Ini_AtAndOverMaxInListSize pins the N / N+1 boundary
+// shared with OpIn — mirrors the existing MaxArrayContributorScan
+// boundary-pair pattern. Exercises both `[]interface{}` and
+// `[]string` branches of validateInListShape so a refactor that
+// splits the cap (e.g. only updates one arm) is caught.
+func TestValidate_Ini_AtAndOverMaxInListSize(t *testing.T) {
+	t.Run("interface_slice", func(t *testing.T) {
+		atMax := make([]interface{}, MaxInListSize)
+		for i := range atMax {
+			atMax[i] = "v"
+		}
+		overMax := append(atMax, "extra") //nolint:gocritic // explicit append for the over-by-one case
+		fOK := FieldFilter{FieldName: "type", Operator: OpIni, Value: atMax, IsJSON: true}
+		if err := fOK.Validate(); err != nil {
+			t.Errorf("at MaxInListSize (%d) should succeed; got: %v", MaxInListSize, err)
+		}
+		fBad := FieldFilter{FieldName: "type", Operator: OpIni, Value: overMax, IsJSON: true}
+		err := fBad.Validate()
+		if err == nil {
+			t.Fatalf("at MaxInListSize+1 (%d) should fail", MaxInListSize+1)
+		}
+		if !strings.Contains(err.Error(), "1 to 50") {
+			t.Errorf("error should mention unified 1 to 50 range; got: %v", err)
+		}
+	})
+
+	t.Run("string_slice", func(t *testing.T) {
+		atMax := make([]string, MaxInListSize)
+		for i := range atMax {
+			atMax[i] = "v"
+		}
+		overMax := append(atMax, "extra") //nolint:gocritic // explicit append for the over-by-one case
+		fOK := FieldFilter{FieldName: "type", Operator: OpIni, Value: atMax, IsJSON: true}
+		if err := fOK.Validate(); err != nil {
+			t.Errorf("[]string at MaxInListSize (%d) should succeed; got: %v", MaxInListSize, err)
+		}
+		fBad := FieldFilter{FieldName: "type", Operator: OpIni, Value: overMax, IsJSON: true}
+		err := fBad.Validate()
+		if err == nil {
+			t.Fatalf("[]string at MaxInListSize+1 (%d) should fail", MaxInListSize+1)
+		}
+		if !strings.Contains(err.Error(), "1 to 50") {
+			t.Errorf("error should mention unified 1 to 50 range; got: %v", err)
+		}
+	})
+}
+
+// TestValidate_Ini_RejectsColumnLevel — defense-in-depth guard.
+func TestValidate_Ini_RejectsColumnLevel(t *testing.T) {
+	f := FieldFilter{FieldName: "did", Operator: OpIni, Value: []interface{}{"did:plc:a"}, IsJSON: false}
+	err := f.Validate()
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "ini") || !strings.Contains(err.Error(), "in") {
+		t.Errorf("error should mention ini and the in alternative; got: %v", err)
+	}
+}
+
+// TestValidate_Ini_RejectsNonScalarElements mirrors OpIn's contract.
+func TestValidate_Ini_RejectsNonScalarElements(t *testing.T) {
+	cases := []interface{}{
+		[]interface{}{"project", map[string]interface{}{"a": 1}},
+		[]interface{}{"project", []interface{}{"nested"}},
+	}
+	for i, v := range cases {
+		t.Run(fmt.Sprintf("case-%d", i), func(t *testing.T) {
+			f := FieldFilter{FieldName: "type", Operator: OpIni, Value: v, IsJSON: true}
+			err := f.Validate()
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "non-scalar") {
+				t.Errorf("error should mention non-scalar; got: %v", err)
+			}
+		})
+	}
+}
+
+// TestAsciiToLower pins the helper's contract: fold ASCII A-Z and
+// pass through every other byte unchanged. Mirrors Postgres
+// `lower(... COLLATE "C")` so the case-insensitive operators stay
+// symmetric between the bound parameter and the column expression.
+func TestAsciiToLower(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"project", "project"},
+		{"Project", "project"},
+		{"PROJECT", "project"},
+		{"PrOjEcT-123", "project-123"},
+		{"abc-XYZ_!@#", "abc-xyz_!@#"},
+		// Boundary bytes adjacent to A-Z must NOT fold. If the helper
+		// switches from `>= 'A' && <= 'Z'` to `> '@' && < '['` (or
+		// similar off-by-one prone forms), these catch it.
+		{"@ABC[`abc{", "@abc[`abc{"},
+		// All-digits / all-punctuation pass through.
+		{"0123456789", "0123456789"},
+		{"!#$%&'()*+,-./", "!#$%&'()*+,-./"},
+		// Non-ASCII passes through unchanged. Cyrillic 'Р' (U+0420)
+		// is NOT folded to Latin 'p' or Cyrillic 'р' — `COLLATE "C"`
+		// only folds ASCII A-Z, and asciiToLower mirrors that.
+		{"\xd0\xa0", "\xd0\xa0"},
+		// Turkish capital I with dot (U+0130) — not folded. Go's
+		// default strings.ToLower would expand this to two bytes;
+		// asciiToLower deliberately doesn't, matching PG `COLLATE "C"`.
+		{"\xc4\xb0", "\xc4\xb0"},
+		// Embedded NUL passes through.
+		{"AB\x00CD", "ab\x00cd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := asciiToLower(tc.in)
+			if got != tc.want {
+				t.Errorf("asciiToLower(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+
+	// Long input — exercises any future small-buffer fast path that
+	// might branch on length. The pre-scan / mutation-loop forms
+	// should both handle inputs well past any reasonable threshold.
+	long := strings.Repeat("AbCdEfGhIjKlMnOpQrStUvWxYz", 10)
+	wantLong := strings.Repeat("abcdefghijklmnopqrstuvwxyz", 10)
+	if got := asciiToLower(long); got != wantLong {
+		t.Errorf("asciiToLower(long) mismatch:\n got:  %q\n want: %q", got, wantLong)
+	}
+
+	// All-256-byte sweep: every byte in 0x41..0x5A folds to itself+0x20;
+	// every other byte passes through.
+	allBytes := make([]byte, 256)
+	for i := range allBytes {
+		allBytes[i] = byte(i)
+	}
+	wantAll := make([]byte, 256)
+	for i := range wantAll {
+		if i >= 'A' && i <= 'Z' {
+			wantAll[i] = byte(i) + ('a' - 'A')
+		} else {
+			wantAll[i] = byte(i)
+		}
+	}
+	if got := asciiToLower(string(allBytes)); got != string(wantAll) {
+		t.Errorf("asciiToLower all-256-bytes mismatch at:")
+		for i := 0; i < 256; i++ {
+			if got[i] != wantAll[i] {
+				t.Errorf("  byte 0x%02x: got 0x%02x, want 0x%02x", i, got[i], wantAll[i])
+			}
+		}
 	}
 }

@@ -558,3 +558,140 @@ func TestSchemaIntrospection(t *testing.T) {
 	jsonResult, _ := json.MarshalIndent(result.Data, "", "  ")
 	t.Logf("Introspection result:\n%s", jsonResult)
 }
+
+// TestStringFilterInput_CaseInsensitiveOperators_OnGeneratedWhereInput
+// pins the end-to-end wiring: a real lexicon's StringFilterInput-typed
+// property (collection.type) carries eqi/ini in the generated
+// WhereInput, while DIDFilterInput-typed fields (did, contributor,
+// subject) do not. Combined with TestDIDFilterInput_NoCaseInsensitiveOperators
+// in the types package, this pins the contract from schema generation
+// through to runtime.
+func TestStringFilterInput_CaseInsensitiveOperators_OnGeneratedWhereInput(t *testing.T) {
+	lexicons, err := loadLexiconsFromDir("../../../testdata/lexicons")
+	if err != nil {
+		t.Fatalf("load lexicons: %v", err)
+	}
+	registry := lexicon.NewRegistry()
+	for _, lex := range lexicons {
+		registry.Register(lex)
+	}
+	builder := NewBuilder(registry)
+	schema, err := builder.Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	whereFieldsFor := func(t *testing.T, queryField string) graphql.InputObjectFieldMap {
+		t.Helper()
+		field, ok := schema.QueryType().Fields()[queryField]
+		if !ok {
+			t.Fatalf("query field %q not found", queryField)
+		}
+		for _, arg := range field.Args {
+			if arg.Name() != "where" {
+				continue
+			}
+			io, ok := arg.Type.(*graphql.InputObject)
+			if !ok {
+				t.Fatalf("where arg on %q is not an InputObject (got %T)", queryField, arg.Type)
+			}
+			return io.Fields()
+		}
+		return nil
+	}
+
+	// org.hypercerts.claim.collection.type is a free-form string
+	// discriminator and the immediate driver for this feature.
+	collectionWhere := whereFieldsFor(t, "orgHypercertsClaimCollection")
+	typeField, ok := collectionWhere["type"]
+	if !ok {
+		t.Fatalf("type field missing on collection WhereInput")
+	}
+	if typeField.Type.Name() != "StringFilterInput" {
+		t.Fatalf("type field type = %s, want StringFilterInput", typeField.Type.Name())
+	}
+	stringFilterFields := typeField.Type.(*graphql.InputObject).Fields()
+	for _, op := range []string{"eqi", "ini"} {
+		if _, present := stringFilterFields[op]; !present {
+			t.Errorf("StringFilterInput is missing %q on collection.type", op)
+		}
+	}
+
+	// `did` on the same collection WhereInput is DIDFilterInput-typed
+	// and must NOT expose case-insensitive operators.
+	didField, ok := collectionWhere["did"]
+	if !ok {
+		t.Fatalf("did field missing on collection WhereInput")
+	}
+	if didField.Type.Name() != "DIDFilterInput" {
+		t.Fatalf("did field type = %s, want DIDFilterInput", didField.Type.Name())
+	}
+	didFilterFields := didField.Type.(*graphql.InputObject).Fields()
+	for _, op := range []string{"eqi", "ini"} {
+		if _, leaked := didFilterFields[op]; leaked {
+			t.Errorf("DIDFilterInput leaked case-insensitive operator %q on collection.did", op)
+		}
+	}
+
+	// Lexicon-specific DID filters (contributor on activity, subject
+	// on badge.award) also use DIDFilterInput and must not expose
+	// eqi/ini.
+	activityWhere := whereFieldsFor(t, "orgHypercertsClaimActivity")
+	if contrib, ok := activityWhere["contributor"]; ok {
+		if io, isObj := contrib.Type.(*graphql.InputObject); isObj {
+			for _, op := range []string{"eqi", "ini"} {
+				if _, leaked := io.Fields()[op]; leaked {
+					t.Errorf("DIDFilterInput leaked %q on activity.contributor", op)
+				}
+			}
+		}
+	}
+	awardWhere := whereFieldsFor(t, "appCertifiedBadgeAward")
+	if subj, ok := awardWhere["subject"]; ok {
+		if io, isObj := subj.Type.(*graphql.InputObject); isObj {
+			for _, op := range []string{"eqi", "ini"} {
+				if _, leaked := io.Fields()[op]; leaked {
+					t.Errorf("DIDFilterInput leaked %q on badge.award.subject", op)
+				}
+			}
+		}
+	}
+
+	// `_or` and `_and` are self-referential — the element type is
+	// the same WhereInput. Pin that the recursive composition still
+	// surfaces eqi/ini so a future schema-builder refactor that
+	// gates operators differently under composition doesn't regress
+	// silently.
+	for _, composer := range []string{"_or", "_and"} {
+		field, ok := collectionWhere[composer]
+		if !ok {
+			t.Errorf("%s composer missing on collection WhereInput", composer)
+			continue
+		}
+		list, isList := field.Type.(*graphql.List)
+		if !isList {
+			t.Errorf("%s composer type = %T, want graphql.List", composer, field.Type)
+			continue
+		}
+		elem, isObj := list.OfType.(*graphql.InputObject)
+		if !isObj {
+			t.Errorf("%s element type = %T, want graphql.InputObject", composer, list.OfType)
+			continue
+		}
+		nestedTypeField, ok := elem.Fields()["type"]
+		if !ok {
+			t.Errorf("%s element WhereInput missing `type` field", composer)
+			continue
+		}
+		nestedStringFilter, isObj := nestedTypeField.Type.(*graphql.InputObject)
+		if !isObj {
+			t.Errorf("%s element type.Type = %T, want graphql.InputObject", composer, nestedTypeField.Type)
+			continue
+		}
+		for _, op := range []string{"eqi", "ini"} {
+			if _, present := nestedStringFilter.Fields()[op]; !present {
+				t.Errorf("%s element missing %q on type field (StringFilterInput)", composer, op)
+			}
+		}
+	}
+}

@@ -18,6 +18,8 @@ const (
 	OpGte        FilterOperator = "gte"
 	OpLte        FilterOperator = "lte"
 	OpIn         FilterOperator = "in"
+	OpEqi        FilterOperator = "eqi"
+	OpIni        FilterOperator = "ini"
 	OpContains   FilterOperator = "contains"
 	OpStartsWith FilterOperator = "startsWith"
 )
@@ -235,6 +237,16 @@ func buildFilterGroupRecursive(group FilterGroup, paramIdx, depth int) (string, 
 			continue
 		}
 
+		// Run value-level validation here so the recursive path
+		// matches `BuildFieldFilterClause`'s contract. Without this
+		// pass, filters reaching the recursive builder skip checks
+		// like the `in`/`ini` non-empty / size guards and the
+		// `eqi`/`ini` IsJSON guard, which are only enforced when
+		// the legacy non-recursive path is taken or when the
+		// GraphQL parser runs `Validate()` per FieldFilter.
+		if err := f.Validate(); err != nil {
+			return "", nil, fmt.Errorf("invalid filter on field %q: %w", f.FieldName, err)
+		}
 		clause, newParams, nextIdx, err := buildSingleFilter(f, paramIdx)
 		if err != nil {
 			return "", nil, err
@@ -325,26 +337,29 @@ func (f *FieldFilter) Validate() error {
 	}
 
 	if f.Operator == OpIn {
-		switch v := f.Value.(type) {
-		case []interface{}:
-			if len(v) > MaxInListSize {
-				return fmt.Errorf("in list exceeds maximum of %d values", MaxInListSize)
-			}
-			// Reject non-scalar values (objects/arrays).
-			for _, item := range v {
-				if _, ok := item.(map[string]interface{}); ok {
-					return fmt.Errorf("in list contains non-scalar value (object)")
-				}
-				if _, ok := item.([]interface{}); ok {
-					return fmt.Errorf("in list contains non-scalar value (array)")
-				}
-			}
-		case []string:
-			if len(v) > MaxInListSize {
-				return fmt.Errorf("in list exceeds maximum of %d values", MaxInListSize)
-			}
-		default:
-			return fmt.Errorf("in operator requires a list value")
+		if err := validateInListShape(f.Value, "in"); err != nil {
+			return err
+		}
+	}
+
+	if f.Operator == OpEqi {
+		if _, ok := f.Value.(string); !ok {
+			return fmt.Errorf("eqi operator requires string value")
+		}
+		// eqi targets JSON properties. The only column-level filter
+		// today is `did`, which is routed through DIDFilterInput and
+		// never picks up eqi. Defense in depth.
+		if !f.IsJSON {
+			return fmt.Errorf("eqi operator is not supported on column-level fields; use eq")
+		}
+	}
+
+	if f.Operator == OpIni {
+		if err := validateInListShape(f.Value, "ini"); err != nil {
+			return err
+		}
+		if !f.IsJSON {
+			return fmt.Errorf("ini operator is not supported on column-level fields; use in")
 		}
 	}
 
@@ -358,6 +373,35 @@ func (f *FieldFilter) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+// validateInListShape enforces the size / scalar-element / non-empty
+// contract shared by `in` and `ini`. opName is used in error messages
+// so the consumer sees the GraphQL-visible operator name. Lower- and
+// upper-bound messages share the "1 to N" phrasing so consumers
+// parsing for the cap don't need two regexes.
+func validateInListShape(value interface{}, opName string) error {
+	switch v := value.(type) {
+	case []interface{}:
+		if len(v) < 1 || len(v) > MaxInListSize {
+			return fmt.Errorf("%s list must contain 1 to %d values (got %d)", opName, MaxInListSize, len(v))
+		}
+		for _, item := range v {
+			if _, ok := item.(map[string]interface{}); ok {
+				return fmt.Errorf("%s list contains non-scalar value (object)", opName)
+			}
+			if _, ok := item.([]interface{}); ok {
+				return fmt.Errorf("%s list contains non-scalar value (array)", opName)
+			}
+		}
+	case []string:
+		if len(v) < 1 || len(v) > MaxInListSize {
+			return fmt.Errorf("%s list must contain 1 to %d values (got %d)", opName, MaxInListSize, len(v))
+		}
+	default:
+		return fmt.Errorf("%s operator requires a list value", opName)
+	}
 	return nil
 }
 
@@ -454,6 +498,36 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 			return clause, []interface{}{values}, paramIdx + 1, nil
 		}
 		clause := fmt.Sprintf("%s = ANY(%s::text[])", expr, param)
+		return clause, []interface{}{values}, paramIdx + 1, nil
+
+	case OpEqi:
+		// ASCII-fold both sides. `COLLATE "C"` keeps lower() byte-based
+		// and IMMUTABLE so the expression can serve as an index
+		// expression in a follow-up migration if a single field
+		// becomes a hot case-insensitive filter target. Non-ASCII
+		// inputs pass through unchanged on both sides — symmetry is
+		// preserved because Go's asciiToLower mirrors Postgres
+		// `lower(... COLLATE "C")` byte-for-byte on ASCII and is the
+		// identity elsewhere.
+		expr := jsonExtract(f.FieldName, f.IsJSON)
+		param := fmt.Sprintf("$%d", paramIdx)
+		s, _ := f.Value.(string)
+		clause := fmt.Sprintf(`lower((%s) COLLATE "C") = %s`, expr, param)
+		return clause, []interface{}{asciiToLower(s)}, paramIdx + 1, nil
+
+	case OpIni:
+		expr := jsonExtract(f.FieldName, f.IsJSON)
+		param := fmt.Sprintf("$%d", paramIdx)
+		raw, hasNull := extractInValues(f.Value)
+		values := make([]string, len(raw))
+		for i, v := range raw {
+			values[i] = asciiToLower(v)
+		}
+		if hasNull {
+			clause := fmt.Sprintf(`(lower((%s) COLLATE "C") = ANY(%s::text[]) OR %s IS NULL)`, expr, param, expr)
+			return clause, []interface{}{values}, paramIdx + 1, nil
+		}
+		clause := fmt.Sprintf(`lower((%s) COLLATE "C") = ANY(%s::text[])`, expr, param)
 		return clause, []interface{}{values}, paramIdx + 1, nil
 
 	case OpContains:
@@ -671,6 +745,35 @@ func escapeLike(s string) string {
 	s = strings.ReplaceAll(s, `%`, `\%`)
 	s = strings.ReplaceAll(s, `_`, `\_`)
 	return s
+}
+
+// asciiToLower folds ASCII A-Z to a-z and leaves all other bytes
+// (including non-ASCII bytes that may be parts of multi-byte
+// UTF-8 sequences) untouched. This mirrors Postgres
+// `lower(... COLLATE "C")` byte-for-byte so the case-insensitive
+// `eqi` / `ini` operators stay symmetric between the bound
+// parameter and the column expression. Note this is deliberately
+// NOT `strings.ToLower`: Go's default ToLower applies Unicode
+// mappings (e.g. Turkish `İ` → `i̇`), which would diverge from
+// the ASCII-only fold Postgres performs under `COLLATE "C"`.
+func asciiToLower(s string) string {
+	var changed bool
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return s
+	}
+	b := []byte(s)
+	for i := range b {
+		if b[i] >= 'A' && b[i] <= 'Z' {
+			b[i] += 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // extractInValues extracts string values from an IN list, reporting whether

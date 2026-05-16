@@ -7,19 +7,30 @@ import (
 // Filter input types for per-field filtering on lexicon-defined records.
 // Each type provides operators appropriate for its data type.
 
-// StringFilterInput provides string comparison operators.
+// StringFilterInput provides string comparison operators. Operators
+// suffixed with `i` are case-insensitive variants (ASCII fold via
+// Postgres `lower(... COLLATE "C")`); operators without the suffix
+// are case-sensitive. This `-i` suffix is the going-forward
+// convention for case-insensitive operator variants on this filter
+// input — future additions follow the same shape.
 var StringFilterInput = graphql.NewInputObject(graphql.InputObjectConfig{
 	Name:        "StringFilterInput",
-	Description: "Filter conditions for string fields",
+	Description: "Filter conditions for string fields. Operators with an `-i` suffix are case-insensitive (ASCII fold); operators without are case-sensitive.",
 	Fields: graphql.InputObjectConfigFieldMap{
-		"eq":         {Type: graphql.String, Description: "Equal to"},
+		"eq":         {Type: graphql.String, Description: "Equal to (case-sensitive)"},
+		"eqi":        {Type: graphql.String, Description: stringEqiDescription},
 		"neq":        {Type: graphql.String, Description: "Not equal to (includes records where field is absent)"},
-		"in":         {Type: graphql.NewList(graphql.String), Description: "In list (max 50 values)"},
+		"in":         {Type: graphql.NewList(graphql.String), Description: "In list (case-sensitive, 1-50 values)"},
+		"ini":        {Type: graphql.NewList(graphql.String), Description: stringIniDescription},
 		"contains":   {Type: graphql.String, Description: "Contains substring (case-insensitive, min 3 chars)"},
 		"startsWith": {Type: graphql.String, Description: "Starts with prefix (case-insensitive)"},
 		"isNull":     {Type: graphql.Boolean, Description: "Is null / is not null"},
 	},
 })
+
+const stringEqiDescription = `Equal to (case-insensitive, ASCII fold via Postgres lower(... COLLATE "C")). Both sides are lower-cased before comparison; non-ASCII characters pass through unchanged (no Unicode confusable folding). On its own, eqi does not use the JSONB GIN index — pair it with a column-level filter such as did { eq: ... } for selective queries. For spec-case-sensitive identifiers (cid, cid-link, lowercase TIDs, DID authorities inside at-uri values) prefer eq for the cheaper GIN-indexable comparison; eqi still evaluates correctly but provides no semantic benefit on those types.`
+
+const stringIniDescription = `In list (case-insensitive, ASCII fold via Postgres lower(... COLLATE "C"); 1-50 values). Both sides are lower-cased; same non-ASCII and indexing caveats as eqi. An empty list is rejected.`
 
 // IntFilterInput provides integer comparison operators.
 var IntFilterInput = graphql.NewInputObject(graphql.InputObjectConfig{
@@ -82,7 +93,7 @@ var DateTimeFilterInput = graphql.NewInputObject(graphql.InputObjectConfig{
 // DIDFilterInput provides DID-specific operators (column-level, not JSON).
 var DIDFilterInput = graphql.NewInputObject(graphql.InputObjectConfig{
 	Name:        "DIDFilterInput",
-	Description: "Filter conditions for DID fields (column-level, optimized)",
+	Description: "Filter conditions for DID fields (column-level, optimized). DIDs are spec-case-sensitive; no case-insensitive operators are provided on this filter input (per W3C DID Core §3.1 — case folding would change identifier identity).",
 	Fields: graphql.InputObjectConfigFieldMap{
 		"eq": {Type: graphql.String, Description: "Equal to a specific DID"},
 		"in": {Type: graphql.NewList(graphql.String), Description: "In list of DIDs (max 50)"},
@@ -108,8 +119,14 @@ func FilterInputForLexiconType(propType string) *graphql.InputObject {
 	case "at-uri", "tid":
 		return StringFilterInput
 	case "cid", "cid-link":
-		// Restricted: only eq and in (no pattern matching on content hashes).
-		return StringFilterInput // reuse StringFilterInput; unused ops are just ignored
+		// Content hashes reuse StringFilterInput. eq / in are the
+		// natural operators; eqi / contains / startsWith are
+		// semantically redundant (the value is opaque base32/base58),
+		// but documented in the operator descriptions rather than
+		// refused at validation — the precedent set by
+		// contains/startsWith is that operator restrictions are
+		// per-operator, not per-type.
+		return StringFilterInput
 	default:
 		// Arrays, refs, unions, objects, blobs, bytes — not filterable.
 		return nil
