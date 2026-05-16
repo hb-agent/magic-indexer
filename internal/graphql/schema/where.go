@@ -309,6 +309,10 @@ func parseOperator(op string) (repositories.FilterOperator, bool) {
 		return repositories.OpLte, false
 	case "in":
 		return repositories.OpIn, false
+	case "eqi":
+		return repositories.OpEqi, false
+	case "ini":
+		return repositories.OpIni, false
 	case "contains":
 		return repositories.OpContains, false
 	case "startsWith":

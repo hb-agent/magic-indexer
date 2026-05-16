@@ -162,3 +162,35 @@ func TestFilterRegistry_BadgeAwardSubject(t *testing.T) {
 		}
 	}
 }
+
+// TestParseOperator_CaseInsensitiveVariants pins the parser
+// extension for eqi / ini. The parser reuses the per-field
+// operator loop in extractFieldFiltersRecursive, so these are
+// the only mappings we need to verify.
+func TestParseOperator_CaseInsensitiveVariants(t *testing.T) {
+	cases := []struct {
+		in     string
+		want   repositories.FilterOperator
+		isNull bool
+	}{
+		{"eqi", repositories.OpEqi, false},
+		{"ini", repositories.OpIni, false},
+		// Existing operators continue to map correctly — regression
+		// guard against accidental fallthrough when adding cases.
+		{"eq", repositories.OpEq, false},
+		{"in", repositories.OpIn, false},
+		{"isNull", "", true},
+		{"nope", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			gotOp, gotIsNull := parseOperator(tc.in)
+			if gotOp != tc.want {
+				t.Errorf("parseOperator(%q) op = %q, want %q", tc.in, gotOp, tc.want)
+			}
+			if gotIsNull != tc.isNull {
+				t.Errorf("parseOperator(%q) isNull = %v, want %v", tc.in, gotIsNull, tc.isNull)
+			}
+		})
+	}
+}

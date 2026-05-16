@@ -581,13 +581,24 @@ means "no filter" (returns all authors). Example:
 Typed collection queries also accept a `where` argument with per-field
 operators generated from the lexicon's scalar properties:
 
-- Operators: `eq`, `neq`, `gt`, `lt`, `gte`, `lte`, `in`, `contains`, `startsWith`, `isNull`.
+- Operators: `eq`, `eqi`, `neq`, `gt`, `lt`, `gte`, `lte`, `in`, `ini`, `contains`, `startsWith`, `isNull`.
 - `eq` uses `json @> $::jsonb` containment (hits the GIN `jsonb_path_ops` index).
   Other operators use `json->>'field'` extraction (seq scan unless an expression
   index exists — see admin mutations below).
 - `neq` semantically means "not equal OR field absent" (includes NULLs).
 - `contains` min 3 chars; `startsWith` min 1 char. Both escape `\`, `%`, `_` via `ESCAPE '\\'`.
 - `in` uses `= ANY($::text[])` — single array param instead of expanded `IN (...)`.
+- `eqi` / `ini` are case-insensitive variants of `eq` / `in` (ASCII fold via
+  Postgres `lower(... COLLATE "C")`; Go pre-lowers the bound parameter via
+  `asciiToLower` to mirror that byte-for-byte). Non-ASCII characters pass
+  through unchanged on both sides (no Unicode confusable folding). Not
+  indexable on their own — pair with a column-level filter like
+  `did { eq: ... }` for selectivity. Available only on `StringFilterInput`;
+  not exposed on `DIDFilterInput` (DIDs are spec-case-sensitive). The
+  **`-i` suffix is the going-forward convention** for case-insensitive
+  operator variants on `StringFilterInput`; future additions should
+  follow this shape so the contract stays self-documenting in
+  introspection.
 - Nested paths via `__` separator (e.g., `metadata__source` →
   `json->'metadata'->>'source'`). Max 3 nesting levels. Auto-generating nested
   WhereInput fields from lexicons is deferred (issue #40); SQL layer supports it.

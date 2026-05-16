@@ -1,5 +1,75 @@
 # Changelog
 
+## Unreleased — feat(graphql): case-insensitive string operators (`eqi`, `ini`)
+
+Adds two opt-in operators to `StringFilterInput` so consumers can
+match free-form string discriminators (notably
+`org.hypercerts.collection.type` = `"project"` / `"Project"` /
+`"PROJECT"`) without depending on producer-side normalization. The
+existing `eq` / `in` operators remain unchanged and case-sensitive;
+this change is purely additive.
+
+The `-i` suffix is the going-forward convention for
+case-insensitive operator variants on `StringFilterInput`. Pinned
+in the type-level description and AGENTS.md so future operators
+follow the shape.
+
+### Server
+
+- **feat(graphql)**: `StringFilterInput.eqi: String` — case-insensitive
+  equality. Emits `lower((json->>'field') COLLATE "C") = $n` with
+  the bound parameter pre-lowered in Go via `asciiToLower`. ASCII
+  fold only; non-ASCII characters pass through unchanged on both
+  sides (no Unicode confusable folding). On its own the operator is
+  not GIN-indexable — pair with a column-level filter like
+  `did { eq: ... }` for selectivity. The `COLLATE "C"` choice keeps
+  the expression IMMUTABLE so a follow-up functional index
+  (`lower((json->>'<field>') COLLATE "C")`) remains an option if a
+  single field becomes a hot case-insensitive target.
+- **feat(graphql)**: `StringFilterInput.ini: [String!]` — case-insensitive
+  IN. Same fold semantics as `eqi`. Bounded `1 <= len <= 50`; the
+  empty list is rejected (matched `OpIn` tightening — see below).
+- **refactor(filter)**: `Validate()` rejects empty `in` lists
+  (`OpIn` and `OpIni` share the same validator). Previously
+  `in: []` emitted `= ANY('{}')` and silently matched nothing —
+  a programmer error rather than a useful query. Listed as a
+  behaviour tightening for consumers running schema-diff gates;
+  the GraphQL surface is otherwise additive and existing
+  non-empty `in:` queries continue to work unchanged.
+- **fix(types)**: `DIDFilterInput.Description` pins the
+  spec-case-sensitivity contract so introspection makes the
+  no-eqi/ini stance self-documenting. DIDs are spec-case-sensitive;
+  case folding would be a spec violation.
+
+### Internal
+
+- `repositories.OpEqi`, `repositories.OpIni`, and `asciiToLower`
+  added to `internal/database/repositories/filter.go`. `asciiToLower`
+  is deliberately not `strings.ToLower`: it folds only ASCII A-Z
+  so the bound parameter stays byte-identical to Postgres
+  `lower(... COLLATE "C")` for any input (including Turkish `İ`,
+  Cyrillic look-alikes, etc.).
+- Coverage: unit tests pin the SQL shape, ASCII-only fold, adversarial
+  input handling, field-name injection rejection, type / length /
+  IsJSON validation, and the `MaxInListSize` boundary (N=50 succeeds,
+  N+1 rejected). Builder-level tests pin that `eqi`/`ini` appear on
+  `StringFilterInput`-typed properties of a real generated WhereInput
+  (e.g. `collection.type`) and do NOT appear on `DIDFilterInput`-typed
+  fields (`did`, `contributor`, `subject`).
+- Plan and review trail under
+  `docs/case-insensitive-string-eq/{plan,review-round-1}.md`.
+
+### Notes for consumers
+
+- Additive on the GraphQL surface; no existing query shapes change.
+  Schema-diff CI gates (Apollo Rover, GraphQL Inspector) will flag
+  the new fields as a non-breaking addition.
+- Behaviour change: `in: []` (and `ini: []`) now error out rather
+  than match nothing. Consumers should treat this as a fix — an
+  empty IN list is a programmer error, not a useful query shape.
+
+---
+
 ## Unreleased — chore: review follow-ups for 2026-05-13 audit (P0 + selected P1)
 
 Lands the fixes from the six-reviewer audit recorded in
