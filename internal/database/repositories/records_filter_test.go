@@ -1422,3 +1422,283 @@ func TestContributorFilter_OverlongArrayGuard(t *testing.T) {
 		t.Errorf("in-filter matched overlong-array record: %+v", got)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// Case-insensitive operators: eqi / ini (Postgres-backed integration)
+// -----------------------------------------------------------------------------
+
+// seedCaseInsensitiveRecords inserts a mixed-casing fixture for the
+// "all projects of a user" view exercised by the certified-app.
+// The collection NSID matches the live deployment's
+// `org.hypercerts.collection` lexicon (the testdata lexicon at
+// `org.hypercerts.claim.collection` is documented as stale in issue
+// #68); the JSON shape is the same regardless.
+func seedCaseInsensitiveRecords(t *testing.T) *testutil.TestDB {
+	t.Helper()
+	db := testutil.SetupTestDB(t)
+	ctx := context.Background()
+
+	type rec struct {
+		uri, did, body string
+	}
+	const col = "org.hypercerts.collection"
+	records := []rec{
+		// Same author, different casings — all should match `eqi:"project"`.
+		{"at://did:plc:alice/" + col + "/r1", "did:plc:alice", `{"type":"project","title":"P1"}`},
+		{"at://did:plc:alice/" + col + "/r2", "did:plc:alice", `{"type":"Project","title":"P2"}`},
+		{"at://did:plc:alice/" + col + "/r3", "did:plc:alice", `{"type":"PROJECT","title":"P3"}`},
+		{"at://did:plc:alice/" + col + "/r4", "did:plc:alice", `{"type":"PrOjEcT","title":"P4"}`},
+		// Same author, different type — NOT a project.
+		{"at://did:plc:alice/" + col + "/r5", "did:plc:alice", `{"type":"projects","title":"NotAProject"}`},
+		{"at://did:plc:alice/" + col + "/r6", "did:plc:alice", `{"type":"favorites","title":"Favs"}`},
+		{"at://did:plc:alice/" + col + "/r7", "did:plc:alice", `{"type":"FAVORITES","title":"FavsUpper"}`},
+		// Whitespace producer drift — eqi must NOT trim.
+		{"at://did:plc:alice/" + col + "/r8", "did:plc:alice", `{"type":" project ","title":"WhitespaceDrift"}`},
+		// Empty-string type — distinct from absent type.
+		{"at://did:plc:alice/" + col + "/r9", "did:plc:alice", `{"type":"","title":"EmptyType"}`},
+		// Non-ASCII look-alike: Cyrillic 'р' (U+0440), not Latin 'p'.
+		{"at://did:plc:alice/" + col + "/r10", "did:plc:alice", `{"type":"р","title":"Cyrillic"}`},
+		// Different author with a Project — for did-scoping tests.
+		{"at://did:plc:bob/" + col + "/r11", "did:plc:bob", `{"type":"Project","title":"BobProject"}`},
+	}
+	for _, r := range records {
+		if _, err := db.Records.Insert(ctx, r.uri, "cid"+r.uri, r.did, col, r.body); err != nil {
+			t.Fatalf("insert %s: %v", r.uri, err)
+		}
+	}
+	return db
+}
+
+// typeFilterGroup wraps a single FieldFilter on `type` in a FilterGroup,
+// reusing the shape extractFieldFiltersRecursive emits at runtime.
+func typeFilterGroup(op repositories.FilterOperator, value interface{}) *repositories.FilterGroup {
+	return &repositories.FilterGroup{
+		Operator: repositories.GroupAND,
+		Filters: []repositories.FieldFilter{{
+			FieldName: "type",
+			Operator:  op,
+			Value:     value,
+			IsJSON:    true,
+		}},
+	}
+}
+
+func TestGetByCollectionFiltered_Eqi_MatchesAllCasings(t *testing.T) {
+	db := seedCaseInsensitiveRecords(t)
+	ctx := context.Background()
+	fg := typeFilterGroup(repositories.OpEqi, "project")
+	got, err := db.Records.GetByCollectionFiltered(ctx, "org.hypercerts.collection",
+		100, "", "", repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	// r1..r4 (Alice's four casings) + r11 (Bob's Project) match; r5 ("projects"),
+	// r6/r7 (favorites), r8 (whitespace drift), r9 (empty), r10 (Cyrillic) do not.
+	wantURIs := map[string]bool{
+		"at://did:plc:alice/org.hypercerts.collection/r1": false,
+		"at://did:plc:alice/org.hypercerts.collection/r2": false,
+		"at://did:plc:alice/org.hypercerts.collection/r3": false,
+		"at://did:plc:alice/org.hypercerts.collection/r4": false,
+		"at://did:plc:bob/org.hypercerts.collection/r11":  false,
+	}
+	if len(got) != len(wantURIs) {
+		t.Errorf("got %d records, want %d", len(got), len(wantURIs))
+	}
+	for _, rec := range got {
+		if _, ok := wantURIs[rec.URI]; !ok {
+			t.Errorf("unexpected match: %s", rec.URI)
+			continue
+		}
+		wantURIs[rec.URI] = true
+	}
+	for uri, seen := range wantURIs {
+		if !seen {
+			t.Errorf("expected match missing: %s", uri)
+		}
+	}
+}
+
+func TestGetByCollectionFiltered_Eqi_AndDid_ProjectsOfUser(t *testing.T) {
+	// The certified-app's actual use case: "all projects of a user."
+	db := seedCaseInsensitiveRecords(t)
+	ctx := context.Background()
+	// did { eq } AND type { eqi }
+	fg := &repositories.FilterGroup{
+		Operator: repositories.GroupAND,
+		Filters: []repositories.FieldFilter{
+			{FieldName: "did", Operator: repositories.OpEq, Value: "did:plc:alice", IsJSON: false},
+			{FieldName: "type", Operator: repositories.OpEqi, Value: "project", IsJSON: true},
+		},
+	}
+	got, err := db.Records.GetByCollectionFiltered(ctx, "org.hypercerts.collection",
+		100, "", "", repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(got) != 4 {
+		t.Errorf("expected 4 of Alice's projects, got %d", len(got))
+	}
+	for _, rec := range got {
+		if rec.DID != "did:plc:alice" {
+			t.Errorf("expected did:plc:alice, got %s", rec.DID)
+		}
+	}
+}
+
+func TestGetByCollectionFiltered_Eqi_DoesNotTrim(t *testing.T) {
+	db := seedCaseInsensitiveRecords(t)
+	ctx := context.Background()
+	// eqi:"project" must NOT match the " project " whitespace-drift
+	// record (r8). The test in `MatchesAllCasings` covered the
+	// positive matches; this pins the negative side explicitly.
+	fg := typeFilterGroup(repositories.OpEqi, "project")
+	got, err := db.Records.GetByCollectionFiltered(ctx, "org.hypercerts.collection",
+		100, "", "", repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	for _, rec := range got {
+		if strings.HasSuffix(rec.URI, "/r8") {
+			t.Errorf("eqi unexpectedly matched whitespace-drift record %s", rec.URI)
+		}
+	}
+}
+
+func TestGetByCollectionFiltered_Eqi_EmptyStringMatchesOnlyEmpty(t *testing.T) {
+	db := seedCaseInsensitiveRecords(t)
+	ctx := context.Background()
+	fg := typeFilterGroup(repositories.OpEqi, "")
+	got, err := db.Records.GetByCollectionFiltered(ctx, "org.hypercerts.collection",
+		100, "", "", repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 empty-type record, got %d (%+v)", len(got), got)
+	}
+	if !strings.HasSuffix(got[0].URI, "/r9") {
+		t.Errorf("expected r9, got %s", got[0].URI)
+	}
+}
+
+func TestGetByCollectionFiltered_Eqi_NoUnicodeFold(t *testing.T) {
+	// Cyrillic 'р' (U+0440) record vs Latin 'eqi:"p"' (U+0070).
+	// asciiToLower + lower(... COLLATE "C") only fold ASCII A-Z, so
+	// the two characters remain distinct. Pins R3 nit #11.
+	db := seedCaseInsensitiveRecords(t)
+	ctx := context.Background()
+	fg := typeFilterGroup(repositories.OpEqi, "p")
+	got, err := db.Records.GetByCollectionFiltered(ctx, "org.hypercerts.collection",
+		100, "", "", repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	for _, rec := range got {
+		if strings.HasSuffix(rec.URI, "/r10") {
+			t.Errorf("eqi unexpectedly folded Cyrillic 'р' onto Latin 'p': %s", rec.URI)
+		}
+	}
+}
+
+func TestGetByCollectionFiltered_Ini_MultiValue(t *testing.T) {
+	db := seedCaseInsensitiveRecords(t)
+	ctx := context.Background()
+	fg := typeFilterGroup(repositories.OpIni, []interface{}{"project", "favorites"})
+	got, err := db.Records.GetByCollectionFiltered(ctx, "org.hypercerts.collection",
+		100, "", "", repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	// r1..r4 (Alice's projects), r6/r7 (Alice's favorites, both casings),
+	// r11 (Bob's Project) = 7 total. r5 "projects" must not match.
+	if len(got) != 7 {
+		t.Errorf("expected 7 matches, got %d (%+v)", len(got), uriList(got))
+	}
+	for _, rec := range got {
+		if strings.HasSuffix(rec.URI, "/r5") {
+			t.Errorf("ini matched 'projects' (substring of 'project') — wrong semantics: %s", rec.URI)
+		}
+	}
+}
+
+func TestGetByCollectionFiltered_Eq_Regression_CaseSensitive(t *testing.T) {
+	// Regression for acceptance criterion 6: `eq` continues to be
+	// case-sensitive. If a future refactor flips this, the certified-app's
+	// existing `eq` queries silently change behaviour.
+	db := seedCaseInsensitiveRecords(t)
+	ctx := context.Background()
+	fg := typeFilterGroup(repositories.OpEq, "project")
+	got, err := db.Records.GetByCollectionFiltered(ctx, "org.hypercerts.collection",
+		100, "", "", repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	// Only r1 ("project" lowercase) matches.
+	if len(got) != 1 || !strings.HasSuffix(got[0].URI, "/r1") {
+		t.Errorf("eq case-sensitive contract broken; expected only r1, got %+v", uriList(got))
+	}
+}
+
+func TestGetByCollectionFiltered_In_Regression_CaseSensitive(t *testing.T) {
+	db := seedCaseInsensitiveRecords(t)
+	ctx := context.Background()
+	fg := typeFilterGroup(repositories.OpIn, []interface{}{"project", "favorites"})
+	got, err := db.Records.GetByCollectionFiltered(ctx, "org.hypercerts.collection",
+		100, "", "", repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	// Only r1 ("project") + r6 ("favorites") — case-sensitive.
+	if len(got) != 2 {
+		t.Errorf("in case-sensitive contract broken; expected 2, got %d (%+v)", len(got), uriList(got))
+	}
+}
+
+func TestGetByCollectionFiltered_Eqi_OrComposition(t *testing.T) {
+	// Pins `_or` composition: "rows authored by Alice OR with
+	// type=project case-insensitive." Should return Alice's full set
+	// (11 minus the Bob row) plus Bob's Project record.
+	db := seedCaseInsensitiveRecords(t)
+	ctx := context.Background()
+	fg := &repositories.FilterGroup{
+		Operator: repositories.GroupAND,
+		Children: []repositories.FilterGroup{{
+			Operator: repositories.GroupOR,
+			Filters: []repositories.FieldFilter{
+				{FieldName: "did", Operator: repositories.OpEq, Value: "did:plc:alice", IsJSON: false},
+				{FieldName: "type", Operator: repositories.OpEqi, Value: "project", IsJSON: true},
+			},
+		}},
+	}
+	got, err := db.Records.GetByCollectionFiltered(ctx, "org.hypercerts.collection",
+		100, "", "", repositories.RecordFilter{}, nil, fg)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	// 10 Alice rows (r1..r10) + 1 Bob row (r11) = 11 total.
+	if len(got) != 11 {
+		t.Errorf("expected 11 records, got %d (%+v)", len(got), uriList(got))
+	}
+}
+
+func TestGetByCollectionFiltered_Eqi_RejectsEmptyIni(t *testing.T) {
+	db := seedCaseInsensitiveRecords(t)
+	ctx := context.Background()
+	fg := typeFilterGroup(repositories.OpIni, []interface{}{})
+	_, err := db.Records.GetByCollectionFiltered(ctx, "org.hypercerts.collection",
+		100, "", "", repositories.RecordFilter{}, nil, fg)
+	if err == nil {
+		t.Fatalf("expected error on empty ini list, got nil")
+	}
+	if !strings.Contains(err.Error(), "at least 1") {
+		t.Errorf("error should mention the min/max contract; got: %v", err)
+	}
+}
+
+func uriList(recs []*repositories.Record) []string {
+	out := make([]string, len(recs))
+	for i, r := range recs {
+		out[i] = r.URI
+	}
+	return out
+}
