@@ -28,7 +28,7 @@ var StringFilterInput = graphql.NewInputObject(graphql.InputObjectConfig{
 	},
 })
 
-const stringEqiDescription = `Equal to (case-insensitive, ASCII fold via Postgres lower(... COLLATE "C")). Both sides are lower-cased before comparison; non-ASCII characters pass through unchanged (no Unicode confusable folding). On its own, eqi does not use the JSONB GIN index — pair it with a column-level filter such as did { eq: ... } for selective queries. No-op for content hashes (cid, cid-link) and lowercase TIDs; use eq for exact-identity match on DID-bearing strings such as at-uri authorities.`
+const stringEqiDescription = `Equal to (case-insensitive, ASCII fold via Postgres lower(... COLLATE "C")). Both sides are lower-cased before comparison; non-ASCII characters pass through unchanged (no Unicode confusable folding). On its own, eqi does not use the JSONB GIN index — pair it with a column-level filter such as did { eq: ... } for selective queries. For spec-case-sensitive identifiers (cid, cid-link, lowercase TIDs, DID authorities inside at-uri values) prefer eq for the cheaper GIN-indexable comparison; eqi still evaluates correctly but provides no semantic benefit on those types.`
 
 const stringIniDescription = `In list (case-insensitive, ASCII fold via Postgres lower(... COLLATE "C"); 1-50 values). Both sides are lower-cased; same non-ASCII and indexing caveats as eqi. An empty list is rejected.`
 
@@ -93,7 +93,7 @@ var DateTimeFilterInput = graphql.NewInputObject(graphql.InputObjectConfig{
 // DIDFilterInput provides DID-specific operators (column-level, not JSON).
 var DIDFilterInput = graphql.NewInputObject(graphql.InputObjectConfig{
 	Name:        "DIDFilterInput",
-	Description: "Filter conditions for DID fields (column-level, optimized). DIDs are spec-case-sensitive; no case-insensitive operators are provided on this filter input.",
+	Description: "Filter conditions for DID fields (column-level, optimized). DIDs are spec-case-sensitive; no case-insensitive operators are provided on this filter input (per W3C DID Core §3.1 — case folding would change identifier identity).",
 	Fields: graphql.InputObjectConfigFieldMap{
 		"eq": {Type: graphql.String, Description: "Equal to a specific DID"},
 		"in": {Type: graphql.NewList(graphql.String), Description: "In list of DIDs (max 50)"},
@@ -119,8 +119,14 @@ func FilterInputForLexiconType(propType string) *graphql.InputObject {
 	case "at-uri", "tid":
 		return StringFilterInput
 	case "cid", "cid-link":
-		// Restricted: only eq and in (no pattern matching on content hashes).
-		return StringFilterInput // reuse StringFilterInput; unused ops are just ignored
+		// Content hashes reuse StringFilterInput. eq / in are the
+		// natural operators; eqi / contains / startsWith are
+		// semantically redundant (the value is opaque base32/base58),
+		// but documented in the operator descriptions rather than
+		// refused at validation — the precedent set by
+		// contains/startsWith is that operator restrictions are
+		// per-operator, not per-type.
+		return StringFilterInput
 	default:
 		// Arrays, refs, unions, objects, blobs, bytes — not filterable.
 		return nil

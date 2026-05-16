@@ -57,7 +57,7 @@ follow the shape.
   (e.g. `collection.type`) and do NOT appear on `DIDFilterInput`-typed
   fields (`did`, `contributor`, `subject`).
 - Plan and review trail under
-  `docs/case-insensitive-string-eq/{plan,review-round-1}.md`.
+  `docs/case-insensitive-string-eq/{plan,review-round-1,review-round-2}.md`.
 
 ### Notes for consumers
 
@@ -67,6 +67,12 @@ follow the shape.
 - Behaviour change: `in: []` (and `ini: []`) now error out rather
   than match nothing. Consumers should treat this as a fix — an
   empty IN list is a programmer error, not a useful query shape.
+  Applies to every `FilterKind` (the scalar path *and* the
+  contributor / subject DID-only paths); consumers building
+  filters directly in Go should audit call-sites accordingly.
+- Schema-diff tools do NOT surface the empty-IN tightening — it
+  is a runtime-only change. Schema-diff CI is a poor signal for
+  this class of behaviour shift; consumers must audit manually.
 
 ---
 

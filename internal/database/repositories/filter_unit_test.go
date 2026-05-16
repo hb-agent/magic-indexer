@@ -467,6 +467,13 @@ func TestBuildSingleFilter_Eqi_AdversarialValue(t *testing.T) {
 			if clause != wantClause {
 				t.Errorf("clause shape diverged on adversarial input\n got:  %s\n want: %s", clause, wantClause)
 			}
+			// Per-input substring guard: a multi-character adversarial
+			// input must NOT appear as a substring of the SQL string
+			// (single-byte inputs like `"` overlap with our literal
+			// `COLLATE "C"` and are skipped by length).
+			if len(in) >= 2 && strings.Contains(clause, in) {
+				t.Errorf("clause leaked user input %q:\n%s", in, clause)
+			}
 			s, _ := params[0].(string)
 			if s != asciiToLower(in) {
 				t.Errorf("param = %q, want %q (pre-lowered)", s, asciiToLower(in))
@@ -543,8 +550,8 @@ func TestValidate_Ini_EmptyListRejected(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected error, got nil")
 			}
-			if !strings.Contains(err.Error(), "at least 1") || !strings.Contains(err.Error(), "50") {
-				t.Errorf("error should mention min/max; got: %v", err)
+			if !strings.Contains(err.Error(), "1 to 50") {
+				t.Errorf("error should mention unified 1 to 50 range; got: %v", err)
 			}
 		})
 	}
@@ -552,25 +559,49 @@ func TestValidate_Ini_EmptyListRejected(t *testing.T) {
 
 // TestValidate_Ini_AtAndOverMaxInListSize pins the N / N+1 boundary
 // shared with OpIn — mirrors the existing MaxArrayContributorScan
-// boundary-pair pattern.
+// boundary-pair pattern. Exercises both `[]interface{}` and
+// `[]string` branches of validateInListShape so a refactor that
+// splits the cap (e.g. only updates one arm) is caught.
 func TestValidate_Ini_AtAndOverMaxInListSize(t *testing.T) {
-	atMax := make([]interface{}, MaxInListSize)
-	for i := range atMax {
-		atMax[i] = "v"
-	}
-	overMax := append(atMax, "extra") //nolint:gocritic // explicit append for the over-by-one case
-	fOK := FieldFilter{FieldName: "type", Operator: OpIni, Value: atMax, IsJSON: true}
-	if err := fOK.Validate(); err != nil {
-		t.Errorf("at MaxInListSize (%d) should succeed; got: %v", MaxInListSize, err)
-	}
-	fBad := FieldFilter{FieldName: "type", Operator: OpIni, Value: overMax, IsJSON: true}
-	err := fBad.Validate()
-	if err == nil {
-		t.Fatalf("at MaxInListSize+1 (%d) should fail", MaxInListSize+1)
-	}
-	if !strings.Contains(err.Error(), "exceeds maximum") {
-		t.Errorf("error should mention the cap; got: %v", err)
-	}
+	t.Run("interface_slice", func(t *testing.T) {
+		atMax := make([]interface{}, MaxInListSize)
+		for i := range atMax {
+			atMax[i] = "v"
+		}
+		overMax := append(atMax, "extra") //nolint:gocritic // explicit append for the over-by-one case
+		fOK := FieldFilter{FieldName: "type", Operator: OpIni, Value: atMax, IsJSON: true}
+		if err := fOK.Validate(); err != nil {
+			t.Errorf("at MaxInListSize (%d) should succeed; got: %v", MaxInListSize, err)
+		}
+		fBad := FieldFilter{FieldName: "type", Operator: OpIni, Value: overMax, IsJSON: true}
+		err := fBad.Validate()
+		if err == nil {
+			t.Fatalf("at MaxInListSize+1 (%d) should fail", MaxInListSize+1)
+		}
+		if !strings.Contains(err.Error(), "1 to 50") {
+			t.Errorf("error should mention unified 1 to 50 range; got: %v", err)
+		}
+	})
+
+	t.Run("string_slice", func(t *testing.T) {
+		atMax := make([]string, MaxInListSize)
+		for i := range atMax {
+			atMax[i] = "v"
+		}
+		overMax := append(atMax, "extra") //nolint:gocritic // explicit append for the over-by-one case
+		fOK := FieldFilter{FieldName: "type", Operator: OpIni, Value: atMax, IsJSON: true}
+		if err := fOK.Validate(); err != nil {
+			t.Errorf("[]string at MaxInListSize (%d) should succeed; got: %v", MaxInListSize, err)
+		}
+		fBad := FieldFilter{FieldName: "type", Operator: OpIni, Value: overMax, IsJSON: true}
+		err := fBad.Validate()
+		if err == nil {
+			t.Fatalf("[]string at MaxInListSize+1 (%d) should fail", MaxInListSize+1)
+		}
+		if !strings.Contains(err.Error(), "1 to 50") {
+			t.Errorf("error should mention unified 1 to 50 range; got: %v", err)
+		}
+	})
 }
 
 // TestValidate_Ini_RejectsColumnLevel — defense-in-depth guard.
@@ -619,6 +650,13 @@ func TestAsciiToLower(t *testing.T) {
 		{"PROJECT", "project"},
 		{"PrOjEcT-123", "project-123"},
 		{"abc-XYZ_!@#", "abc-xyz_!@#"},
+		// Boundary bytes adjacent to A-Z must NOT fold. If the helper
+		// switches from `>= 'A' && <= 'Z'` to `> '@' && < '['` (or
+		// similar off-by-one prone forms), these catch it.
+		{"@ABC[`abc{", "@abc[`abc{"},
+		// All-digits / all-punctuation pass through.
+		{"0123456789", "0123456789"},
+		{"!#$%&'()*+,-./", "!#$%&'()*+,-./"},
 		// Non-ASCII passes through unchanged. Cyrillic 'Р' (U+0420)
 		// is NOT folded to Latin 'p' or Cyrillic 'р' — `COLLATE "C"`
 		// only folds ASCII A-Z, and asciiToLower mirrors that.
@@ -637,5 +675,37 @@ func TestAsciiToLower(t *testing.T) {
 				t.Errorf("asciiToLower(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+
+	// Long input — exercises any future small-buffer fast path that
+	// might branch on length. The pre-scan / mutation-loop forms
+	// should both handle inputs well past any reasonable threshold.
+	long := strings.Repeat("AbCdEfGhIjKlMnOpQrStUvWxYz", 10)
+	wantLong := strings.Repeat("abcdefghijklmnopqrstuvwxyz", 10)
+	if got := asciiToLower(long); got != wantLong {
+		t.Errorf("asciiToLower(long) mismatch:\n got:  %q\n want: %q", got, wantLong)
+	}
+
+	// All-256-byte sweep: every byte in 0x41..0x5A folds to itself+0x20;
+	// every other byte passes through.
+	allBytes := make([]byte, 256)
+	for i := range allBytes {
+		allBytes[i] = byte(i)
+	}
+	wantAll := make([]byte, 256)
+	for i := range wantAll {
+		if i >= 'A' && i <= 'Z' {
+			wantAll[i] = byte(i) + ('a' - 'A')
+		} else {
+			wantAll[i] = byte(i)
+		}
+	}
+	if got := asciiToLower(string(allBytes)); got != string(wantAll) {
+		t.Errorf("asciiToLower all-256-bytes mismatch at:")
+		for i := 0; i < 256; i++ {
+			if got[i] != wantAll[i] {
+				t.Errorf("  byte 0x%02x: got 0x%02x, want 0x%02x", i, got[i], wantAll[i])
+			}
+		}
 	}
 }

@@ -656,4 +656,42 @@ func TestStringFilterInput_CaseInsensitiveOperators_OnGeneratedWhereInput(t *tes
 			}
 		}
 	}
+
+	// `_or` and `_and` are self-referential — the element type is
+	// the same WhereInput. Pin that the recursive composition still
+	// surfaces eqi/ini so a future schema-builder refactor that
+	// gates operators differently under composition doesn't regress
+	// silently.
+	for _, composer := range []string{"_or", "_and"} {
+		field, ok := collectionWhere[composer]
+		if !ok {
+			t.Errorf("%s composer missing on collection WhereInput", composer)
+			continue
+		}
+		list, isList := field.Type.(*graphql.List)
+		if !isList {
+			t.Errorf("%s composer type = %T, want graphql.List", composer, field.Type)
+			continue
+		}
+		elem, isObj := list.OfType.(*graphql.InputObject)
+		if !isObj {
+			t.Errorf("%s element type = %T, want graphql.InputObject", composer, list.OfType)
+			continue
+		}
+		nestedTypeField, ok := elem.Fields()["type"]
+		if !ok {
+			t.Errorf("%s element WhereInput missing `type` field", composer)
+			continue
+		}
+		nestedStringFilter, isObj := nestedTypeField.Type.(*graphql.InputObject)
+		if !isObj {
+			t.Errorf("%s element type.Type = %T, want graphql.InputObject", composer, nestedTypeField.Type)
+			continue
+		}
+		for _, op := range []string{"eqi", "ini"} {
+			if _, present := nestedStringFilter.Fields()[op]; !present {
+				t.Errorf("%s element missing %q on type field (StringFilterInput)", composer, op)
+			}
+		}
+	}
 }

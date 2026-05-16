@@ -378,15 +378,14 @@ func (f *FieldFilter) Validate() error {
 
 // validateInListShape enforces the size / scalar-element / non-empty
 // contract shared by `in` and `ini`. opName is used in error messages
-// so the consumer sees the GraphQL-visible operator name.
+// so the consumer sees the GraphQL-visible operator name. Lower- and
+// upper-bound messages share the "1 to N" phrasing so consumers
+// parsing for the cap don't need two regexes.
 func validateInListShape(value interface{}, opName string) error {
 	switch v := value.(type) {
 	case []interface{}:
-		if len(v) == 0 {
-			return fmt.Errorf("%s list must contain at least 1 value (max %d)", opName, MaxInListSize)
-		}
-		if len(v) > MaxInListSize {
-			return fmt.Errorf("%s list exceeds maximum of %d values", opName, MaxInListSize)
+		if len(v) < 1 || len(v) > MaxInListSize {
+			return fmt.Errorf("%s list must contain 1 to %d values (got %d)", opName, MaxInListSize, len(v))
 		}
 		for _, item := range v {
 			if _, ok := item.(map[string]interface{}); ok {
@@ -397,11 +396,8 @@ func validateInListShape(value interface{}, opName string) error {
 			}
 		}
 	case []string:
-		if len(v) == 0 {
-			return fmt.Errorf("%s list must contain at least 1 value (max %d)", opName, MaxInListSize)
-		}
-		if len(v) > MaxInListSize {
-			return fmt.Errorf("%s list exceeds maximum of %d values", opName, MaxInListSize)
+		if len(v) < 1 || len(v) > MaxInListSize {
+			return fmt.Errorf("%s list must contain 1 to %d values (got %d)", opName, MaxInListSize, len(v))
 		}
 	default:
 		return fmt.Errorf("%s operator requires a list value", opName)
