@@ -65,12 +65,14 @@ func TestRecordsRepository_LabelFilter_Include(t *testing.T) {
 	db := seedLabeledRecords(t)
 	ctx := context.Background()
 
-	got, err := db.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
+	got, err := db.Records.GetByCollectionFiltered(
 		ctx, "social.cert.hypercert", 10, "", "",
-		repositories.LabelFilter{
-			LabelerSrcs: []string{"did:plc:labelerz"},
-			Include:     []string{"high-quality"},
-		},
+		repositories.RecordFilter{
+			Labels: repositories.LabelFilter{
+				LabelerSrcs: []string{"did:plc:labelerz"},
+				Include:     []string{"high-quality"},
+			},
+		}, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("query: %v", err)
@@ -88,12 +90,14 @@ func TestRecordsRepository_LabelFilter_Exclude(t *testing.T) {
 	db := seedLabeledRecords(t)
 	ctx := context.Background()
 
-	got, err := db.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
+	got, err := db.Records.GetByCollectionFiltered(
 		ctx, "social.cert.hypercert", 10, "", "",
-		repositories.LabelFilter{
-			LabelerSrcs: []string{"did:plc:labelerz"},
-			Exclude:     []string{"draft"},
-		},
+		repositories.RecordFilter{
+			Labels: repositories.LabelFilter{
+				LabelerSrcs: []string{"did:plc:labelerz"},
+				Exclude:     []string{"draft"},
+			},
+		}, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("query: %v", err)
@@ -116,9 +120,9 @@ func TestRecordsRepository_LabelFilter_Empty_DelegatesUnfiltered(t *testing.T) {
 	db := seedLabeledRecords(t)
 	ctx := context.Background()
 
-	got, err := db.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
+	got, err := db.Records.GetByCollectionFiltered(
 		ctx, "social.cert.hypercert", 10, "", "",
-		repositories.LabelFilter{},
+		repositories.RecordFilter{Labels: repositories.LabelFilter{}}, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("query: %v", err)
@@ -142,12 +146,14 @@ func TestRecordsRepository_LabelFilter_HonorsNegation(t *testing.T) {
 		t.Fatalf("negate: %v", err)
 	}
 
-	got, err := db.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
+	got, err := db.Records.GetByCollectionFiltered(
 		ctx, "social.cert.hypercert", 10, "", "",
-		repositories.LabelFilter{
-			LabelerSrcs: []string{"did:plc:labelerz"},
-			Include:     []string{"high-quality"},
-		},
+		repositories.RecordFilter{
+			Labels: repositories.LabelFilter{
+				LabelerSrcs: []string{"did:plc:labelerz"},
+				Include:     []string{"high-quality"},
+			},
+		}, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("query: %v", err)
@@ -184,11 +190,13 @@ func TestRecordsRepository_LabelFilter_NeutralAcrossLabelers(t *testing.T) {
 	}
 
 	// Neutral filter — no LabelerSrcs → union across all labelers.
-	got, err := db.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
+	got, err := db.Records.GetByCollectionFiltered(
 		ctx, "social.cert.hypercert", 10, "", "",
-		repositories.LabelFilter{
-			Include: []string{"high-quality"},
-		},
+		repositories.RecordFilter{
+			Labels: repositories.LabelFilter{
+				Include: []string{"high-quality"},
+			},
+		}, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("query (neutral): %v", err)
@@ -199,12 +207,14 @@ func TestRecordsRepository_LabelFilter_NeutralAcrossLabelers(t *testing.T) {
 	}
 
 	// Narrowed to just the second labeler — should only see rec3.
-	got, err = db.Records.GetByCollectionWithLabelFilterAndKeysetCursor(
+	got, err = db.Records.GetByCollectionFiltered(
 		ctx, "social.cert.hypercert", 10, "", "",
-		repositories.LabelFilter{
-			LabelerSrcs: []string{"did:plc:labelerz2"},
-			Include:     []string{"high-quality"},
-		},
+		repositories.RecordFilter{
+			Labels: repositories.LabelFilter{
+				LabelerSrcs: []string{"did:plc:labelerz2"},
+				Include:     []string{"high-quality"},
+			},
+		}, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("query (scoped): %v", err)
