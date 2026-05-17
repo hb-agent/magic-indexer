@@ -1113,7 +1113,8 @@ func startJetstream(
 		notifService := notifications.NewService(notifRepo)
 		notifService.Register(notifextractors.NewEndorsementNotifier())
 		notifService.Register(notifextractors.NewActivityContributorNotifier())
-		processor.RecordHooks = append(processor.RecordHooks, notifService.Hook())
+		h := notifService.Hook()
+		processor.Hook = &h
 		slog.Info("Notifications subsystem enabled",
 			"extractors", []string{"endorsement", "activity-contributor"})
 	}
