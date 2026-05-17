@@ -25,7 +25,11 @@ func NewIndexHandler(processor *ingestion.RecordProcessor, actors *repositories.
 }
 
 // HandleRecord processes a record event by delegating to RecordProcessor.
-func (h *IndexHandler) HandleRecord(ctx context.Context, event *RecordEvent) error {
+// sourceEventID is the Tap envelope's event.id (caller passes it in
+// so the handler doesn't have to know about the envelope shape). It
+// flows through to LogActivity as the dedup key against redelivered
+// events on Tap-ack failure.
+func (h *IndexHandler) HandleRecord(ctx context.Context, event *RecordEvent, sourceEventID int64) error {
 	slog.Debug("Tap record event",
 		"action", event.Action,
 		"did", event.DID,
@@ -35,13 +39,14 @@ func (h *IndexHandler) HandleRecord(ctx context.Context, event *RecordEvent) err
 	)
 
 	return h.processor.ProcessRecord(ctx, ingestion.ProcessOp{
-		DID:        event.DID,
-		URI:        fmt.Sprintf("at://%s/%s/%s", event.DID, event.Collection, event.RKey),
-		Collection: event.Collection,
-		RKey:       event.RKey,
-		CID:        event.CID,
-		Operation:  ingestion.Operation(event.Action),
-		Record:     event.Record,
+		DID:           event.DID,
+		URI:           fmt.Sprintf("at://%s/%s/%s", event.DID, event.Collection, event.RKey),
+		Collection:    event.Collection,
+		RKey:          event.RKey,
+		CID:           event.CID,
+		Operation:     ingestion.Operation(event.Action),
+		Record:        event.Record,
+		SourceEventID: &sourceEventID,
 	})
 }
 

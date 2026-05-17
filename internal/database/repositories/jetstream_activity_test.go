@@ -19,7 +19,7 @@ func TestJetstreamActivity_LogActivity(t *testing.T) {
 	repo := setupActivityTest(t)
 	ctx := context.Background()
 
-	id, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "abc123", `{"type":"create"}`)
+	id, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "abc123", `{"type":"create"}`, nil)
 	if err != nil {
 		t.Fatalf("LogActivity() error = %v", err)
 	}
@@ -56,7 +56,7 @@ func TestJetstreamActivity_LogActivity_EmptyEventJSON(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			id, err := repo.LogActivity(ctx, time.Now(), "delete", "app.bsky.feed.post", "did:plc:test1", "abc123", tc.eventJSON)
+			id, err := repo.LogActivity(ctx, time.Now(), "delete", "app.bsky.feed.post", "did:plc:test1", "abc123", tc.eventJSON, nil)
 			if err != nil {
 				t.Fatalf("LogActivity() error = %v", err)
 			}
@@ -71,7 +71,7 @@ func TestJetstreamActivity_LogActivityWithStatus(t *testing.T) {
 	repo := setupActivityTest(t)
 	ctx := context.Background()
 
-	id, err := repo.LogActivityWithStatus(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "abc123", `{"type":"create"}`, "success")
+	id, err := repo.LogActivityWithStatus(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "abc123", `{"type":"create"}`, "success", nil)
 	if err != nil {
 		t.Fatalf("LogActivityWithStatus() error = %v", err)
 	}
@@ -96,7 +96,7 @@ func TestJetstreamActivity_UpdateStatus(t *testing.T) {
 	repo := setupActivityTest(t)
 	ctx := context.Background()
 
-	id, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "abc123", `{"type":"create"}`)
+	id, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "abc123", `{"type":"create"}`, nil)
 	if err != nil {
 		t.Fatalf("LogActivity() error = %v", err)
 	}
@@ -133,7 +133,7 @@ func TestJetstreamActivity_GetRecentActivity(t *testing.T) {
 
 	// Log several entries with recent timestamps
 	for i := 0; i < 3; i++ {
-		_, err := repo.LogActivity(ctx, now, "create", "app.bsky.feed.post", "did:plc:test1", "rkey", `{}`)
+		_, err := repo.LogActivity(ctx, now, "create", "app.bsky.feed.post", "did:plc:test1", "rkey", `{}`, nil)
 		if err != nil {
 			t.Fatalf("LogActivity() error = %v", err)
 		}
@@ -157,7 +157,7 @@ func TestJetstreamActivity_GetActivityBuckets(t *testing.T) {
 	// Log activities with different operations
 	operations := []string{"create", "update", "delete"}
 	for _, op := range operations {
-		_, err := repo.LogActivity(ctx, now, op, "app.bsky.feed.post", "did:plc:test1", "rkey", `{}`)
+		_, err := repo.LogActivity(ctx, now, op, "app.bsky.feed.post", "did:plc:test1", "rkey", `{}`, nil)
 		if err != nil {
 			t.Fatalf("LogActivity() error = %v", err)
 		}
@@ -186,7 +186,7 @@ func TestJetstreamActivity_CleanupOldActivity(t *testing.T) {
 	ctx := context.Background()
 
 	// Log a recent entry
-	_, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "rkey", `{}`)
+	_, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "rkey", `{}`, nil)
 	if err != nil {
 		t.Fatalf("LogActivity() error = %v", err)
 	}
@@ -221,7 +221,7 @@ func TestJetstreamActivity_GetCount(t *testing.T) {
 
 	// After logging entries
 	for i := 0; i < 3; i++ {
-		_, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "rkey", `{}`)
+		_, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "rkey", `{}`, nil)
 		if err != nil {
 			t.Fatalf("LogActivity() error = %v", err)
 		}
@@ -242,7 +242,7 @@ func TestJetstreamActivity_DeleteAll(t *testing.T) {
 
 	// Insert entries
 	for i := 0; i < 3; i++ {
-		_, err := repo.LogActivity(ctx, time.Now(), "delete", "app.bsky.feed.post", "did:plc:test1", "rkey", `{}`)
+		_, err := repo.LogActivity(ctx, time.Now(), "delete", "app.bsky.feed.post", "did:plc:test1", "rkey", `{}`, nil)
 		if err != nil {
 			t.Fatalf("LogActivity() error = %v", err)
 		}

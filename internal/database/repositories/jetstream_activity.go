@@ -56,24 +56,30 @@ func NewJetstreamActivityRepository(db database.Executor) *JetstreamActivityRepo
 	return &JetstreamActivityRepository{db: db}
 }
 
-// LogActivity logs a new activity entry with 'pending' status and returns the ID.
+// LogActivity logs a new activity entry with 'pending' status and
+// returns the ID. sourceEventID, when non-nil, dedupes redelivered
+// events from the same source (Jetstream time_us / Tap event.id).
+// On dedup hit, returns the existing row's ID so the caller's
+// subsequent UpdateStatus targets that row instead of orphaning a
+// successful redelivery (R1.5 in review-round-1).
 func (r *JetstreamActivityRepository) LogActivity(
 	ctx context.Context,
 	timestamp time.Time,
 	operation, collection, did, rkey, eventJSON string,
+	sourceEventID *int64,
 ) (int64, error) {
-	return r.LogActivityWithStatus(ctx, timestamp, operation, collection, did, rkey, eventJSON, "pending")
+	return r.LogActivityWithStatus(ctx, timestamp, operation, collection, did, rkey, eventJSON, "pending", sourceEventID)
 }
 
-// LogActivityWithStatus logs a new activity entry with a custom status and returns the ID.
+// LogActivityWithStatus logs a new activity entry with a custom
+// status and returns the ID. See LogActivity for sourceEventID
+// semantics.
 func (r *JetstreamActivityRepository) LogActivityWithStatus(
 	ctx context.Context,
 	timestamp time.Time,
 	operation, collection, did, rkey, eventJSON, status string,
+	sourceEventID *int64,
 ) (int64, error) {
-	var sqlStr string
-	var timestampStr string
-
 	// event_json is a JSONB NOT NULL column. The Jetstream consumer
 	// passes string(commit.Record) which is an empty string for delete
 	// operations (no record body). Postgres rejects empty strings as
@@ -83,16 +89,36 @@ func (r *JetstreamActivityRepository) LogActivityWithStatus(
 		eventJSON = "null"
 	}
 
-	// Always store in UTC for consistency
-	utcTime := timestamp.UTC()
-	timestampStr = utcTime.Format(time.RFC3339)
+	// Always store in UTC for consistency.
+	timestampStr := timestamp.UTC().Format(time.RFC3339)
 
-	sqlStr = fmt.Sprintf(`INSERT INTO jetstream_activity
-		(timestamp, operation, collection, did, rkey, status, event_json)
-		VALUES (%s, %s, %s, %s, %s, %s, %s)
-		RETURNING id`,
+	// When sourceEventID is non-nil, use ON CONFLICT DO NOTHING on
+	// the partial unique index (migration 028) to swallow redelivered
+	// events. RETURNING id from an inserted row is straightforward;
+	// the UNION SELECT fallback fetches the existing row's id on
+	// conflict so the caller's subsequent UpdateStatus has a valid
+	// target — without this, a redelivered event's row stays
+	// 'pending' and the orphan janitor eventually marks it
+	// 'orphaned' even though processing succeeded the first time
+	// (R1.5).
+	sqlStr := fmt.Sprintf(`WITH ins AS (
+			INSERT INTO jetstream_activity
+				(timestamp, operation, collection, did, rkey, status, event_json, source_event_id)
+				VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+				ON CONFLICT (source_event_id)
+					WHERE source_event_id IS NOT NULL
+					DO NOTHING
+			RETURNING id
+		)
+		SELECT id FROM ins
+		UNION ALL
+		SELECT id FROM jetstream_activity
+			WHERE source_event_id = %s
+			AND NOT EXISTS (SELECT 1 FROM ins)
+		LIMIT 1`,
 		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-		r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7))
+		r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6),
+		r.db.Placeholder(7), r.db.Placeholder(8), r.db.Placeholder(8))
 
 	params := []database.Value{
 		database.Text(timestampStr),
@@ -102,6 +128,7 @@ func (r *JetstreamActivityRepository) LogActivityWithStatus(
 		database.Text(rkey),
 		database.Text(status),
 		database.Text(eventJSON),
+		database.NullableInt(sourceEventID),
 	}
 
 	var id int64

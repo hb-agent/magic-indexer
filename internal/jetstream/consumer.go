@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GainForest/hypergoat/internal/consumer"
@@ -51,6 +52,43 @@ type Consumer struct {
 	ctxCancel context.CancelFunc
 	clientMu  sync.Mutex
 	running   bool
+
+	// errLog: rate-limited error logging policy — first 5 errors at
+	// full severity, then 1/min so a sustained DB outage doesn't
+	// fill the log with millions of identical lines. Atomic
+	// counters because /metrics scraping may read them concurrently
+	// with the dispatcher goroutine (R1.6).
+	errLog rateLimitedErrLogger
+}
+
+// rateLimitedErrLogger throttles repeated error lines from the
+// hot ingestion path. Mirrors the equivalent type in internal/tap;
+// they're deliberately not shared (A12 — don't refactor for a
+// hypothetical third consumer).
+type rateLimitedErrLogger struct {
+	loudCount     int
+	loudLimit     int
+	throttleEvery time.Duration
+	suppressed    atomic.Int64
+	lastEmit      atomic.Int64 // unix nanoseconds
+}
+
+func (l *rateLimitedErrLogger) log(msg string, args ...any) {
+	if l.loudCount < l.loudLimit {
+		l.loudCount++
+		slog.Error(msg, args...)
+		return
+	}
+	count := l.suppressed.Add(1)
+	now := time.Now().UnixNano()
+	last := l.lastEmit.Load()
+	if time.Duration(now-last) >= l.throttleEvery {
+		if l.lastEmit.CompareAndSwap(last, now) {
+			args = append(args, "occurrences_since_last_log", count)
+			slog.Error(msg+" (rate-limited)", args...)
+			l.suppressed.Store(0)
+		}
+	}
 }
 
 // Stats tracks consumer statistics.
@@ -78,6 +116,10 @@ func NewConsumer(
 		processor:  processor,
 		cursorDone: make(chan struct{}),
 		statsStart: time.Now(),
+		errLog: rateLimitedErrLogger{
+			loudLimit:     5,
+			throttleEvery: time.Minute,
+		},
 	}
 
 	c.cursorFlusher = cursor.NewFlusher(
@@ -241,22 +283,31 @@ func (c *Consumer) processEvents(ctx context.Context, client *Client) {
 			metrics.RecordJetstreamEvent(event.Commit.Collection, string(event.Commit.Operation))
 
 			commit := event.Commit
+			// SourceEventID = TimeUS so LogActivity can dedupe a
+			// redelivered commit on the partial unique index added by
+			// migration 028. Without this, a crash between
+			// LogActivity and record insert produces a duplicate
+			// pending activity row on restart even though CID dedup
+			// catches the record itself.
+			sourceID := event.TimeUS
 			err := c.processor.ProcessRecord(ctx, ingestion.ProcessOp{
-				DID:        event.DID,
-				URI:        commit.URI(event.DID),
-				Collection: commit.Collection,
-				RKey:       commit.RKey,
-				CID:        commit.CID,
-				Operation:  ingestion.Operation(commit.Operation),
-				Record:     commit.Record,
+				DID:           event.DID,
+				URI:           commit.URI(event.DID),
+				Collection:    commit.Collection,
+				RKey:          commit.RKey,
+				CID:           commit.CID,
+				Operation:     ingestion.Operation(commit.Operation),
+				Record:        commit.Record,
+				SourceEventID: &sourceID,
 			})
 			if err != nil {
-				slog.Warn("Failed to handle commit",
+				c.errLog.log("Failed to handle commit",
 					"error", err,
 					"did", event.DID,
 					"collection", commit.Collection,
 				)
 				metrics.RecordJetstreamError()
+				metrics.IngestionError(metrics.IngestionConsumerJetstream)
 				c.statsMu.Lock()
 				c.stats.Errors++
 				c.statsMu.Unlock()

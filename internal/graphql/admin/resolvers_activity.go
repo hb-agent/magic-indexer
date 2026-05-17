@@ -157,7 +157,7 @@ func (r *Resolver) PopulateActivity(ctx context.Context) (int64, error) {
 		timestamp := atproto.ExtractCreatedAt(rec.JSON, time.Now())
 
 		// Log as a successful create operation
-		if _, logErr := r.repos.Activity.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success"); logErr == nil {
+		if _, logErr := r.repos.Activity.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success", nil); logErr == nil {
 			count++
 		}
 		return nil

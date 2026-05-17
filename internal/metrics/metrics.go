@@ -585,3 +585,94 @@ func AdminSettingsChanged(field string) {
 func ResetAllCompleted() {
 	resetAllTotal.Inc()
 }
+
+// --- Ingestion observability (review-2026-05-17 Track 4) ---
+
+// IngestionConsumer constants are the bounded label values for
+// IngestionError so a typo or new consumer name doesn't blow up
+// metric cardinality.
+const (
+	IngestionConsumerJetstream = "jetstream"
+	IngestionConsumerTap       = "tap"
+)
+
+var (
+	activityLogFailedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "hypergoat_activity_log_failed_total",
+			Help: "Activity-log inserts that returned an error from the database. Bumped from warn to error severity by Track 4; this metric is the alertable signal.",
+		},
+	)
+
+	ingestionErrorTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hypergoat_ingestion_error_total",
+			Help: "Errors observed by an ingestion consumer (insert failed, ProcessRecord returned err, etc.), labelled by consumer source.",
+		},
+		[]string{"consumer"},
+	)
+
+	jetstreamEventBufferDepth = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "hypergoat_jetstream_event_buffer_depth",
+			Help: "Current depth of the in-process Jetstream events channel. Combined with hypergoat_jetstream_event_buffer_capacity, an operator can alert on near-saturation.",
+		},
+	)
+
+	jetstreamEventBufferCapacity = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "hypergoat_jetstream_event_buffer_capacity",
+			Help: "Capacity of the in-process Jetstream events channel. Set once at consumer startup; serves as the denominator for utilisation alerts.",
+		},
+	)
+
+	tapEventDispatchSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "hypergoat_tap_event_dispatch_seconds",
+			Help:    "Wall-clock duration of Tap event dispatch (from read off the websocket to ack write). Tap has no buffered channel, so this latency histogram is the equivalent of jetstream's buffer-depth gauge for spotting stalls.",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+)
+
+// init2 registers the Track 4 metrics. Kept separate from the main
+// init() so adding more metrics in this section doesn't conflict
+// with rebases of the original registration block.
+func init() {
+	Registry.MustRegister(
+		activityLogFailedTotal,
+		ingestionErrorTotal,
+		jetstreamEventBufferDepth,
+		jetstreamEventBufferCapacity,
+		tapEventDispatchSeconds,
+	)
+}
+
+// ActivityLogFailed increments the activity-log failure counter.
+func ActivityLogFailed() {
+	activityLogFailedTotal.Inc()
+}
+
+// IngestionError increments the per-consumer error counter.
+// consumer must be one of the IngestionConsumer* constants.
+func IngestionError(consumer string) {
+	ingestionErrorTotal.WithLabelValues(consumer).Inc()
+}
+
+// JetstreamEventBufferCapacity sets the capacity gauge to the
+// channel's buffer size at startup. Called once.
+func JetstreamEventBufferCapacity(capacity int) {
+	jetstreamEventBufferCapacity.Set(float64(capacity))
+}
+
+// JetstreamEventBufferDepth sets the current depth gauge from
+// len(channel). Called by the Jetstream client on a ticker so the
+// gauge has fresh data even between event emissions.
+func JetstreamEventBufferDepth(depth int) {
+	jetstreamEventBufferDepth.Set(float64(depth))
+}
+
+// TapEventDispatchObserved records one Tap dispatch duration.
+func TapEventDispatchObserved(seconds float64) {
+	tapEventDispatchSeconds.Observe(seconds)
+}

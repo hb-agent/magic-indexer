@@ -558,7 +558,7 @@ func (b *Backfiller) processRepo(ctx context.Context, pdsURL string, data *Atpro
 			if b.activityRepo != nil {
 				for _, rec := range filteredRecords {
 					timestamp := atproto.ExtractCreatedAt(rec.JSON, time.Now())
-					_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success")
+					_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success", nil)
 					if err != nil {
 						slog.Debug("[backfill] Failed to log activity", "uri", rec.URI, "error", err)
 					}
@@ -700,7 +700,7 @@ func (b *Backfiller) processRepoLegacy(ctx context.Context, pdsURL string, data 
 				if b.activityRepo != nil {
 					timestamp := atproto.ExtractCreatedAt(string(rec.Value), time.Now())
 					rkey := extractRKeyFromURI(rec.URI)
-					_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", collection, data.DID, rkey, string(rec.Value), "success")
+					_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", collection, data.DID, rkey, string(rec.Value), "success", nil)
 					if err != nil {
 						slog.Debug("[backfill] Failed to log activity", "uri", rec.URI, "error", err)
 					}
@@ -783,7 +783,7 @@ func (b *Backfiller) BackfillActor(ctx context.Context, did string) (int, error)
 		if b.activityRepo != nil {
 			for _, rec := range filteredRecords {
 				timestamp := atproto.ExtractCreatedAt(rec.JSON, time.Now())
-				_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success")
+				_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success", nil)
 				if err != nil {
 					slog.Debug("[backfill] Failed to log activity", "uri", rec.URI, "error", err)
 				}
@@ -828,7 +828,7 @@ func (b *Backfiller) backfillActorLegacy(ctx context.Context, data *AtprotoData)
 				if b.activityRepo != nil {
 					timestamp := atproto.ExtractCreatedAt(string(rec.Value), time.Now())
 					rkey := extractRKeyFromURI(rec.URI)
-					_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", collection, data.DID, rkey, string(rec.Value), "success")
+					_, err := b.activityRepo.LogActivityWithStatus(ctx, timestamp, "create", collection, data.DID, rkey, string(rec.Value), "success", nil)
 					if err != nil {
 						slog.Debug("[backfill] Failed to log activity", "uri", rec.URI, "error", err)
 					}

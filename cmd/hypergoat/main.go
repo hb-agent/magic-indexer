@@ -1363,7 +1363,7 @@ func populateActivityFromRecords(
 		timestamp := atproto.ExtractCreatedAt(rec.JSON, rec.IndexedAt)
 
 		// Log as a successful create operation
-		if _, logErr := activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success"); logErr == nil {
+		if _, logErr := activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success", nil); logErr == nil {
 			count++
 		}
 		return nil
