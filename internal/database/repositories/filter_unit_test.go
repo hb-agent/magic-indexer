@@ -824,6 +824,41 @@ func extractGinExpression(t *testing.T, migration string) string {
 	return ""
 }
 
+// extractBtreeExpression returns the expression text inside the
+// outermost parens after `ON <table>` for a btree expression
+// index (one without an explicit `USING ...` clause — btree is
+// the default). Postgres requires non-column expressions in
+// btree indexes to be wrapped in their own parens, so the syntax
+// is `ON record ((expr))` — paren-balanced extraction returns
+// the outer parens' content, which is `(expr)`. The test caller
+// is responsible for stripping the inner parens if needed.
+//
+// Sibling of extractGinExpression but anchored on `ON <table> (`
+// instead of `USING gin (` so it works for index expressions
+// that don't name a method.
+func extractBtreeExpression(t *testing.T, migration string) string {
+	t.Helper()
+	loc := regexp.MustCompile(`(?i)ON\s+\w+\s*\(`).FindStringIndex(migration)
+	if loc == nil {
+		t.Fatalf("migration has no `ON <table> (` clause:\n%s", migration)
+	}
+	start := loc[1]
+	depth := 1
+	for i := start; i < len(migration); i++ {
+		switch migration[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return strings.TrimSpace(migration[start:i])
+			}
+		}
+	}
+	t.Fatalf("unterminated `ON <table> (...)` in migration:\n%s", migration)
+	return ""
+}
+
 // findRepoFile walks up from the current working directory until it
 // finds a directory containing `go.mod`, then returns
 // `<repoRoot>/<relPath>`. Fails the test if the file does not exist
@@ -847,5 +882,191 @@ func findRepoFile(t *testing.T, relPath string) string {
 			t.Fatalf("walked to filesystem root without finding go.mod; cannot locate %s", relPath)
 		}
 		dir = parent
+	}
+}
+
+// TestBuildSingleFilter_StringSubject_Eq verifies the SQL shape
+// emitted for an `eq` filter on a bare-DID `subject` field (first
+// user: app.certified.graph.follow). The clause must be the bare
+// `r.json->>'subject' = $N` form — no outer CASE wrapper, no
+// `at://`-prefix LIKE, no jsonb type guard. Anything else hides
+// the indexable expression from the partial expression index in
+// migration 029 and silently regresses the filter to O(collection).
+func TestBuildSingleFilter_StringSubject_Eq(t *testing.T) {
+	f := FieldFilter{
+		FieldName: "subject",
+		Operator:  OpEq,
+		Value:     "did:plc:alice",
+		IsJSON:    true,
+		Kind:      KindStringSubject,
+	}
+	clause, params, nextIdx, err := buildSingleFilter(f, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if nextIdx != 2 {
+		t.Errorf("nextIdx = %d, want 2", nextIdx)
+	}
+	if len(params) != 1 {
+		t.Fatalf("params len = %d, want 1", len(params))
+	}
+	if params[0] != "did:plc:alice" {
+		t.Errorf("params[0] = %v, want did:plc:alice", params[0])
+	}
+	const wantClause = "r.json->>'subject' = $1"
+	if clause != wantClause {
+		t.Errorf("clause = %q, want %q", clause, wantClause)
+	}
+	// Guard against accidental drift to a CASE wrapper or LIKE
+	// pattern — both hide the indexable expression.
+	if strings.Contains(clause, "CASE") {
+		t.Errorf("clause contains CASE wrapper, hiding the indexable expression: %s", clause)
+	}
+	if strings.Contains(clause, "LIKE") {
+		t.Errorf("clause contains LIKE, defeats the equality-index path: %s", clause)
+	}
+}
+
+// TestBuildSingleFilter_StringSubject_In verifies the SQL shape
+// for an `in` filter on bare-DID `subject`. The clause must use
+// `= ANY($N::text[])` against the same bare expression so the
+// partial expression index in migration 029 can serve both
+// operators.
+func TestBuildSingleFilter_StringSubject_In(t *testing.T) {
+	f := FieldFilter{
+		FieldName: "subject",
+		Operator:  OpIn,
+		Value:     []string{"did:plc:alice", "did:plc:bob"},
+		IsJSON:    true,
+		Kind:      KindStringSubject,
+	}
+	clause, params, nextIdx, err := buildSingleFilter(f, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if nextIdx != 4 {
+		t.Errorf("nextIdx = %d, want 4", nextIdx)
+	}
+	if len(params) != 1 {
+		t.Fatalf("params len = %d, want 1", len(params))
+	}
+	values, ok := params[0].([]string)
+	if !ok {
+		t.Fatalf("params[0] type = %T, want []string", params[0])
+	}
+	if len(values) != 2 || values[0] != "did:plc:alice" || values[1] != "did:plc:bob" {
+		t.Errorf("values = %v, want [did:plc:alice did:plc:bob]", values)
+	}
+	const wantClause = "r.json->>'subject' = ANY($3::text[])"
+	if clause != wantClause {
+		t.Errorf("clause = %q, want %q", clause, wantClause)
+	}
+}
+
+// TestBuildSingleFilter_StringSubject_UnsupportedOperator
+// enforces the contract that string-subject only supports
+// `eq`/`in`. Other operators must error out — there is no
+// useful semantic for `gt`/`contains`/etc. on a DID column, and
+// silently accepting them risks producing a clause the index
+// can't serve.
+func TestBuildSingleFilter_StringSubject_UnsupportedOperator(t *testing.T) {
+	for _, op := range []FilterOperator{OpNeq, OpGt, OpLt, OpGte, OpLte, OpContains, OpStartsWith} {
+		op := op
+		t.Run(string(op), func(t *testing.T) {
+			f := FieldFilter{
+				FieldName: "subject",
+				Operator:  op,
+				Value:     "did:plc:alice",
+				IsJSON:    true,
+				Kind:      KindStringSubject,
+			}
+			_, _, _, err := buildSingleFilter(f, 1)
+			if err == nil {
+				t.Errorf("expected error for operator %s on string-subject filter", op)
+			}
+		})
+	}
+}
+
+// TestStringSubjectFilter_IndexExpressionMatchesMigration029
+// guards the byte-for-byte coupling between
+// buildStringSubjectFilter's emitted SQL and the partial
+// expression index defined in migration 029.
+//
+// The index is keyed on `(json->>'subject')`; the runtime clause
+// uses `r.json->>'subject'` (the `r.` alias is the only permitted
+// divergence). If migration 029 is edited to wrap the expression
+// or change the JSON path, the planner can no longer match the
+// runtime clause to the index and queries silently degrade from
+// index-scan to O(collection-size) — the same failure mode the
+// contributor index regression test (#024) guards against.
+//
+// Failure here means: either update the migration's expression
+// to match the new clause shape, or update the clause in
+// buildStringSubjectFilter to match the new index. The two MUST
+// agree.
+func TestStringSubjectFilter_IndexExpressionMatchesMigration029(t *testing.T) {
+	migrationPath := findRepoFile(t,
+		"internal/database/migrations/postgres/029_add_follow_subject_index.up.sql")
+
+	migrationBytes, err := os.ReadFile(migrationPath)
+	if err != nil {
+		t.Fatalf("read migration 029: %v", err)
+	}
+	migration := string(migrationBytes)
+
+	indexedExprInMigration := extractBtreeExpression(t, migration)
+	// Postgres requires non-column btree index expressions to be
+	// wrapped in their own parens — the syntax is
+	// `ON record ((expr))`. extractBtreeExpression returns the
+	// content of the outer parens, which is `(expr)`; strip the
+	// inner pair.
+	indexedExprInMigration = strings.TrimSpace(indexedExprInMigration)
+	indexedExprInMigration = strings.TrimPrefix(indexedExprInMigration, "(")
+	indexedExprInMigration = strings.TrimSuffix(indexedExprInMigration, ")")
+	indexedExprInMigration = strings.TrimSpace(indexedExprInMigration)
+
+	clause, _, _, err := buildStringSubjectFilter(FieldFilter{
+		FieldName: "subject",
+		Operator:  OpEq,
+		Value:     "did:plc:alice",
+		IsJSON:    true,
+		Kind:      KindStringSubject,
+	}, 1)
+	if err != nil {
+		t.Fatalf("buildStringSubjectFilter: %v", err)
+	}
+	// Clause shape is `r.json->>'subject' = $1`. Extract the bit
+	// before ` = ` so we compare expressions, not operators.
+	idx := strings.Index(clause, " = ")
+	if idx < 0 {
+		t.Fatalf("clause missing ` = ` separator: %s", clause)
+	}
+	indexedExprInClause := strings.TrimSpace(clause[:idx])
+
+	// Permitted divergence: runtime references `r.json`,
+	// migration references `json` (the column name without the
+	// table alias).
+	normalize := func(s string) string {
+		s = strings.ReplaceAll(s, "r.json", "json")
+		return strings.Join(strings.Fields(s), " ")
+	}
+	wantExpr := normalize(indexedExprInMigration)
+	gotExpr := normalize(indexedExprInClause)
+
+	if wantExpr != gotExpr {
+		t.Fatalf("string-subject filter expression drifted from migration 029 — planner will not match the partial expression index\n  migration 029 indexes: %s\n  buildStringSubjectFilter emits: %s (normalised to %s)\nIf this drift is intentional, update BOTH the migration's `ON record (...)` expression AND the `indexedExpr` constant in filter.go's buildStringSubjectFilter.",
+			wantExpr, indexedExprInClause, gotExpr)
+	}
+
+	// Defence-in-depth: spot-check the operator + JSON path so a
+	// silent change of `->>` to `->` (returns jsonb, not text) is
+	// caught by name in the failure rather than buried in the
+	// diff above.
+	if !strings.Contains(wantExpr, "->>") {
+		t.Fatalf("migration 029 no longer uses `->>` (text extraction) — buildStringSubjectFilter must be updated to match. Migration expression: %s", wantExpr)
+	}
+	if !strings.Contains(wantExpr, "'subject'") {
+		t.Fatalf("migration 029 no longer extracts `subject` — buildStringSubjectFilter must be updated to match. Migration expression: %s", wantExpr)
 	}
 }

@@ -67,6 +67,28 @@ const (
 	// here is just `r.subject_did = $N` / `= ANY($N::text[])` so
 	// the planner can use that index directly.
 	KindUnionSubject
+	// KindStringSubject signals the indexable bare-DID-subject
+	// filter on per-collection resolvers whose `subject` field is
+	// a plain string (lexicon format: did). Currently used by
+	// `AppCertifiedGraphFollowWhereInput.subject` (issue #86).
+	// Backed by the partial expression index
+	// `idx_record_follow_subject` in migration 029, keyed on
+	// `(json->>'subject')` and partial-predicated on
+	// `collection = 'app.certified.graph.follow'`. The SQL emitted
+	// here is `r.json->>'subject' = $N` / `= ANY($N::text[])`; the
+	// expression must match the migration's `(json->>'subject')`
+	// byte-for-byte (modulo the `r.` alias) for the planner to
+	// pick the partial index. The regression test
+	// TestStringSubjectFilter_IndexExpressionMatchesMigration029
+	// in filter_unit_test.go guards this coupling.
+	//
+	// Unlike KindUnionSubject this kind needs no generated column
+	// (the extraction is trivially `->>`) and no IMMUTABLE wrapper
+	// function (`->>` is IMMUTABLE on jsonb in Postgres 12+). It
+	// can be reused for any future lexicon whose `subject` is a
+	// bare DID — the FilterKind enum value carries no
+	// lexicon-specific information.
+	KindStringSubject
 )
 
 // FieldFilter describes a single filter condition on a record field.
@@ -455,6 +477,8 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 		return buildContributorFilter(f, paramIdx)
 	case KindUnionSubject:
 		return buildBadgeAwardSubjectFilter(f, paramIdx)
+	case KindStringSubject:
+		return buildStringSubjectFilter(f, paramIdx)
 	}
 
 	switch f.Operator {
@@ -719,6 +743,50 @@ func buildBadgeAwardSubjectFilter(f FieldFilter, paramIdx int) (string, []interf
 		return fmt.Sprintf("r.subject_did = ANY(%s::text[])", param), []interface{}{values}, paramIdx + 1, nil
 	default:
 		return "", nil, paramIdx, fmt.Errorf("operator %s not supported on badge-award subject filter", f.Operator)
+	}
+}
+
+// buildStringSubjectFilter handles the `subject` filter on
+// per-collection resolvers whose `subject` field is a bare DID
+// string (lexicon format: did). First user: the
+// `AppCertifiedGraphFollowWhereInput.subject` filter (issue #86).
+//
+// The expression `r.json->>'subject'` must match the partial
+// expression index `idx_record_follow_subject` from migration 029
+// byte-for-byte (modulo the `r.` alias). A drift here silently
+// degrades the filter to a sequential scan over the follow
+// collection, which trips the 5s /graphql budget at scale. The
+// regression test
+// TestStringSubjectFilter_IndexExpressionMatchesMigration029 in
+// filter_unit_test.go pins the coupling.
+//
+// The collection predicate is supplied by the resolver's outer
+// WHERE (`r.collection = $coll`); the planner matches it to the
+// migration's partial-index predicate
+// `WHERE collection = 'app.certified.graph.follow'` via
+// Postgres's `predicate_implied_by`. Same mechanism as
+// idx_record_subject_did (#026) on badge.award.
+func buildStringSubjectFilter(f FieldFilter, paramIdx int) (string, []interface{}, int, error) {
+	// indexedExpr MUST match the index expression in migration 029
+	// byte-for-byte (modulo the `r.` alias). A diff here silently
+	// degrades the filter to a sequential scan.
+	const indexedExpr = `r.json->>'subject'`
+
+	switch f.Operator {
+	case OpEq:
+		param := fmt.Sprintf("$%d", paramIdx)
+		return fmt.Sprintf("%s = %s", indexedExpr, param), []interface{}{f.Value}, paramIdx + 1, nil
+	case OpIn:
+		param := fmt.Sprintf("$%d", paramIdx)
+		// hasNull (second return) is intentionally discarded —
+		// the DIDFilterInput schema validation upstream rejects
+		// null list entries before the SQL layer sees them.
+		// Mirrors the same pattern in buildContributorFilter and
+		// buildBadgeAwardSubjectFilter.
+		values, _ := extractInValues(f.Value)
+		return fmt.Sprintf("%s = ANY(%s::text[])", indexedExpr, param), []interface{}{values}, paramIdx + 1, nil
+	default:
+		return "", nil, paramIdx, fmt.Errorf("operator %s not supported on string-subject filter", f.Operator)
 	}
 }
 

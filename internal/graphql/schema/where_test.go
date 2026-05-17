@@ -163,6 +163,38 @@ func TestFilterRegistry_BadgeAwardSubject(t *testing.T) {
 	}
 }
 
+// TestFilterRegistry_GraphFollowSubject pins the graph.follow
+// subject filter wiring. The follow lexicon also has `subject` as
+// a filterable scalar (string, format: did) so this guards against
+// two regressions: (1) the registry entry being removed, dropping
+// the SQL path to the default scalar handler that doesn't use the
+// migration-029 partial index; and (2) the descriptor's Kind being
+// accidentally changed to KindUnionSubject (which would emit
+// `r.subject_did = $N` — wrong column for follow records).
+func TestFilterRegistry_GraphFollowSubject(t *testing.T) {
+	desc, ok := lookupFilterDescriptor("app.certified.graph.follow", "subject")
+	if !ok {
+		t.Fatalf("lookupFilterDescriptor(\"app.certified.graph.follow\", \"subject\") returned not-found; the registry entry is missing")
+	}
+	if desc.FieldName != "subject" {
+		t.Errorf("descriptor.FieldName = %q, want \"subject\"", desc.FieldName)
+	}
+	if desc.Kind != repositories.KindStringSubject {
+		t.Errorf("descriptor.Kind = %v, want KindStringSubject (%v) — accidentally switching to KindUnionSubject would route to the badge-award subject_did column, which is wrong for follow records",
+			desc.Kind, repositories.KindStringSubject)
+	}
+	if desc.Description != graphFollowSubjectDescription {
+		t.Errorf("descriptor.Description drifted from graphFollowSubjectDescription — the pinned schema-introspection text is the consumer-facing contract")
+	}
+	// Negative: the registry must NOT have an entry for
+	// other lexicons under "subject" that would shadow theirs.
+	for _, lexID := range []string{"org.hypercerts.claim.activity", "app.certified.actor.profile"} {
+		if _, hit := lookupFilterDescriptor(lexID, "subject"); hit {
+			t.Errorf("unexpected registry entry for (%q, \"subject\")", lexID)
+		}
+	}
+}
+
 // TestParseOperator_CaseInsensitiveVariants pins the parser
 // extension for eqi / ini. The parser reuses the per-field
 // operator loop in extractFieldFiltersRecursive, so these are
