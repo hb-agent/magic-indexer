@@ -1,0 +1,17 @@
+-- review-2026-05-17 Track 4: add source_event_id column to
+-- jetstream_activity for deduplication of redelivered ingestion
+-- events. The unique index is added separately in migration 028
+-- because indexes built CONCURRENTLY must run as the sole
+-- statement in a no-transaction migration (the lesson from CI
+-- commit cb06896 on migration 021).
+--
+-- source_event_id stores the upstream protocol's monotonic
+-- per-event identifier:
+--   * Jetstream: `time_us` (microsecond timestamp of the commit).
+--   * Tap:        `event.id` (sequence number from the sidecar).
+--
+-- Nullable BIGINT so historical rows (no source identifier) stay
+-- valid; the partial unique index in migration 028 has
+-- `WHERE source_event_id IS NOT NULL` so multiple NULL rows
+-- coexist.
+ALTER TABLE jetstream_activity ADD COLUMN IF NOT EXISTS source_event_id BIGINT;
