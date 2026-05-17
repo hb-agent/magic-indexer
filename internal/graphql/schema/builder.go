@@ -30,8 +30,9 @@ type Builder struct {
 	objectBuilder *types.ObjectBuilder
 
 	// Built types
-	recordTypes     map[string]*graphql.Object // lexiconID -> record type
-	connectionTypes map[string]*graphql.Object // lexiconID -> connection type
+	recordTypes     map[string]*graphql.Object      // lexiconID -> record type
+	connectionTypes map[string]*graphql.Object      // lexiconID -> connection type
+	whereInputs     map[string]*graphql.InputObject // lexiconID -> WhereInput (issue #87)
 }
 
 // NewBuilder creates a new schema builder.
@@ -43,6 +44,7 @@ func NewBuilder(registry *lexicon.Registry) *Builder {
 		objectBuilder:   types.NewObjectBuilder(mapper, registry),
 		recordTypes:     make(map[string]*graphql.Object),
 		connectionTypes: make(map[string]*graphql.Object),
+		whereInputs:     make(map[string]*graphql.InputObject),
 	}
 }
 
@@ -56,6 +58,14 @@ func (b *Builder) Build() (*graphql.Schema, error) {
 
 	// Phase 3: Build connection types
 	b.buildConnectionTypes()
+
+	// Phase 3b (issue #87): Build all WhereInputs up-front so the
+	// joined-where injection in pass 2 can look up target lexicons
+	// regardless of map iteration order. Today's lazy construction
+	// inside buildQueryType doesn't work because the badge.award
+	// WhereInput needs the badge.definition WhereInput to already
+	// exist, and the order is non-deterministic.
+	b.buildWhereInputTypes()
 
 	// Phase 4: Build Query type
 	queryType := b.buildQueryType()
@@ -73,6 +83,54 @@ func (b *Builder) Build() (*graphql.Schema, error) {
 	}
 
 	return &schema, nil
+}
+
+// buildWhereInputTypes constructs every per-collection WhereInput
+// in two passes:
+//   - Pass 1: build the input with property-derived fields, the
+//     auto-added `did`, lexicon-specific filter-registry fields,
+//     and `_and`/`_or`. Store in b.whereInputs.
+//   - Pass 2: iterate joinedWhereRegistry and inject joined-where
+//     fields via *graphql.InputObject.AddFieldConfig, looking up
+//     each target lexicon's WhereInput from b.whereInputs.
+//
+// The two-pass split is necessary because joined-where targets
+// reference other lexicons' WhereInputs; building lazily inside
+// buildQueryType (the previous approach) hit non-determinism on
+// map iteration.
+func (b *Builder) buildWhereInputTypes() {
+	// Pass 1.
+	for _, lex := range b.registry.GetCollectionLexicons() {
+		input := buildWhereInputType(lex)
+		if input != nil {
+			b.whereInputs[lex.ID] = input
+		}
+	}
+
+	// Pass 2: wire joined fields after all base inputs exist.
+	for _, lex := range b.registry.GetCollectionLexicons() {
+		parentInput := b.whereInputs[lex.ID]
+		if parentInput == nil {
+			continue
+		}
+		for _, jd := range joinedWhereRegistry[lex.ID] {
+			targetInput := b.whereInputs[jd.TargetLexicon]
+			if targetInput == nil {
+				// Target lexicon not registered (e.g. dev hasn't
+				// uploaded the target lexicon yet). Skip silently —
+				// the absence of the field is the safe behaviour.
+				// Log at warn so an operator can see why a
+				// documented filter is missing.
+				slog.Warn("joinedWhereRegistry entry references unregistered lexicon — skipping field",
+					"parent", lex.ID, "field", jd.FieldName, "target", jd.TargetLexicon)
+				continue
+			}
+			parentInput.AddFieldConfig(jd.FieldName, &graphql.InputObjectFieldConfig{
+				Type:        targetInput,
+				Description: jd.Description,
+			})
+		}
+	}
 }
 
 // buildObjectTypes builds GraphQL types for all non-record definitions.
@@ -437,15 +495,12 @@ func (b *Builder) buildQueryType() *graphql.Object {
 
 		args := query.ConnectionArgs()
 
-		// Generate per-collection WhereInput if the lexicon has filterable properties.
-		lex, hasLex := b.registry.GetLexicon(lexiconID)
-		if hasLex {
-			whereInput := buildWhereInputType(lex)
-			if whereInput != nil {
-				args["where"] = &graphql.ArgumentConfig{
-					Type:        whereInput,
-					Description: "Filter conditions (all combined with AND)",
-				}
+		// Per-collection WhereInput was already built in phase 3b
+		// (with joined-where fields wired). Just look it up.
+		if whereInput := b.whereInputs[lexiconID]; whereInput != nil {
+			args["where"] = &graphql.ArgumentConfig{
+				Type:        whereInput,
+				Description: "Filter conditions (all combined with AND)",
 			}
 		}
 
@@ -577,7 +632,7 @@ func (b *Builder) resolveRecordConnection(
 	var filterGroup repositories.FilterGroup
 	if whereArg, ok := p.Args["where"]; ok && whereArg != nil {
 		lex, _ := b.registry.GetLexicon(collection)
-		filterGroup, err = extractFieldFilters(whereArg, lex)
+		filterGroup, err = extractFieldFilters(whereArg, lex, b.registry)
 		if err != nil {
 			return nil, fmt.Errorf("invalid where filter: %w", err)
 		}
