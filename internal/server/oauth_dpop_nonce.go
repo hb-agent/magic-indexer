@@ -17,20 +17,13 @@ func HandleDPoPNonce(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate a fresh nonce
-	nonce := generateDPoPNonce()
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	nonce := base64.RawURLEncoding.EncodeToString(b)
 
-	// Return nonce in both header and body
 	w.Header().Set("DPoP-Nonce", nonce)
 	w.Header().Set("Content-Type", "text/plain")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(nonce))
-}
-
-// generateDPoPNonce generates a cryptographically secure nonce for DPoP.
-func generateDPoPNonce() string {
-	b := make([]byte, 32)
-	_, _ = rand.Read(b)
-	return base64.RawURLEncoding.EncodeToString(b)
 }

@@ -3,8 +3,8 @@
 package server
 
 import (
+	"html"
 	"net/http"
-	"strings"
 )
 
 // GraphiQLConfig contains configuration for the GraphiQL handler.
@@ -195,7 +195,7 @@ func generateGraphiQLHTML(cfg GraphiQLConfig) string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>` + escapeHTML(title) + `</title>
+  <title>` + html.EscapeString(title) + `</title>
   <style>
     body {
       height: 100%;
@@ -239,14 +239,3 @@ func generateGraphiQLHTML(cfg GraphiQLConfig) string {
 </html>`
 }
 
-// escapeHTML escapes HTML special characters.
-func escapeHTML(s string) string {
-	replacer := strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		"\"", "&quot;",
-		"'", "&#39;",
-	)
-	return replacer.Replace(s)
-}
