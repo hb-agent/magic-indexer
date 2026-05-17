@@ -46,7 +46,7 @@ const graphiqlCSP = "default-src 'none'; " +
 // HandleGraphiQL creates an HTTP handler that serves the GraphiQL IDE.
 func HandleGraphiQL(cfg GraphiQLConfig) http.HandlerFunc {
 	// Use CDN-hosted GraphiQL
-	html := generateGraphiQLHTML(cfg)
+	page := generateGraphiQLHTML(cfg)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -56,7 +56,7 @@ func HandleGraphiQL(cfg GraphiQLConfig) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Content-Security-Policy", graphiqlCSP)
-		_, _ = w.Write([]byte(html))
+		_, _ = w.Write([]byte(page))
 	}
 }
 
@@ -238,4 +238,3 @@ func generateGraphiQLHTML(cfg GraphiQLConfig) string {
 </body>
 </html>`
 }
-
