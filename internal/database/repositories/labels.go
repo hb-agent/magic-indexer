@@ -85,12 +85,10 @@ func (r *LabelsRepository) Insert(ctx context.Context, src, uri string, cid *str
 	// Partial unique indexes (see migration 007) make ON CONFLICT DO
 	// NOTHING actually fire, so re-ingesting a label during a
 	// backfill/stream overlap is idempotent.
-	sqlStr = fmt.Sprintf(`INSERT INTO label (src, uri, cid, val, cts, exp)
-		VALUES (%s, %s, %s, %s, %s, %s)
+	sqlStr = `INSERT INTO label (src, uri, cid, val, cts, exp)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (src, uri, val, COALESCE(cid, '')) WHERE neg = false DO NOTHING
-		RETURNING id, src, uri, cid, val, neg, cts, exp`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-		r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6))
+		RETURNING id, src, uri, cid, val, neg, cts, exp`
 
 	params := []database.Value{
 		database.Text(src),
@@ -137,16 +135,14 @@ func (r *LabelsRepository) findExistingAssertion(ctx context.Context, src, uri, 
 	var sqlStr string
 	var params []database.Value
 	if cid == nil {
-		sqlStr = fmt.Sprintf(`SELECT id, src, uri, cid, val, neg, cts, exp FROM label
-			WHERE src = %s AND uri = %s AND val = %s AND cid IS NULL AND neg = %s
-			ORDER BY id DESC LIMIT 1`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), negFalse)
+		sqlStr = `SELECT id, src, uri, cid, val, neg, cts, exp FROM label
+			WHERE src = $1 AND uri = $2 AND val = $3 AND cid IS NULL AND neg = ` + negFalse + `
+			ORDER BY id DESC LIMIT 1`
 		params = []database.Value{database.Text(src), database.Text(uri), database.Text(val)}
 	} else {
-		sqlStr = fmt.Sprintf(`SELECT id, src, uri, cid, val, neg, cts, exp FROM label
-			WHERE src = %s AND uri = %s AND val = %s AND cid = %s AND neg = %s
-			ORDER BY id DESC LIMIT 1`,
-			r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), negFalse)
+		sqlStr = `SELECT id, src, uri, cid, val, neg, cts, exp FROM label
+			WHERE src = $1 AND uri = $2 AND val = $3 AND cid = $4 AND neg = ` + negFalse + `
+			ORDER BY id DESC LIMIT 1`
 		params = []database.Value{database.Text(src), database.Text(uri), database.Text(val), database.Text(*cid)}
 	}
 
@@ -182,13 +178,10 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 	}
 	ctsStr := effectiveCts.UTC().Format(time.RFC3339Nano)
 
-	negTrue := "true"
-
-	sqlStr := fmt.Sprintf(`INSERT INTO label (src, uri, val, neg, cts)
-		VALUES (%s, %s, %s, %s, %s)
+	const sqlStr = `INSERT INTO label (src, uri, val, neg, cts)
+		VALUES ($1, $2, $3, true, $4)
 		ON CONFLICT (src, uri, val) WHERE neg = true DO NOTHING
-		RETURNING id, src, uri, cid, val, neg, cts, exp`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), negTrue, r.db.Placeholder(4))
+		RETURNING id, src, uri, cid, val, neg, cts, exp`
 
 	params := []database.Value{
 		database.Text(src),
@@ -222,11 +215,9 @@ func (r *LabelsRepository) InsertNegation(ctx context.Context, src, uri, val str
 // (src, uri, val) tuple. Used to resolve the ON CONFLICT DO NOTHING
 // branch of InsertNegation.
 func (r *LabelsRepository) findExistingNegation(ctx context.Context, src, uri, val string) (*Label, error) {
-	negTrue := "true"
-	sqlStr := fmt.Sprintf(`SELECT id, src, uri, cid, val, neg, cts, exp FROM label
-		WHERE src = %s AND uri = %s AND val = %s AND neg = %s
-		ORDER BY id DESC LIMIT 1`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), negTrue)
+	const sqlStr = `SELECT id, src, uri, cid, val, neg, cts, exp FROM label
+		WHERE src = $1 AND uri = $2 AND val = $3 AND neg = true
+		ORDER BY id DESC LIMIT 1`
 	params := []database.Value{database.Text(src), database.Text(uri), database.Text(val)}
 
 	var label Label
@@ -248,8 +239,8 @@ func (r *LabelsRepository) findExistingNegation(ctx context.Context, src, uri, v
 
 // GetByID retrieves a label by ID.
 func (r *LabelsRepository) GetByID(ctx context.Context, id int64) (*Label, error) {
-	sqlStr := fmt.Sprintf(`SELECT id, src, uri, cid, val, neg, cts, exp
-		FROM label WHERE id = %s`, r.db.Placeholder(1))
+	const sqlStr = `SELECT id, src, uri, cid, val, neg, cts, exp
+		FROM label WHERE id = $1`
 
 	var label Label
 	var ctsStr string
@@ -282,10 +273,10 @@ func (r *LabelsRepository) GetByID(ctx context.Context, id int64) (*Label, error
 // Results are ordered by cts descending so an operator reading the
 // response tops-down sees the most recent activity first.
 func (r *LabelsRepository) GetAllForURI(ctx context.Context, uri string) ([]Label, error) {
-	sqlStr := fmt.Sprintf(`SELECT l.id, l.src, l.uri, l.cid, l.val, l.neg, l.cts, l.exp
+	const sqlStr = `SELECT l.id, l.src, l.uri, l.cid, l.val, l.neg, l.cts, l.exp
 		FROM label l
-		WHERE l.uri = %s
-		ORDER BY l.cts DESC, l.id DESC`, r.db.Placeholder(1))
+		WHERE l.uri = $1
+		ORDER BY l.cts DESC, l.id DESC`
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, uri)
 	if err != nil {
@@ -302,25 +293,27 @@ func (r *LabelsRepository) GetByURIs(ctx context.Context, uris []string) ([]Labe
 		return nil, nil
 	}
 
-	placeholders := r.db.Placeholders(len(uris), 1)
-	negFalse, negTrue := "false", "true"
-	now := "NOW()"
+	placeholders := make([]string, len(uris))
+	for i := range uris {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	}
+	uriPlaceholders := strings.Join(placeholders, ", ")
 	// Get only labels that haven't been negated. The negation check uses
 	// cts (the labeler's canonical timestamp) rather than the local
 	// auto-increment id, so a backfilled negation with an earlier wire
 	// cts correctly retracts an already-streamed assertion. Expired
 	// labels (l.exp <= now) are filtered out here rather than cleaned
 	// up by a background job.
-	sqlStr := fmt.Sprintf(`SELECT l.id, l.src, l.uri, l.cid, l.val, l.neg, l.cts, l.exp
+	sqlStr := `SELECT l.id, l.src, l.uri, l.cid, l.val, l.neg, l.cts, l.exp
 		FROM label l
-		WHERE l.uri IN (%s) AND l.neg = %s
-		AND (l.exp IS NULL OR l.exp > %s)
+		WHERE l.uri IN (` + uriPlaceholders + `) AND l.neg = false
+		AND (l.exp IS NULL OR l.exp > NOW())
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg
 			WHERE neg.uri = l.uri AND neg.src = l.src AND neg.val = l.val
-			  AND neg.neg = %s AND neg.cts >= l.cts
+			  AND neg.neg = true AND neg.cts >= l.cts
 		)
-		ORDER BY l.cts DESC`, placeholders, negFalse, now, negTrue)
+		ORDER BY l.cts DESC`
 
 	params := make([]any, len(uris))
 	for i, uri := range uris {
@@ -344,19 +337,19 @@ func (r *LabelsRepository) GetPaginated(ctx context.Context, uriFilter, valFilte
 	paramIdx := 1
 
 	if uriFilter != nil {
-		conditions = append(conditions, fmt.Sprintf("uri = %s", r.db.Placeholder(paramIdx)))
+		conditions = append(conditions, fmt.Sprintf("uri = $%d", paramIdx))
 		params = append(params, *uriFilter)
 		paramIdx++
 	}
 
 	if valFilter != nil {
-		conditions = append(conditions, fmt.Sprintf("val = %s", r.db.Placeholder(paramIdx)))
+		conditions = append(conditions, fmt.Sprintf("val = $%d", paramIdx))
 		params = append(params, *valFilter)
 		paramIdx++
 	}
 
 	if afterID != nil {
-		conditions = append(conditions, fmt.Sprintf("id < %s", r.db.Placeholder(paramIdx)))
+		conditions = append(conditions, fmt.Sprintf("id < $%d", paramIdx))
 		params = append(params, *afterID)
 	}
 
@@ -407,29 +400,27 @@ func (r *LabelsRepository) GetPaginated(ctx context.Context, uriFilter, valFilte
 // multi-labeler deployment this lets operators scope which labelers
 // can initiate a takedown across the whole index.
 func (r *LabelsRepository) HasTakedown(ctx context.Context, uri string, allowedSrcs []string) (bool, error) {
-	negFalse, negTrue := "false", "true"
-
 	params := []database.Value{database.Text(uri)}
 	paramIdx := 2
 	srcClause := ""
 	if len(allowedSrcs) > 0 {
 		srcPhs := make([]string, len(allowedSrcs))
 		for i, s := range allowedSrcs {
-			srcPhs[i] = r.db.Placeholder(paramIdx)
+			srcPhs[i] = fmt.Sprintf("$%d", paramIdx)
 			paramIdx++
 			params = append(params, database.Text(s))
 		}
 		srcClause = " AND src IN (" + strings.Join(srcPhs, ", ") + ")"
 	}
 
-	sqlStr := fmt.Sprintf(`SELECT COUNT(*) FROM label
-		WHERE uri = %s AND val = '!takedown' AND neg = %s%s
-		AND (exp IS NULL OR exp > %s)
+	sqlStr := `SELECT COUNT(*) FROM label
+		WHERE uri = $1 AND val = '!takedown' AND neg = false` + srcClause + `
+		AND (exp IS NULL OR exp > NOW())
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg
 			WHERE neg.uri = label.uri AND neg.src = label.src AND neg.val = '!takedown'
-			  AND neg.neg = %s AND neg.cts >= label.cts
-		)`, r.db.Placeholder(1), negFalse, srcClause, "NOW()", negTrue)
+			  AND neg.neg = true AND neg.cts >= label.cts
+		)`
 
 	var count int64
 	err := r.db.QueryRow(ctx, sqlStr, params, &count)
@@ -447,12 +438,10 @@ func (r *LabelsRepository) GetTakedownURIs(ctx context.Context, uris, allowedSrc
 		return nil, nil
 	}
 
-	negFalse, negTrue := "false", "true"
-
 	uriPhs := make([]string, len(uris))
 	params := make([]any, 0, len(uris)+len(allowedSrcs))
 	for i, u := range uris {
-		uriPhs[i] = r.db.Placeholder(i + 1)
+		uriPhs[i] = fmt.Sprintf("$%d", i+1)
 		params = append(params, u)
 	}
 
@@ -460,20 +449,20 @@ func (r *LabelsRepository) GetTakedownURIs(ctx context.Context, uris, allowedSrc
 	if len(allowedSrcs) > 0 {
 		srcPhs := make([]string, len(allowedSrcs))
 		for i, s := range allowedSrcs {
-			srcPhs[i] = r.db.Placeholder(len(uris) + i + 1)
+			srcPhs[i] = fmt.Sprintf("$%d", len(uris)+i+1)
 			params = append(params, s)
 		}
 		srcClause = " AND l.src IN (" + strings.Join(srcPhs, ", ") + ")"
 	}
 
-	sqlStr := fmt.Sprintf(`SELECT DISTINCT l.uri FROM label l
-		WHERE l.uri IN (%s) AND l.val = '!takedown' AND l.neg = %s%s
-		AND (l.exp IS NULL OR l.exp > %s)
+	sqlStr := `SELECT DISTINCT l.uri FROM label l
+		WHERE l.uri IN (` + strings.Join(uriPhs, ", ") + `) AND l.val = '!takedown' AND l.neg = false` + srcClause + `
+		AND (l.exp IS NULL OR l.exp > NOW())
 		AND NOT EXISTS (
 			SELECT 1 FROM label neg
 			WHERE neg.uri = l.uri AND neg.src = l.src AND neg.val = '!takedown'
-			  AND neg.neg = %s AND neg.cts >= l.cts
-		)`, strings.Join(uriPhs, ", "), negFalse, srcClause, "NOW()", negTrue)
+			  AND neg.neg = true AND neg.cts >= l.cts
+		)`
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, params...)
 	if err != nil {
