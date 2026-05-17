@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 
 	"github.com/GainForest/hypergoat/internal/database"
 	"github.com/GainForest/hypergoat/internal/oauth"
@@ -87,14 +86,11 @@ func (r *OAuthRefreshTokensRepository) Insert(ctx context.Context, token *oauth.
 		originalIssuedAt = token.CreatedAt
 	}
 
-	sqlStr := fmt.Sprintf(`INSERT INTO oauth_refresh_token (
+	const sqlStr = `INSERT INTO oauth_refresh_token (
 		token, access_token, client_id, user_id, session_id,
 		session_iteration, scope, created_at, expires_at, revoked,
 		dpop_jkt, original_issued_at
-	) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4),
-		r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7), r.db.Placeholder(8),
-		r.db.Placeholder(9), r.db.Placeholder(10), r.db.Placeholder(11), r.db.Placeholder(12))
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
 
 	params := []database.Value{
 		database.Text(token.Token),
@@ -117,8 +113,7 @@ func (r *OAuthRefreshTokensRepository) Insert(ctx context.Context, token *oauth.
 
 // Get retrieves an OAuth refresh token by token string.
 func (r *OAuthRefreshTokensRepository) Get(ctx context.Context, tokenStr string) (*oauth.RefreshToken, error) {
-	sqlStr := fmt.Sprintf(`SELECT %s FROM oauth_refresh_token WHERE token = %s`,
-		refreshTokenColumns, r.db.Placeholder(1))
+	sqlStr := `SELECT ` + refreshTokenColumns + ` FROM oauth_refresh_token WHERE token = $1`
 
 	row := r.db.DB().QueryRowContext(ctx, sqlStr, tokenStr)
 	tok, err := scanRefreshTokenRow(row)
@@ -133,8 +128,7 @@ func (r *OAuthRefreshTokensRepository) Get(ctx context.Context, tokenStr string)
 
 // GetByAccessToken retrieves a refresh token by its associated access token.
 func (r *OAuthRefreshTokensRepository) GetByAccessToken(ctx context.Context, accessToken string) (*oauth.RefreshToken, error) {
-	sqlStr := fmt.Sprintf(`SELECT %s FROM oauth_refresh_token WHERE access_token = %s`,
-		refreshTokenColumns, r.db.Placeholder(1))
+	sqlStr := `SELECT ` + refreshTokenColumns + ` FROM oauth_refresh_token WHERE access_token = $1`
 
 	row := r.db.DB().QueryRowContext(ctx, sqlStr, accessToken)
 	tok, err := scanRefreshTokenRow(row)
@@ -149,8 +143,7 @@ func (r *OAuthRefreshTokensRepository) GetByAccessToken(ctx context.Context, acc
 
 // GetByUserID retrieves all refresh tokens for a user.
 func (r *OAuthRefreshTokensRepository) GetByUserID(ctx context.Context, userID string) ([]*oauth.RefreshToken, error) {
-	sqlStr := fmt.Sprintf(`SELECT %s FROM oauth_refresh_token WHERE user_id = %s ORDER BY created_at DESC`,
-		refreshTokenColumns, r.db.Placeholder(1))
+	sqlStr := `SELECT ` + refreshTokenColumns + ` FROM oauth_refresh_token WHERE user_id = $1 ORDER BY created_at DESC`
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, userID)
 	if err != nil {
@@ -171,29 +164,30 @@ func (r *OAuthRefreshTokensRepository) GetByUserID(ctx context.Context, userID s
 
 // Revoke marks a refresh token as revoked.
 func (r *OAuthRefreshTokensRepository) Revoke(ctx context.Context, tokenStr string) error {
-	sqlStr := fmt.Sprintf("UPDATE oauth_refresh_token SET revoked = true WHERE token = %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(tokenStr)})
+	_, err := r.db.Exec(ctx, "UPDATE oauth_refresh_token SET revoked = true WHERE token = $1",
+		[]database.Value{database.Text(tokenStr)})
 	return err
 }
 
 // RevokeByUserID revokes all refresh tokens for a user.
 func (r *OAuthRefreshTokensRepository) RevokeByUserID(ctx context.Context, userID string) error {
-	sqlStr := fmt.Sprintf("UPDATE oauth_refresh_token SET revoked = true WHERE user_id = %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(userID)})
+	_, err := r.db.Exec(ctx, "UPDATE oauth_refresh_token SET revoked = true WHERE user_id = $1",
+		[]database.Value{database.Text(userID)})
 	return err
 }
 
 // Delete removes a refresh token.
 func (r *OAuthRefreshTokensRepository) Delete(ctx context.Context, tokenStr string) error {
-	sqlStr := fmt.Sprintf("DELETE FROM oauth_refresh_token WHERE token = %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(tokenStr)})
+	_, err := r.db.Exec(ctx, "DELETE FROM oauth_refresh_token WHERE token = $1",
+		[]database.Value{database.Text(tokenStr)})
 	return err
 }
 
 // DeleteExpired removes all expired refresh tokens.
 func (r *OAuthRefreshTokensRepository) DeleteExpired(ctx context.Context, beforeTimestamp int64) error {
-	sqlStr := fmt.Sprintf("DELETE FROM oauth_refresh_token WHERE expires_at IS NOT NULL AND expires_at < %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Int(beforeTimestamp)})
+	_, err := r.db.Exec(ctx,
+		"DELETE FROM oauth_refresh_token WHERE expires_at IS NOT NULL AND expires_at < $1",
+		[]database.Value{database.Int(beforeTimestamp)})
 	return err
 }
 
