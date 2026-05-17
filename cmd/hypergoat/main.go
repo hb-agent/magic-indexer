@@ -87,7 +87,12 @@ type services struct {
 // backgroundServices tracks cancellable background goroutines for clean shutdown.
 type backgroundServices struct {
 	oauthCleanupCancel context.CancelFunc
-	workersCancel      context.CancelFunc
+	// oauthCleanupWG drains the OAuth cleanup goroutine on shutdown
+	// so it cannot be mid-DELETE when the deferred svc.db.Close()
+	// at the end of run() tears down the pool. Stop() Waits on it
+	// after firing oauthCleanupCancel.
+	oauthCleanupWG sync.WaitGroup
+	workersCancel  context.CancelFunc
 	jsConsumer         *jetstream.Consumer
 	jsCancel           context.CancelFunc
 	tapCancel          context.CancelFunc
@@ -119,6 +124,11 @@ type backgroundServices struct {
 func (bg *backgroundServices) Stop() {
 	if bg.oauthCleanupCancel != nil {
 		bg.oauthCleanupCancel()
+		// Wait for the cleanup goroutine to observe the cancel and
+		// exit before any downstream tear-down (DB pool close in
+		// run()'s defer) could pull the rug out from under a
+		// concurrent DELETE.
+		bg.oauthCleanupWG.Wait()
 	}
 	if bg.workersCancel != nil {
 		bg.workersCancel()
@@ -661,10 +671,11 @@ func setupOAuth(r *chi.Mux, cfg *config.Config, svc *services, bg *backgroundSer
 	r.Get("/oauth/dpop/nonce", server.HandleDPoPNonce)
 	r.Post("/oauth/dpop/nonce", server.HandleDPoPNonce)
 
-	// Start cleanup worker
+	// Start cleanup worker. WaitGroup is on bg so Stop() can drain
+	// the goroutine before run()'s deferred db.Close() fires.
 	oauthCleanupCtx, oauthCleanupCancel := context.WithCancel(context.Background())
 	bg.oauthCleanupCancel = oauthCleanupCancel
-	oauthHandlers.StartCleanupWorker(oauthCleanupCtx, 1*time.Hour)
+	oauthHandlers.StartCleanupWorker(oauthCleanupCtx, 1*time.Hour, &bg.oauthCleanupWG)
 
 	slog.Info("OAuth endpoints enabled",
 		"authorization_server", cfg.ExternalBaseURL+"/.well-known/oauth-authorization-server",

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	didpkg "github.com/GainForest/hypergoat/internal/atproto/did"
@@ -1166,10 +1167,21 @@ func ptrInt64(i int64) *int64 {
 	return &i
 }
 
-// StartCleanupWorker starts a background worker to clean up expired tokens.
-func (h *OAuthHandlers) StartCleanupWorker(ctx context.Context, interval time.Duration) {
+// StartCleanupWorker starts a background worker to clean up expired
+// tokens. If wg is non-nil, the worker registers itself with the
+// WaitGroup so the caller can Wait() for the goroutine to exit
+// before tearing down dependencies (notably the DB pool) — without
+// this drain, a tick firing concurrently with shutdown can run a
+// DELETE against a closed pool.
+func (h *OAuthHandlers) StartCleanupWorker(ctx context.Context, interval time.Duration, wg *sync.WaitGroup) {
 	ticker := time.NewTicker(interval)
+	if wg != nil {
+		wg.Add(1)
+	}
 	go func() {
+		if wg != nil {
+			defer wg.Done()
+		}
 		for {
 			select {
 			case <-ctx.Done():
