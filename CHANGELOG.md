@@ -1,5 +1,90 @@
 # Changelog
 
+## Unreleased — refactor: 8-track complexity reduction (May 2026)
+
+Surplus complexity that had accreted across the project's first three
+months, cleaned up in eight independent, behavior-preserving commits.
+Net ~285 LOC out, two new docs (`plan.md`, `review-round-1.md`,
+`review-round-2.md` under `docs/complexity-reduction/`) recording the
+plan and two review rounds. See those files for full per-track
+rationale.
+
+### Deletions
+
+- **`internal/database/executor.go`** — drop the unused
+  `database.Row` and `database.Rows` wrapper types. Zero callers
+  across the codebase; introduced "for consistent error handling"
+  but never adopted.
+- **`internal/database/repositories/records.go`** — drop the
+  deprecated `GetByCollectionWithLabelFilterAndKeysetCursor` (a
+  literal one-line forward to `GetByCollectionFiltered` with
+  `RecordFilter{Labels: filter}`). The five tests in
+  `records_labels_test.go` are migrated to call
+  `GetByCollectionFiltered` directly — negation, multi-labeler
+  union, and labeler-scoping coverage preserved.
+- **`cmd/hypergoat/main.go`** — drop the `/xrpc/*` 501 placeholder.
+  Magic Indexer does not serve XRPC (the notifications endpoint
+  mounts at `/notifications/graphql`, not under `/xrpc/`).
+  chi now returns the truthful 404 for `/xrpc/*`.
+- **`internal/database/repositories/config.go`** — drop the
+  in-memory PLC override mechanism that was dead in production:
+  `plcDirectoryOverride` field, `SetPLCDirectoryOverride`,
+  `GetPLCDirectoryURL`. The admin GraphQL `plc_directory_url`
+  Get/Set path is unaffected (uses the generic `Get`/`Set`).
+
+### Inlines and collapses
+
+- **`internal/server/oauth_dpop_nonce.go`,
+  `internal/server/oauth_par.go`** — inline `generateDPoPNonce`
+  and `generatePARRequestURI` (one-call-site helpers).
+- **`internal/server/graphiql.go`** — replace the local
+  `escapeHTML` helper with `html.EscapeString` from the stdlib
+  (semantically identical: both escape `<>&"'`). Renames the
+  local `html` variable in `HandleGraphiQL` to `page` to avoid
+  shadowing the stdlib import.
+- **`internal/ingestion/processor.go`** — collapse
+  `RecordHooks []RecordHook` to `Hook *RecordHook`. One hook
+  ever appended (notifications); per-hook `Policy == HookAbortTx`
+  and `Name` semantics preserved.
+
+### Centralization
+
+- **`internal/config/config.go`** — new `config.SplitCSV(s string)
+  []string` helper with drop-empty semantics, covered by a new
+  table-driven `TestSplitCSV` (12 subtests). Replaces the inline
+  split/trim/drop-empty loop for `TapCollectionFilters` and the
+  local `parseDIDs` in `cmd/hypergoat/main.go`, plus
+  `labelerDIDsCount` in the config package.
+- **AllowedOrigins** parsing deliberately stays inline at both
+  sites. The current behavior treats CORS misconfig `","` as
+  "deny all"; drop-empty `SplitCSV` would shift it to "allow all"
+  — a security-relevant delta in a permissive direction.
+- **`internal/oauth/did.go`** — new `oauth.NewDIDResolverWithPLC`
+  helper. Three callers (`cmd/hypergoat` jetstream startup,
+  `cmd/hypergoat` labeler startup, `cmd/backfill_pds`) replaced
+  their identical four-line `[]DIDResolverOption{}` + conditional
+  append + `NewDIDResolver(opts...)` pattern with a single call.
+
+### Docs
+
+- **`docs/archive/`** — moved out of the active docs surface:
+  `REVIEW-Feb5.md`, `IMPLEMENTATION_PLAN.md`, `docs/reviews/`.
+  Updated AGENTS.md (3 refs) and `docs/RUNBOOK.md` (1 ref) to
+  point at the new paths. `AUDIT_REPORT_2026-04-13.md`
+  deliberately stays at `docs/` root — three of its findings
+  (`F-DEP-001` x/crypto CVE-2024-45337, `F-LABELER-001` label
+  signature verification, `F-DOS-001` WebSocket subscription
+  DoS) remain open.
+
+### Non-goals (deliberate)
+
+- Notifications `Registry` plugin pattern kept — more notification
+  patterns are planned.
+- `populateActivityIfEmpty` boot-time backfill kept — future
+  migrations may need a similar shape.
+
+---
+
 ## Unreleased — chore(testdata): sync lexicons to `@hypercerts-org/lexicon@0.12.0`
 
 Refreshes the in-repo testdata lexicons to match the canonical
