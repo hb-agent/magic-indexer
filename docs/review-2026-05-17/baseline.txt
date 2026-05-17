@@ -1,0 +1,25 @@
+Pre-implementation baseline — review-2026-05-17
+Captured 2026-05-17 on this dev container (ARM64 Linux).
+
+Environment notes:
+- Dev container's `go env` defaults to GOARCH=amd64 but the
+  hardware is aarch64; cgo's `-m64` flag is rejected by the
+  installed aarch64 gcc. Workaround: prefix go commands with
+  `GOARCH=arm64`. `CGO_ENABLED=1 GOARCH=arm64` for `-race`.
+- `-short` skips Postgres-dependent integration tests. Without
+  `-short` the actors, migrations, purge, and oauth-db tests
+  fail because no Postgres is reachable. Bring up docker-compose
+  Postgres + drop `-short` to run them locally.
+
+Commands:
+  GOARCH=arm64 go build ./...                        OK (no output)
+  GOARCH=arm64 go vet ./...                          OK (no output)
+  GOARCH=arm64 golangci-lint run ./...               0 issues
+  CGO_ENABLED=1 GOARCH=arm64 go test -race -short ./...
+                                                     all packages ok
+
+Pre-existing errors to compare against post-implementation: NONE.
+
+CI in GitHub Actions runs on amd64; baseline above is the local
+equivalent. If a track introduces a new failure visible only on
+amd64, CI will catch it.
