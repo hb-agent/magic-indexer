@@ -1185,7 +1185,13 @@ func (h *OAuthHandlers) StartCleanupWorker(ctx context.Context, interval time.Du
 					{"atp_requests", h.atpRequests.DeleteExpired(ctx, now)},
 					{"auth_codes", h.authCodes.DeleteExpired(ctx, now)},
 					{"access_tokens", h.accessTokens.DeleteExpired(ctx, now)},
-					{"dpop_jtis", h.dpopJTIs.DeleteOlderThan(ctx, now-3600)},
+					// DPoP JTI floor: keep just long enough that a
+					// still-valid proof (max age DefaultMaxDPoPAge =
+					// 300s) cannot be replayed by clock-skewed callers.
+					// The previous 1-hour floor kept rows ~12x longer
+					// than the proof itself is valid, with no replay-
+					// defence benefit.
+					{"dpop_jtis", h.dpopJTIs.DeleteOlderThan(ctx, now-oauth.DefaultMaxDPoPAge-oauth.DPoPJTICleanupSkewSeconds)},
 				} {
 					if task.err != nil {
 						slog.Warn("OAuth cleanup failed", "table", task.name, "error", task.err)

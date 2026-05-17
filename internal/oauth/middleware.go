@@ -27,6 +27,14 @@ const (
 // DefaultMaxDPoPAge is the default maximum age for DPoP proofs (5 minutes).
 const DefaultMaxDPoPAge = 300
 
+// DPoPJTICleanupSkewSeconds is the extra grace window added on top
+// of DefaultMaxDPoPAge when reaping DB-backed JTI rows. Bounds the
+// clock-skew tolerance for clients still presenting a proof whose
+// iat is within DefaultMaxDPoPAge but whose own clock is mildly
+// behind ours. Keeping this small keeps the JTI table at the size
+// needed for replay defence, not 12x larger.
+const DPoPJTICleanupSkewSeconds = 30
+
 // AccessTokenStore provides access to OAuth access tokens.
 type AccessTokenStore interface {
 	// Get retrieves an access token by token string.
