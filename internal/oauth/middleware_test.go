@@ -365,6 +365,19 @@ func TestAuthMiddleware_RequireAuth_DPoP_KeyMismatch(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected status 401, got %d", rec.Code)
 	}
+	// 2026-05-17 Track 3d response-shape collapse: a JKT mismatch
+	// must look identical on the wire to a generic invalid-token
+	// failure, so an attacker can't probe arbitrary JKTs and
+	// distinguish "your key was wrong" from "your key was right but
+	// some other check failed". The body must contain
+	// `invalid_token`, NOT `invalid_dpop_proof`.
+	body := rec.Body.String()
+	if strings.Contains(body, "invalid_dpop_proof") {
+		t.Errorf("JKT-mismatch response leaks distinct error code (oracle): %s", body)
+	}
+	if !strings.Contains(body, "invalid_token") {
+		t.Errorf("JKT-mismatch response missing collapsed invalid_token code: %s", body)
+	}
 }
 
 // TestAuthMiddleware_RequireAuth_DPoP_TokenNotDPoPBound guards the

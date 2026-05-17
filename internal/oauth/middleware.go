@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -169,11 +170,21 @@ func (m *AuthMiddleware) validateDPoPToken(r *http.Request, token string) (*Auth
 	// uses subtle.ConstantTimeCompare for PKCE (which has the same
 	// "public-ish material" property), so consistency is the
 	// strongest argument here.
+	//
+	// Response-shape collapse: on JKT mismatch we log the precise
+	// reason internally but return ErrInvalidToken (matching what
+	// the other post-validation invalid-token paths in this
+	// function return) so an attacker can't probe arbitrary keys
+	// and distinguish "JKT was wrong" from "JKT matched but you hit
+	// some other validation failure". Without this collapse the
+	// distinct `invalid_dpop_proof / DPoP key mismatch` body acts as
+	// an oracle even after the constant-time compare lands.
 	if accessToken.DPoPJKT == nil {
 		return nil, ErrTokenNotDPoPBound
 	}
 	if subtle.ConstantTimeCompare([]byte(*accessToken.DPoPJKT), []byte(result.JKT)) != 1 {
-		return nil, ErrDPoPKeyMismatch
+		slog.Debug("DPoP JKT mismatch", "internal_error", ErrDPoPKeyMismatch.Code)
+		return nil, ErrInvalidToken
 	}
 
 	// Check user
