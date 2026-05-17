@@ -192,23 +192,67 @@ const (
 
 // FilterGroup represents a recursive tree of filter conditions.
 // Field-level filters are leaf nodes; children are sub-groups.
+// Joined entries apply an inner FilterGroup to records in a
+// different collection via a strongRef-style URI lookup — see
+// JoinedFilter for the SQL shape.
 type FilterGroup struct {
 	Operator GroupOperator
 	Filters  []FieldFilter
 	Children []FilterGroup
+	Joined   []JoinedFilter
 }
 
-// IsEmpty returns true if the group has no filters and no children.
+// JoinedFilter applies an inner FilterGroup to records in a
+// different collection, joined by a strongRef-style URI lookup.
+// The SQL shape emitted by buildFilterGroupRecursive is:
+//
+//	EXISTS (
+//	  SELECT 1 FROM record d
+//	  WHERE d.collection = $N
+//	    AND d.uri = <JoinExpr>            -- evaluated in the outer scope
+//	    AND (<Inner with alias "d">)
+//	)
+//
+// JoinExpr is the SQL fragment that extracts the referenced URI
+// from the outer record's JSON. For badge.award → badge.definition
+// it's `r.json->'badge'->>'uri'`. The outer alias must be `r` for
+// today's call sites (no nested joins yet); a future need would
+// generalise via the alias plumbing.
+//
+// SECURITY: JoinExpr is emitted verbatim into SQL. The values
+// come from the joinedWhereRegistry in internal/graphql/schema/
+// where.go — code-defined, never sourced from request data.
+// Treat additions to that registry as a SQL diff.
+//
+// Joined-where nesting is bounded to one level: Inner.Joined
+// must be empty (enforced by the schema-side extractor). Nested
+// EXISTS subqueries inside an inner clause become planner-
+// unfriendly fast, and no current client wants them.
+type JoinedFilter struct {
+	TargetCollection string
+	JoinExpr         string
+	Inner            FilterGroup
+}
+
+// IsEmpty returns true if the group has no filters, no children,
+// and no joined filters.
 func (g *FilterGroup) IsEmpty() bool {
-	return len(g.Filters) == 0 && len(g.Children) == 0
+	return len(g.Filters) == 0 && len(g.Children) == 0 && len(g.Joined) == 0
 }
 
 // CountConditions returns the total number of leaf filter conditions
-// across the entire tree.
+// across the entire tree, including any joined inner trees. The
+// global MaxFilterConditions cap is enforced against this count, so
+// a joined filter's inner leaves contribute to the parent's budget
+// (otherwise a query could bypass the cap by hiding leaves inside
+// joins).
 func (g *FilterGroup) CountConditions() int {
 	count := len(g.Filters)
 	for i := range g.Children {
 		count += g.Children[i].CountConditions()
+	}
+	for i := range g.Joined {
+		count += g.Joined[i].Inner.CountConditions()
 	}
 	return count
 }
@@ -218,21 +262,36 @@ const (
 	MaxFilterDepth = 3
 )
 
-// BuildFilterGroupClause builds a SQL WHERE clause fragment from a FilterGroup tree.
-// Returns the clause (without WHERE keyword), parameter values, and any error.
-// paramOffset is the starting parameter number.
+// BuildFilterGroupClause builds a SQL WHERE clause fragment from
+// a FilterGroup tree. Returns the clause (without WHERE keyword),
+// parameter values, and any error. paramOffset is the starting
+// parameter number.
+//
+// Thin wrapper that defaults the table alias to "r" — the alias
+// GetByCollectionFiltered uses for the outer record table. The
+// joined-where path inside EXISTS calls
+// buildFilterGroupClauseWithAlias directly with "d".
 func BuildFilterGroupClause(group FilterGroup, paramOffset int) (string, []interface{}, error) {
-	// Enforce global condition count.
+	// Enforce global condition count (includes joined inner leaves
+	// via FilterGroup.CountConditions).
 	totalConditions := group.CountConditions()
 	if totalConditions > MaxFilterConditions {
 		return "", nil, fmt.Errorf("too many filter conditions (%d across all groups), maximum is %d",
 			totalConditions, MaxFilterConditions)
 	}
 
-	return buildFilterGroupRecursive(group, paramOffset, 0)
+	return buildFilterGroupClauseWithAlias(group, paramOffset, "r")
 }
 
-func buildFilterGroupRecursive(group FilterGroup, paramIdx, depth int) (string, []interface{}, error) {
+// buildFilterGroupClauseWithAlias is the alias-aware version of
+// BuildFilterGroupClause. Called by the public wrapper with "r"
+// for outer clauses, and by the EXISTS-emission path with "d"
+// for inner joined clauses.
+func buildFilterGroupClauseWithAlias(group FilterGroup, paramOffset int, alias string) (string, []interface{}, error) {
+	return buildFilterGroupRecursive(group, paramOffset, 0, alias)
+}
+
+func buildFilterGroupRecursive(group FilterGroup, paramIdx, depth int, alias string) (string, []interface{}, error) {
 	if depth > MaxFilterDepth {
 		return "", nil, fmt.Errorf("filter nesting exceeds maximum depth of %d", MaxFilterDepth)
 	}
@@ -250,7 +309,7 @@ func buildFilterGroupRecursive(group FilterGroup, paramIdx, depth int) (string, 
 			if err := f.Validate(); err != nil {
 				return "", nil, err
 			}
-			expr := jsonExtract(f.FieldName, f.IsJSON)
+			expr := jsonExtract(alias, f.FieldName, f.IsJSON)
 			if *f.IsNull {
 				clauses = append(clauses, expr+" IS NULL")
 			} else {
@@ -269,7 +328,7 @@ func buildFilterGroupRecursive(group FilterGroup, paramIdx, depth int) (string, 
 		if err := f.Validate(); err != nil {
 			return "", nil, fmt.Errorf("invalid filter on field %q: %w", f.FieldName, err)
 		}
-		clause, newParams, nextIdx, err := buildSingleFilter(f, paramIdx)
+		clause, newParams, nextIdx, err := buildSingleFilter(f, paramIdx, alias)
 		if err != nil {
 			return "", nil, err
 		}
@@ -278,9 +337,9 @@ func buildFilterGroupRecursive(group FilterGroup, paramIdx, depth int) (string, 
 		paramIdx = nextIdx
 	}
 
-	// Build child group clauses recursively.
+	// Build child group clauses recursively (same alias).
 	for _, child := range group.Children {
-		childClause, childParams, err := buildFilterGroupRecursive(child, paramIdx, depth+1)
+		childClause, childParams, err := buildFilterGroupRecursive(child, paramIdx, depth+1, alias)
 		if err != nil {
 			return "", nil, err
 		}
@@ -289,6 +348,37 @@ func buildFilterGroupRecursive(group FilterGroup, paramIdx, depth int) (string, 
 			params = append(params, childParams...)
 			paramIdx += len(childParams)
 		}
+	}
+
+	// Build joined filters as EXISTS subqueries. The inner clause
+	// uses alias "d" against `record d`; the JoinExpr lives in the
+	// outer scope (the OUTER's alias) and correlates via d.uri =
+	// <JoinExpr>. Depth budget for the inner subtree resets to 0 —
+	// intentional and bounded by the one-level-joined guard the
+	// extractor enforces on Inner.Joined.
+	for _, j := range group.Joined {
+		// Inner clause uses the joined alias "d".
+		innerClause, innerParams, err := buildFilterGroupClauseWithAlias(j.Inner, paramIdx, "d")
+		if err != nil {
+			return "", nil, err
+		}
+		// Target-collection parameter follows the inner's parameters.
+		collParamIdx := paramIdx + len(innerParams)
+		collParam := fmt.Sprintf("$%d", collParamIdx)
+		var existsClause string
+		if innerClause == "" {
+			existsClause = fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM record d WHERE d.collection = %s AND d.uri = %s)",
+				collParam, j.JoinExpr)
+		} else {
+			existsClause = fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM record d WHERE d.collection = %s AND d.uri = %s AND (%s))",
+				collParam, j.JoinExpr, innerClause)
+		}
+		clauses = append(clauses, existsClause)
+		params = append(params, innerParams...)
+		params = append(params, j.TargetCollection)
+		paramIdx = collParamIdx + 1
 	}
 
 	if len(clauses) == 0 {
@@ -430,6 +520,10 @@ func validateInListShape(value interface{}, opName string) error {
 // BuildFieldFilterClause builds the WHERE clause fragment for a set of field filters.
 // Returns the clause (without WHERE keyword), the parameter values, and any error.
 // paramOffset is the starting parameter number (e.g., 3 means first param is $3).
+//
+// Legacy non-recursive path. Used by callers that don't compose
+// _and/_or. Always emits against the outer record alias "r"; the
+// joined-where path goes through buildFilterGroupClauseWithAlias.
 func BuildFieldFilterClause(filters []FieldFilter, paramOffset int) (string, []interface{}, error) {
 	if len(filters) > MaxFilterConditions {
 		return "", nil, fmt.Errorf("too many filter conditions (%d), maximum is %d", len(filters), MaxFilterConditions)
@@ -438,6 +532,7 @@ func BuildFieldFilterClause(filters []FieldFilter, paramOffset int) (string, []i
 	var clauses []string
 	var params []interface{}
 	paramIdx := paramOffset
+	const alias = "r"
 
 	for _, f := range filters {
 		if err := f.Validate(); err != nil {
@@ -446,7 +541,7 @@ func BuildFieldFilterClause(filters []FieldFilter, paramOffset int) (string, []i
 
 		// Handle isNull separately.
 		if f.IsNull != nil {
-			expr := jsonExtract(f.FieldName, f.IsJSON)
+			expr := jsonExtract(alias, f.FieldName, f.IsJSON)
 			if *f.IsNull {
 				clauses = append(clauses, expr+" IS NULL")
 			} else {
@@ -455,7 +550,7 @@ func BuildFieldFilterClause(filters []FieldFilter, paramOffset int) (string, []i
 			continue
 		}
 
-		clause, newParams, nextIdx, err := buildSingleFilter(f, paramIdx)
+		clause, newParams, nextIdx, err := buildSingleFilter(f, paramIdx, alias)
 		if err != nil {
 			return "", nil, err
 		}
@@ -467,18 +562,41 @@ func BuildFieldFilterClause(filters []FieldFilter, paramOffset int) (string, []i
 	return strings.Join(clauses, " AND "), params, nil
 }
 
-func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int, error) {
+// buildSingleFilter dispatches a single FieldFilter to its SQL
+// emitter. The alias parameter qualifies column references and
+// JSON paths so this can be called both for the outer record
+// (alias "r") and for an inner joined-record subquery (alias
+// "d").
+//
+// Sentinel: the lexicon-specific filter kinds
+// (KindArrayContributor, KindUnionSubject, KindStringSubject)
+// emit hardcoded "r."-prefixed SQL fragments and are only
+// correct for the outer scope. Trying to use one inside an
+// EXISTS subquery (alias "d") would silently emit SQL that
+// references the wrong table. Reject with an error rather
+// than emit. Today no joined-where target collection has a
+// field that would route through these kinds, but the sentinel
+// future-proofs against an accidental registry edit.
+func buildSingleFilter(f FieldFilter, paramIdx int, alias string) (string, []interface{}, int, error) {
 	if err := ValidateFieldName(f.FieldName); err != nil {
 		return "", nil, paramIdx, err
 	}
 
 	switch f.Kind {
-	case KindArrayContributor:
-		return buildContributorFilter(f, paramIdx)
-	case KindUnionSubject:
-		return buildBadgeAwardSubjectFilter(f, paramIdx)
-	case KindStringSubject:
-		return buildStringSubjectFilter(f, paramIdx)
+	case KindArrayContributor, KindUnionSubject, KindStringSubject:
+		if alias != "r" {
+			return "", nil, paramIdx, fmt.Errorf(
+				"lexicon-specific filter kind %v cannot be used inside a joined-where subquery (alias %q); only the outer scope is supported",
+				f.Kind, alias)
+		}
+		switch f.Kind {
+		case KindArrayContributor:
+			return buildContributorFilter(f, paramIdx)
+		case KindUnionSubject:
+			return buildBadgeAwardSubjectFilter(f, paramIdx)
+		case KindStringSubject:
+			return buildStringSubjectFilter(f, paramIdx)
+		}
 	}
 
 	switch f.Operator {
@@ -486,8 +604,14 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 		if f.IsJSON {
 			// Use JSONB containment for GIN index support.
 			// For nested paths (a__b__c), construct {"a":{"b":{"c": value}}}.
+			//
+			// The containment expression today references the outer
+			// `record.json` column via bare `json`. When this path
+			// emits inside an EXISTS subquery, bare `json` would be
+			// ambiguous between the outer `r.json` and the inner
+			// `d.json`. Qualify with the alias.
 			param := fmt.Sprintf("$%d", paramIdx)
-			clause := fmt.Sprintf("json @> %s::jsonb", param)
+			clause := fmt.Sprintf("%s.json @> %s::jsonb", alias, param)
 			containment := buildNestedContainment(f.FieldName, f.Value)
 			jsonBytes, err := json.Marshal(containment)
 			if err != nil {
@@ -496,23 +620,23 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 			return clause, []interface{}{string(jsonBytes)}, paramIdx + 1, nil
 		}
 		param := fmt.Sprintf("$%d", paramIdx)
-		return fmt.Sprintf("%s = %s", qualifyColumn(f.FieldName), param), []interface{}{f.Value}, paramIdx + 1, nil
+		return fmt.Sprintf("%s = %s", qualifyColumn(alias, f.FieldName), param), []interface{}{f.Value}, paramIdx + 1, nil
 
 	case OpNeq:
-		expr := jsonExtract(f.FieldName, f.IsJSON)
+		expr := jsonExtract(alias, f.FieldName, f.IsJSON)
 		param := fmt.Sprintf("$%d", paramIdx)
 		// Include records where field is absent (NULL).
 		clause := fmt.Sprintf("(%s != %s OR %s IS NULL)", expr, param, expr)
 		return clause, []interface{}{f.Value}, paramIdx + 1, nil
 
 	case OpGt, OpLt, OpGte, OpLte:
-		expr := jsonExtractTyped(f.FieldName, f.LexiconType, f.IsJSON)
+		expr := jsonExtractTyped(alias, f.FieldName, f.LexiconType, f.IsJSON)
 		op := sqlOp(f.Operator)
 		param := fmt.Sprintf("$%d", paramIdx)
 		return fmt.Sprintf("%s %s %s", expr, op, param), []interface{}{f.Value}, paramIdx + 1, nil
 
 	case OpIn:
-		expr := jsonExtract(f.FieldName, f.IsJSON)
+		expr := jsonExtract(alias, f.FieldName, f.IsJSON)
 		param := fmt.Sprintf("$%d", paramIdx)
 
 		// Check for NULL values in the list.
@@ -533,14 +657,14 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 		// preserved because Go's asciiToLower mirrors Postgres
 		// `lower(... COLLATE "C")` byte-for-byte on ASCII and is the
 		// identity elsewhere.
-		expr := jsonExtract(f.FieldName, f.IsJSON)
+		expr := jsonExtract(alias, f.FieldName, f.IsJSON)
 		param := fmt.Sprintf("$%d", paramIdx)
 		s, _ := f.Value.(string)
 		clause := fmt.Sprintf(`lower((%s) COLLATE "C") = %s`, expr, param)
 		return clause, []interface{}{asciiToLower(s)}, paramIdx + 1, nil
 
 	case OpIni:
-		expr := jsonExtract(f.FieldName, f.IsJSON)
+		expr := jsonExtract(alias, f.FieldName, f.IsJSON)
 		param := fmt.Sprintf("$%d", paramIdx)
 		raw, hasNull := extractInValues(f.Value)
 		values := make([]string, len(raw))
@@ -555,14 +679,14 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 		return clause, []interface{}{values}, paramIdx + 1, nil
 
 	case OpContains:
-		expr := jsonExtract(f.FieldName, f.IsJSON)
+		expr := jsonExtract(alias, f.FieldName, f.IsJSON)
 		param := fmt.Sprintf("$%d", paramIdx)
 		escaped := escapeLike(f.Value.(string))
 		clause := fmt.Sprintf("%s ILIKE '%%' || %s || '%%' ESCAPE '\\'", expr, param)
 		return clause, []interface{}{escaped}, paramIdx + 1, nil
 
 	case OpStartsWith:
-		expr := jsonExtract(f.FieldName, f.IsJSON)
+		expr := jsonExtract(alias, f.FieldName, f.IsJSON)
 		param := fmt.Sprintf("$%d", paramIdx)
 		escaped := escapeLike(f.Value.(string))
 		clause := fmt.Sprintf("%s ILIKE %s || '%%' ESCAPE '\\'", expr, param)
@@ -575,29 +699,34 @@ func buildSingleFilter(f FieldFilter, paramIdx int) (string, []interface{}, int,
 
 // jsonExtract returns the SQL expression for extracting a JSON field as text.
 //
-// Column-level (non-JSON) field references are qualified with the
-// `r.` alias because `GetByCollectionFiltered` LEFT JOINs `actor`,
-// and the `did` column exists on both `record` and `actor`. Without
-// qualification, Postgres raises `column reference "did" is
-// ambiguous (SQLSTATE 42702)`. The only column-level field today is
-// `did`; adding more would require either a per-field qualification
-// map or assuming every column lives on `r`. Keeping it explicit.
-func jsonExtract(fieldName string, isJSON bool) string {
+// Column-level (non-JSON) field references are qualified with
+// the table alias because `GetByCollectionFiltered` LEFT JOINs
+// `actor`, and the `did` column exists on both `record` and
+// `actor`. Without qualification, Postgres raises `column
+// reference "did" is ambiguous (SQLSTATE 42702)`. JSON-path
+// references are also qualified with the alias so this can be
+// called from inside an EXISTS subquery whose joined-record
+// alias differs from the outer one (`d` vs `r`) — bare `json`
+// would be ambiguous when both aliased records are in scope.
+//
+// alias is the table alias to prefix; today's call sites pass
+// "r" (outer record) or "d" (inner joined-record under EXISTS).
+func jsonExtract(alias, fieldName string, isJSON bool) string {
 	if !isJSON {
-		return qualifyColumn(fieldName)
+		return qualifyColumn(alias, fieldName)
 	}
 	parts := strings.Split(fieldName, "__")
 	if len(parts) == 1 {
-		return fmt.Sprintf("json->>'%s'", fieldName)
+		return fmt.Sprintf("%s.json->>'%s'", alias, fieldName)
 	}
-	// Nested path: json->'a'->'b'->>'c' (last segment uses ->> for text extraction).
+	// Nested path: <alias>.json->'a'->'b'->>'c' (last segment uses ->> for text extraction).
 	var expr string
 	for i, part := range parts {
 		switch {
 		case i == 0 && i == len(parts)-1:
-			expr = fmt.Sprintf("json->>'%s'", part)
+			expr = fmt.Sprintf("%s.json->>'%s'", alias, part)
 		case i == 0:
-			expr = fmt.Sprintf("json->'%s'", part)
+			expr = fmt.Sprintf("%s.json->'%s'", alias, part)
 		case i == len(parts)-1:
 			expr = fmt.Sprintf("%s->>'%s'", expr, part)
 		default:
@@ -608,12 +737,21 @@ func jsonExtract(fieldName string, isJSON bool) string {
 }
 
 // jsonExtractTyped returns the SQL expression with appropriate CAST for typed comparison.
-// Supports nested paths using "__" separator.
-func jsonExtractTyped(fieldName, lexiconType string, isJSON bool) string {
+// Supports nested paths using "__" separator. The alias parameter
+// qualifies both the column-level (non-JSON) early-return AND
+// the JSON-path extraction, so this is safe inside an EXISTS
+// subquery against a different table alias.
+func jsonExtractTyped(alias, fieldName, lexiconType string, isJSON bool) string {
 	if !isJSON {
-		return fieldName
+		// Pre-existing latent: today no column-level field routes
+		// through gt/lt operators (only `did` is column-level and
+		// it's eq-only via DIDFilterInput). The alias qualification
+		// here is symmetric with jsonExtract's non-JSON branch so a
+		// future column-level gt/lt won't silently emit an
+		// unqualified column name. (R1.2 in plan-review round 1.)
+		return qualifyColumn(alias, fieldName)
 	}
-	base := jsonExtract(fieldName, true)
+	base := jsonExtract(alias, fieldName, true)
 	switch lexiconType {
 	case "integer", "number":
 		// Guard against non-numeric values.
@@ -641,10 +779,12 @@ func sqlOp(op FilterOperator) string {
 }
 
 // qualifyColumn prefixes a column-level field reference with the
-// `r.` alias used by `GetByCollectionFiltered`'s FROM clause. See
-// jsonExtract for the disambiguation rationale.
-func qualifyColumn(name string) string {
-	return "r." + name
+// supplied table alias. Today's call sites pass "r" (the outer
+// record alias used by `GetByCollectionFiltered`) or "d" (the
+// inner joined-record alias used inside an EXISTS subquery).
+// See jsonExtract for the disambiguation rationale.
+func qualifyColumn(alias, name string) string {
+	return alias + "." + name
 }
 
 // buildContributorFilter emits the contributor-identities containment

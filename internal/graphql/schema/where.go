@@ -50,6 +50,56 @@ const badgeAwardSubjectDescription = `Filter badge awards by the subject DID. Ma
 // the policy at schema introspection.
 const graphFollowSubjectDescription = `Filter follows by the subject DID — the account being followed. Use this to assemble a followers list: where: { subject: { eq: <did> } } returns every follow record pointing at that DID. The follower is the record author (filter via the did field, or read from node.did). DIDs only — handle values are rejected at the GraphQL layer. Compose with the did filter via _or to express "I follow OR am followed by": where: { _or: [ { did: { eq: "did:plc:me" } }, { subject: { eq: "did:plc:me" } } ] }.`
 
+// badgeAwardBadgeDescription is the pinned description for the
+// AppCertifiedBadgeAwardWhereInput.badge nested-where filter
+// (issue #87). Visible at schema introspection.
+const badgeAwardBadgeDescription = `Filter badge awards by properties of the joined badge definition record. Every field on AppCertifiedBadgeDefinitionWhereInput is available — most usefully badgeType (e.g. {eq: "endorsement"}) for the Endorsements-tab read pattern, but title / description / severity / did all work too. The filter resolves via an EXISTS subquery: only awards whose strongRef badge.uri resolves to a definition that matches the inner where are returned. An award pointing at a missing or deleted definition fails the existence check, so {badge: {}} (no inner filter) can be used to drop awards with broken refs. Compose with the outer subject + did filters via the usual _and (the default) or _or. Example, "endorsements OR verifications received by me": where: { subject: { eq: "did:plc:me" }, badge: { _or: [ { badgeType: { eq: "endorsement" } }, { badgeType: { eq: "verification" } } ] } }.`
+
+// joinedWhereDescriptor describes a strongRef-style filter that
+// joins to records in a different collection.
+//
+// SECURITY: JoinExpr is emitted verbatim into SQL by the
+// EXISTS-subquery builder in
+// internal/database/repositories/filter.go. Registry values are
+// code-defined and must NEVER source from request data — they
+// form the SQL fragment for the EXISTS subquery's join
+// predicate. Treat additions to this registry as a SQL diff.
+type joinedWhereDescriptor struct {
+	FieldName     string
+	TargetLexicon string // the joined collection
+	JoinExpr      string // SQL fragment extracting the referenced URI from the outer record
+	Description   string // pinned consumer-facing text
+}
+
+// joinedWhereRegistry maps parentLexiconID → fieldName → descriptor
+// for every nested-where field that joins to another collection.
+//
+// First entry (issue #87): app.certified.badge.award.badge joins
+// to app.certified.badge.definition via the strongRef in
+// award.json.badge.uri. Each award has exactly one badge ref;
+// the EXISTS subquery returns awards whose joined definition
+// matches the inner where.
+var joinedWhereRegistry = map[string]map[string]joinedWhereDescriptor{
+	"app.certified.badge.award": {
+		"badge": {
+			FieldName:     "badge",
+			TargetLexicon: "app.certified.badge.definition",
+			JoinExpr:      "r.json->'badge'->>'uri'",
+			Description:   badgeAwardBadgeDescription,
+		},
+	},
+}
+
+// lookupJoinedWhereDescriptor returns the descriptor for a
+// (lexicon, field) pair if the joined-where registry has one.
+func lookupJoinedWhereDescriptor(lexID, fieldName string) (joinedWhereDescriptor, bool) {
+	if byField, ok := joinedWhereRegistry[lexID]; ok {
+		d, ok := byField[fieldName]
+		return d, ok
+	}
+	return joinedWhereDescriptor{}, false
+}
+
 // filterRegistry maps lexicon ID → (GraphQL input field name →
 // descriptor) for every lexicon-specific filter that needs a bespoke
 // SQL shape. Adding a new entry is the only place to touch when a
@@ -192,11 +242,18 @@ func propertyToFilterInput(prop lexicon.Property) *graphql.InputObject {
 
 // extractFieldFilters extracts a FilterGroup from a GraphQL `where` argument map.
 // Supports recursive _and/_or composition with depth limiting.
-func extractFieldFilters(whereArg interface{}, lex *lexicon.Lexicon) (repositories.FilterGroup, error) {
-	return extractFieldFiltersRecursive(whereArg, lex, 0)
+//
+// The registry parameter is used by the joined-where branch
+// (issue #87) to look up target lexicons by ID — the
+// joinedWhereRegistry maps parent lexicons to target lexicons,
+// and the extractor needs to recurse against the target's
+// property/filter shape. Pass nil to disable joined-where
+// extraction (extractor will not recognize joined fields).
+func extractFieldFilters(whereArg interface{}, lex *lexicon.Lexicon, registry *lexicon.Registry) (repositories.FilterGroup, error) {
+	return extractFieldFiltersRecursive(whereArg, lex, registry, 0)
 }
 
-func extractFieldFiltersRecursive(whereArg interface{}, lex *lexicon.Lexicon, depth int) (repositories.FilterGroup, error) {
+func extractFieldFiltersRecursive(whereArg interface{}, lex *lexicon.Lexicon, registry *lexicon.Registry, depth int) (repositories.FilterGroup, error) {
 	whereMap, ok := whereArg.(map[string]interface{})
 	if !ok {
 		return repositories.FilterGroup{Operator: repositories.GroupAND}, nil
@@ -221,7 +278,7 @@ func extractFieldFiltersRecursive(whereArg interface{}, lex *lexicon.Lexicon, de
 			}
 			childGroup := repositories.FilterGroup{Operator: childOp}
 			for _, item := range list {
-				subGroup, err := extractFieldFiltersRecursive(item, lex, depth+1)
+				subGroup, err := extractFieldFiltersRecursive(item, lex, registry, depth+1)
 				if err != nil {
 					return repositories.FilterGroup{}, err
 				}
@@ -234,6 +291,36 @@ func extractFieldFiltersRecursive(whereArg interface{}, lex *lexicon.Lexicon, de
 		filterMap, ok := filterInput.(map[string]interface{})
 		if !ok {
 			continue
+		}
+
+		// Joined-where? Dispatch through the joined-where registry
+		// (issue #87). The inner is recursively extracted against
+		// the TARGET lexicon's property/filter shape, then wrapped
+		// in a JoinedFilter that the SQL builder will emit as an
+		// EXISTS subquery. Joined-where nesting is bounded to one
+		// level — the inner must not itself contain Joined entries.
+		if lex != nil && registry != nil {
+			if jd, ok := lookupJoinedWhereDescriptor(lex.ID, fieldName); ok {
+				targetLex, found := registry.GetLexicon(jd.TargetLexicon)
+				if !found {
+					return repositories.FilterGroup{}, fmt.Errorf(
+						"field %q: target lexicon %q not registered", fieldName, jd.TargetLexicon)
+				}
+				inner, err := extractFieldFiltersRecursive(filterInput, targetLex, registry, depth+1)
+				if err != nil {
+					return repositories.FilterGroup{}, fmt.Errorf("field %q: %w", fieldName, err)
+				}
+				if len(inner.Joined) > 0 {
+					return repositories.FilterGroup{}, fmt.Errorf(
+						"field %q: nested joined-where not supported (max one level)", fieldName)
+				}
+				group.Joined = append(group.Joined, repositories.JoinedFilter{
+					TargetCollection: jd.TargetLexicon,
+					JoinExpr:         jd.JoinExpr,
+					Inner:            inner,
+				})
+				continue
+			}
 		}
 
 		// Lexicon-specific filter? Dispatch through the registry. The

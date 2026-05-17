@@ -20,7 +20,7 @@ func TestBuildSingleFilter_Contributor_Eq(t *testing.T) {
 		IsJSON:    true,
 		Kind:      KindArrayContributor,
 	}
-	clause, params, nextIdx, err := buildSingleFilter(f, 1)
+	clause, params, nextIdx, err := buildSingleFilter(f, 1, "r")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestBuildSingleFilter_Contributor_In(t *testing.T) {
 		IsJSON:    true,
 		Kind:      KindArrayContributor,
 	}
-	clause, params, nextIdx, err := buildSingleFilter(f, 3)
+	clause, params, nextIdx, err := buildSingleFilter(f, 3, "r")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestBuildSingleFilter_Contributor_UnsupportedOperator(t *testing.T) {
 				IsJSON:    true,
 				Kind:      KindArrayContributor,
 			}
-			_, _, _, err := buildSingleFilter(f, 1)
+			_, _, _, err := buildSingleFilter(f, 1, "r")
 			if err == nil {
 				t.Errorf("expected error for operator %s on contributor filter", op)
 			}
@@ -133,7 +133,7 @@ func TestBuildSingleFilter_Contributor_NoUserInputInSQL(t *testing.T) {
 		IsJSON:    true,
 		Kind:      KindArrayContributor,
 	}
-	clause, params, _, err := buildSingleFilter(f, 1)
+	clause, params, _, err := buildSingleFilter(f, 1, "r")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestBuildSingleFilter_ContributorsFieldNameWithoutMarker(t *testing.T) {
 		IsJSON:    true,
 		// Kind intentionally KindScalar (zero value)
 	}
-	clause, _, _, err := buildSingleFilter(f, 1)
+	clause, _, _, err := buildSingleFilter(f, 1, "r")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestBuildSingleFilter_BadgeAwardSubject_Eq(t *testing.T) {
 		IsJSON:    true,
 		Kind:      KindUnionSubject,
 	}
-	clause, params, nextIdx, err := buildSingleFilter(f, 1)
+	clause, params, nextIdx, err := buildSingleFilter(f, 1, "r")
 	if err != nil {
 		t.Fatalf("buildSingleFilter: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestBuildSingleFilter_BadgeAwardSubject_In(t *testing.T) {
 		IsJSON:    true,
 		Kind:      KindUnionSubject,
 	}
-	clause, params, nextIdx, err := buildSingleFilter(f, 1)
+	clause, params, nextIdx, err := buildSingleFilter(f, 1, "r")
 	if err != nil {
 		t.Fatalf("buildSingleFilter: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestBuildSingleFilter_BadgeAwardSubject_UnsupportedOperator(t *testing.T) {
 			IsJSON:    true,
 			Kind:      KindUnionSubject,
 		}
-		_, _, _, err := buildSingleFilter(f, 1)
+		_, _, _, err := buildSingleFilter(f, 1, "r")
 		if err == nil {
 			t.Errorf("op %s: expected unsupported-operator error, got nil", op)
 		}
@@ -261,7 +261,7 @@ func TestBuildSingleFilter_BadgeAwardSubject_NoUserInputInSQL(t *testing.T) {
 		IsJSON:    true,
 		Kind:      KindUnionSubject,
 	}
-	clause, params, _, err := buildSingleFilter(f, 1)
+	clause, params, _, err := buildSingleFilter(f, 1, "r")
 	if err != nil {
 		t.Fatalf("buildSingleFilter: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestBuildSingleFilter_BadgeAwardSubject_ColumnMaterializedShapes(t *testing
 		IsJSON:    true,
 		Kind:      KindUnionSubject,
 	}
-	clause, _, _, err := buildSingleFilter(f, 1)
+	clause, _, _, err := buildSingleFilter(f, 1, "r")
 	if err != nil {
 		t.Fatalf("buildSingleFilter: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestBuildSingleFilter_BadgeAwardSubject_MarkerDrivesBehavior(t *testing.T) 
 		IsJSON:    true,
 		Kind:      KindUnionSubject,
 	}
-	clause, _, _, err := buildSingleFilter(f, 1)
+	clause, _, _, err := buildSingleFilter(f, 1, "r")
 	if err != nil {
 		t.Fatalf("buildSingleFilter: %v", err)
 	}
@@ -350,14 +350,14 @@ func TestBuildSingleFilter_Eqi_ShapeAndLowering(t *testing.T) {
 		Value:     "Project",
 		IsJSON:    true,
 	}
-	clause, params, nextIdx, err := buildSingleFilter(f, 1)
+	clause, params, nextIdx, err := buildSingleFilter(f, 1, "r")
 	if err != nil {
 		t.Fatalf("buildSingleFilter: %v", err)
 	}
 	if nextIdx != 2 {
 		t.Errorf("nextIdx = %d, want 2", nextIdx)
 	}
-	wantClause := `lower((json->>'type') COLLATE "C") = $1`
+	wantClause := `lower((r.json->>'type') COLLATE "C") = $1`
 	if clause != wantClause {
 		t.Errorf("clause mismatch\n got: %s\nwant: %s", clause, wantClause)
 	}
@@ -384,14 +384,14 @@ func TestBuildSingleFilter_Ini_ShapeAndLowering(t *testing.T) {
 		Value:     []interface{}{"Project", "FAVORITES", "research"},
 		IsJSON:    true,
 	}
-	clause, params, nextIdx, err := buildSingleFilter(f, 3)
+	clause, params, nextIdx, err := buildSingleFilter(f, 3, "r")
 	if err != nil {
 		t.Fatalf("buildSingleFilter: %v", err)
 	}
 	if nextIdx != 4 {
 		t.Errorf("nextIdx = %d, want 4", nextIdx)
 	}
-	wantClause := `lower((json->>'type') COLLATE "C") = ANY($3::text[])`
+	wantClause := `lower((r.json->>'type') COLLATE "C") = ANY($3::text[])`
 	if clause != wantClause {
 		t.Errorf("clause mismatch\n got: %s\nwant: %s", clause, wantClause)
 	}
@@ -425,11 +425,11 @@ func TestBuildSingleFilter_Ini_NullElementMirrorsIn(t *testing.T) {
 		Value:     []interface{}{"Project", nil, "FAVORITES"},
 		IsJSON:    true,
 	}
-	clause, _, _, err := buildSingleFilter(f, 1)
+	clause, _, _, err := buildSingleFilter(f, 1, "r")
 	if err != nil {
 		t.Fatalf("buildSingleFilter: %v", err)
 	}
-	wantClause := `(lower((json->>'type') COLLATE "C") = ANY($1::text[]) OR json->>'type' IS NULL)`
+	wantClause := `(lower((r.json->>'type') COLLATE "C") = ANY($1::text[]) OR r.json->>'type' IS NULL)`
 	if clause != wantClause {
 		t.Errorf("clause mismatch\n got: %s\nwant: %s", clause, wantClause)
 	}
@@ -454,7 +454,7 @@ func TestBuildSingleFilter_Eqi_AdversarialValue(t *testing.T) {
 		`x' OR '1'='1`,
 	}
 	// Canonical shape — adversarial input must NEVER affect it.
-	const wantClause = `lower((json->>'type') COLLATE "C") = $1`
+	const wantClause = `lower((r.json->>'type') COLLATE "C") = $1`
 	for _, in := range cases {
 		t.Run(fmt.Sprintf("%q", in), func(t *testing.T) {
 			f := FieldFilter{
@@ -463,7 +463,7 @@ func TestBuildSingleFilter_Eqi_AdversarialValue(t *testing.T) {
 				Value:     in,
 				IsJSON:    true,
 			}
-			clause, params, _, err := buildSingleFilter(f, 1)
+			clause, params, _, err := buildSingleFilter(f, 1, "r")
 			if err != nil {
 				t.Fatalf("buildSingleFilter: %v", err)
 			}
@@ -495,7 +495,7 @@ func TestBuildSingleFilter_Eqi_FieldNameInjectionRejected(t *testing.T) {
 		Value:     "project",
 		IsJSON:    true,
 	}
-	_, _, _, err := buildSingleFilter(f, 1)
+	_, _, _, err := buildSingleFilter(f, 1, "r")
 	if err == nil {
 		t.Fatalf("expected field-name validation error, got nil")
 	}
@@ -900,7 +900,7 @@ func TestBuildSingleFilter_StringSubject_Eq(t *testing.T) {
 		IsJSON:    true,
 		Kind:      KindStringSubject,
 	}
-	clause, params, nextIdx, err := buildSingleFilter(f, 1)
+	clause, params, nextIdx, err := buildSingleFilter(f, 1, "r")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -940,7 +940,7 @@ func TestBuildSingleFilter_StringSubject_In(t *testing.T) {
 		IsJSON:    true,
 		Kind:      KindStringSubject,
 	}
-	clause, params, nextIdx, err := buildSingleFilter(f, 3)
+	clause, params, nextIdx, err := buildSingleFilter(f, 3, "r")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -980,7 +980,7 @@ func TestBuildSingleFilter_StringSubject_UnsupportedOperator(t *testing.T) {
 				IsJSON:    true,
 				Kind:      KindStringSubject,
 			}
-			_, _, _, err := buildSingleFilter(f, 1)
+			_, _, _, err := buildSingleFilter(f, 1, "r")
 			if err == nil {
 				t.Errorf("expected error for operator %s on string-subject filter", op)
 			}
@@ -1068,5 +1068,303 @@ func TestStringSubjectFilter_IndexExpressionMatchesMigration029(t *testing.T) {
 	}
 	if !strings.Contains(wantExpr, "'subject'") {
 		t.Fatalf("migration 029 no longer extracts `subject` — buildStringSubjectFilter must be updated to match. Migration expression: %s", wantExpr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue #87 — alias plumbing + JoinedFilter EXISTS emission +
+// locked-kind sentinel.
+// ---------------------------------------------------------------------------
+
+// TestBuildSingleFilter_AliasParameter_QualifiesColumnsAndJSON
+// pins the contract that buildSingleFilter qualifies BOTH
+// column-level references (via qualifyColumn) and JSON-path
+// references (via jsonExtract) with the alias parameter. The
+// "d" alias is what the joined-where EXISTS subquery passes; if
+// either side regresses to a bare reference, the inner clause
+// would be ambiguous against the outer `r` table when both are
+// in scope.
+func TestBuildSingleFilter_AliasParameter_QualifiesColumnsAndJSON(t *testing.T) {
+	jsonFilter := FieldFilter{
+		FieldName: "badgeType",
+		Operator:  OpEq,
+		Value:     "endorsement",
+		IsJSON:    true,
+	}
+	clause, _, _, err := buildSingleFilter(jsonFilter, 1, "d")
+	if err != nil {
+		t.Fatalf("buildSingleFilter(json, alias=d): %v", err)
+	}
+	if !strings.Contains(clause, "d.json @>") {
+		t.Errorf("JSON containment did not qualify with alias `d`: %s", clause)
+	}
+	if strings.Contains(clause, " json @>") {
+		t.Errorf("JSON containment still references bare `json`: %s", clause)
+	}
+
+	columnFilter := FieldFilter{
+		FieldName: "did",
+		Operator:  OpEq,
+		Value:     "did:plc:alice",
+		IsJSON:    false,
+	}
+	clause, _, _, err = buildSingleFilter(columnFilter, 1, "d")
+	if err != nil {
+		t.Fatalf("buildSingleFilter(column, alias=d): %v", err)
+	}
+	if !strings.Contains(clause, "d.did =") {
+		t.Errorf("column reference did not qualify with alias `d`: %s", clause)
+	}
+}
+
+// TestBuildSingleFilter_LockedKindsRejectNonRSeqAlias enforces
+// the R2.8 sentinel: lexicon-specific filter kinds emit
+// hardcoded "r."-prefixed SQL and must not be used inside a
+// joined-where subquery (alias != "r"). The error is loud so a
+// future accidental registry edit gets caught at request time
+// rather than silently producing SQL against the wrong table.
+func TestBuildSingleFilter_LockedKindsRejectNonRSeqAlias(t *testing.T) {
+	for _, kind := range []FilterKind{KindArrayContributor, KindUnionSubject, KindStringSubject} {
+		kind := kind
+		t.Run(fmt.Sprintf("kind=%v", kind), func(t *testing.T) {
+			f := FieldFilter{
+				FieldName: "x",
+				Operator:  OpEq,
+				Value:     "did:plc:alice",
+				IsJSON:    true,
+				Kind:      kind,
+			}
+			// Outer alias "r": accepted.
+			if _, _, _, err := buildSingleFilter(f, 1, "r"); err != nil {
+				t.Errorf("kind %v rejected with alias r (should be accepted): %v", kind, err)
+			}
+			// Inner alias "d": rejected.
+			_, _, _, err := buildSingleFilter(f, 1, "d")
+			if err == nil {
+				t.Errorf("kind %v accepted with alias d (sentinel failed); future-proofing of locked-kind contract is broken", kind)
+			}
+		})
+	}
+}
+
+// TestBuildFilterGroupClause_JoinedFilter_Eq pins the EXISTS
+// shape for a single joined filter with one inner leaf
+// (badgeType = "endorsement" on the joined badge.definition).
+// This is the exact SQL the certified-app's Endorsements tab
+// generates after #87 lands.
+func TestBuildFilterGroupClause_JoinedFilter_Eq(t *testing.T) {
+	group := FilterGroup{
+		Operator: GroupAND,
+		Joined: []JoinedFilter{
+			{
+				TargetCollection: "app.certified.badge.definition",
+				JoinExpr:         "r.json->'badge'->>'uri'",
+				Inner: FilterGroup{
+					Operator: GroupAND,
+					Filters: []FieldFilter{
+						{
+							FieldName: "badgeType",
+							Operator:  OpEq,
+							Value:     "endorsement",
+							IsJSON:    true,
+						},
+					},
+				},
+			},
+		},
+	}
+	clause, params, err := BuildFilterGroupClause(group, 1)
+	if err != nil {
+		t.Fatalf("BuildFilterGroupClause: %v", err)
+	}
+	// Inner clause is JSON containment so the parameter is a
+	// jsonb literal {"badgeType":"endorsement"}, NOT the raw
+	// string "endorsement" — that's the equality-as-containment
+	// shape buildSingleFilter chose at the OpEq+IsJSON arm.
+	// The outer EXISTS gets the collection name as its last
+	// parameter.
+	if len(params) != 2 {
+		t.Fatalf("expected 2 params (inner + collection), got %d: %v", len(params), params)
+	}
+	if !strings.Contains(clause, "EXISTS (SELECT 1 FROM record d") {
+		t.Errorf("clause missing the EXISTS prefix: %s", clause)
+	}
+	if !strings.Contains(clause, "d.collection = $2") {
+		t.Errorf("clause should bind d.collection to $2 (after the inner's $1): %s", clause)
+	}
+	if !strings.Contains(clause, "d.uri = r.json->'badge'->>'uri'") {
+		t.Errorf("clause missing the join correlation: %s", clause)
+	}
+	if !strings.Contains(clause, "d.json @>") {
+		t.Errorf("inner clause does not qualify with alias `d`: %s", clause)
+	}
+	if params[1] != "app.certified.badge.definition" {
+		t.Errorf("collection param mismatch: got %v want app.certified.badge.definition", params[1])
+	}
+}
+
+// TestBuildFilterGroupClause_JoinedFilter_EmptyInner: existence
+// check only — useful for filtering out awards whose badge
+// strongRef points at a missing/deleted definition. SQL must
+// not emit a dangling `AND ()` when the inner is empty.
+func TestBuildFilterGroupClause_JoinedFilter_EmptyInner(t *testing.T) {
+	group := FilterGroup{
+		Operator: GroupAND,
+		Joined: []JoinedFilter{
+			{
+				TargetCollection: "app.certified.badge.definition",
+				JoinExpr:         "r.json->'badge'->>'uri'",
+				Inner:            FilterGroup{Operator: GroupAND},
+			},
+		},
+	}
+	clause, params, err := BuildFilterGroupClause(group, 1)
+	if err != nil {
+		t.Fatalf("BuildFilterGroupClause: %v", err)
+	}
+	if len(params) != 1 {
+		t.Fatalf("expected 1 param (collection only), got %d: %v", len(params), params)
+	}
+	if strings.Contains(clause, "AND ()") {
+		t.Errorf("clause contains dangling `AND ()` from empty inner: %s", clause)
+	}
+	if !strings.HasSuffix(clause, "r.json->'badge'->>'uri')") {
+		t.Errorf("clause should close with the join correlation, no tail AND: %s", clause)
+	}
+}
+
+// TestBuildFilterGroupClause_JoinedFilter_InsideOr verifies the
+// joined filter composes correctly inside a _or group with a
+// normal scalar leaf — the issue's "intersection on subject +
+// disjunction in badge" shape from the pinned description.
+// Parameter numbering must be consistent across the OR
+// children.
+func TestBuildFilterGroupClause_JoinedFilter_InsideOr(t *testing.T) {
+	group := FilterGroup{
+		Operator: GroupAND,
+		Children: []FilterGroup{
+			{
+				Operator: GroupOR,
+				Filters: []FieldFilter{
+					{
+						FieldName: "did",
+						Operator:  OpEq,
+						Value:     "did:plc:me",
+						IsJSON:    false,
+					},
+				},
+				Joined: []JoinedFilter{
+					{
+						TargetCollection: "app.certified.badge.definition",
+						JoinExpr:         "r.json->'badge'->>'uri'",
+						Inner: FilterGroup{
+							Operator: GroupAND,
+							Filters: []FieldFilter{
+								{
+									FieldName: "badgeType",
+									Operator:  OpEq,
+									Value:     "endorsement",
+									IsJSON:    true,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	clause, params, err := BuildFilterGroupClause(group, 1)
+	if err != nil {
+		t.Fatalf("BuildFilterGroupClause: %v", err)
+	}
+	// Outer leaf: $1 (did value). Inner leaf: $2 (badgeType
+	// containment). Collection: $3. Three params total.
+	if len(params) != 3 {
+		t.Fatalf("expected 3 params, got %d: %v", len(params), params)
+	}
+	if !strings.Contains(clause, "r.did = $1") {
+		t.Errorf("clause missing the outer leaf: %s", clause)
+	}
+	if !strings.Contains(clause, " OR ") {
+		t.Errorf("clause should join the OR children with ` OR `: %s", clause)
+	}
+	if !strings.Contains(clause, "d.collection = $3") {
+		t.Errorf("clause should bind collection to $3 after inner $2: %s", clause)
+	}
+	if params[0] != "did:plc:me" {
+		t.Errorf("param[0] should be the did value, got %v", params[0])
+	}
+	if params[2] != "app.certified.badge.definition" {
+		t.Errorf("param[2] should be the joined collection, got %v", params[2])
+	}
+}
+
+// TestJoinedFilter_CountConditions verifies the inner's leaf
+// count rolls up to the outer's CountConditions(). Without
+// this, the global MaxFilterConditions cap would be silently
+// bypassed by joined filters (R1.1 in plan-review round 1).
+func TestJoinedFilter_CountConditions(t *testing.T) {
+	group := FilterGroup{
+		Filters: []FieldFilter{
+			{FieldName: "did", Operator: OpEq, Value: "x"},
+		},
+		Joined: []JoinedFilter{
+			{
+				Inner: FilterGroup{
+					Filters: []FieldFilter{
+						{FieldName: "badgeType", Operator: OpEq, Value: "a", IsJSON: true},
+						{FieldName: "badgeType", Operator: OpEq, Value: "b", IsJSON: true},
+					},
+				},
+			},
+		},
+	}
+	got := group.CountConditions()
+	const want = 3 // 1 outer + 2 inner
+	if got != want {
+		t.Errorf("CountConditions = %d, want %d (cap bypass via joined would report 1)", got, want)
+	}
+}
+
+// TestBuildFilterGroupClause_JoinedFilter_CapEnforced verifies
+// the global MaxFilterConditions cap actually trips when the
+// total (outer + joined inner) exceeds it. Together with
+// TestJoinedFilter_CountConditions this pins the R1.1 fix end-
+// to-end.
+func TestBuildFilterGroupClause_JoinedFilter_CapEnforced(t *testing.T) {
+	// Build (MaxFilterConditions - 1) outer leaves + a joined
+	// filter with 2 inner leaves → total exceeds the cap by 1.
+	outerLeaves := make([]FieldFilter, MaxFilterConditions-1)
+	for i := range outerLeaves {
+		outerLeaves[i] = FieldFilter{
+			FieldName: "did",
+			Operator:  OpEq,
+			Value:     "did:plc:x",
+			IsJSON:    false,
+		}
+	}
+	group := FilterGroup{
+		Operator: GroupAND,
+		Filters:  outerLeaves,
+		Joined: []JoinedFilter{
+			{
+				TargetCollection: "app.certified.badge.definition",
+				JoinExpr:         "r.json->'badge'->>'uri'",
+				Inner: FilterGroup{
+					Operator: GroupAND,
+					Filters: []FieldFilter{
+						{FieldName: "badgeType", Operator: OpEq, Value: "a", IsJSON: true},
+						{FieldName: "badgeType", Operator: OpEq, Value: "b", IsJSON: true},
+					},
+				},
+			},
+		},
+	}
+	_, _, err := BuildFilterGroupClause(group, 1)
+	if err == nil {
+		t.Fatalf("expected error when total conditions exceed MaxFilterConditions (%d), got nil", MaxFilterConditions)
+	}
+	if !strings.Contains(err.Error(), "too many filter conditions") {
+		t.Errorf("error message should mention the cap; got: %v", err)
 	}
 }

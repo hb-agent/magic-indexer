@@ -103,6 +103,7 @@ Each test declares a `Target`:
 | [E7](#e7) | Contributor filter is index-served, not O(collection) | EITHER | guards Track 1 regression test |
 | [E8](#e8) | BadgeAward `subject` filter matches `defs#did` object shape | EITHER | issue #65 |
 | [E9](#e9) | GraphFollow `subject` filter returns followers; index-served | EITHER | issue #86 |
+| [E10](#e10) | BadgeAward nested-where on `badge` filters by joined definition | EITHER | issue #87 |
 | **F — GraphQL subscriptions** |
 | [F1](#f1) | Subscription receives a live create event | EITHER | needs ws client (wscat) |
 | **G — OAuth (admin auth)** |
@@ -867,6 +868,100 @@ Each spec follows the same shape:
   `internal/database/repositories/filter.go`; registry entry in
   `internal/graphql/schema/where.go`; regression test
   `TestStringSubjectFilter_IndexExpressionMatchesMigration029`.
+
+---
+
+### E10
+**BadgeAward nested-where on `badge` filters by joined definition.**
+
+- **Coverage**: issue #87 — the certified-app's Endorsements
+  tab reads "what endorsements has this DID received?" in a
+  single round-trip via
+  `appCertifiedBadgeAward(where: { subject: { eq: $did },
+  badge: { badgeType: { eq: "endorsement" } } })`. The nested
+  `badge` filter translates to an EXISTS subquery over
+  `app.certified.badge.definition` joined by the strongRef in
+  `award.json.badge.uri`. Without this, the client makes two
+  round-trips and joins them on the wire.
+- **Target**: EITHER for the wire-level query; LOCAL for the
+  `EXPLAIN ANALYZE` check.
+- **Preconditions**:
+  - `app.certified.badge.award` and `app.certified.badge.definition`
+    lexicons registered on the target. On DEV-DEPLOYED these
+    should already be present (badge.award has been there
+    since #65); on LOCAL upload both before testing.
+  - At least a few award records with a known subject DID and
+    at least one corresponding definition with
+    `badgeType = "endorsement"`. On dev: `appCertifiedBadgeAward
+    { totalCount }` should be non-zero before running this test.
+- **Steps**:
+  1. Verify the schema includes the joined-where field:
+     ```bash
+     curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
+       -d '{"query":"{ __type(name:\"AppCertifiedBadgeAwardWhereInput\") { inputFields { name type { name } } } }"}' \
+       | jq '.data.__type.inputFields | map(select(.name == "badge"))'
+     ```
+     Expect a single entry with
+     `type.name == "AppCertifiedBadgeDefinitionWhereInput"`.
+  2. Issue the exact query the certified-app uses:
+     ```bash
+     curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
+       -d '{"query":"{ appCertifiedBadgeAward(where: { subject: { eq: \"did:plc:...\" }, badge: { badgeType: { eq: \"endorsement\" } } }, first: 100) { edges { node { uri did createdAt } } pageInfo { hasNextPage } } }"}' \
+       | jq
+     ```
+  3. Cross-check by issuing the 2-call workaround (subject
+     filter only, then filter client-side by definition's
+     badgeType) and confirming the result sets match.
+  4. (LOCAL only) `EXPLAIN ANALYZE` the equivalent SQL:
+     ```sql
+     EXPLAIN ANALYZE
+     SELECT r.uri, r.cid, r.did
+     FROM record r LEFT JOIN actor a ON r.did = a.did
+     WHERE r.collection = 'app.certified.badge.award'
+       AND r.subject_did = 'did:plc:...'
+       AND EXISTS (
+         SELECT 1 FROM record d
+         WHERE d.collection = 'app.certified.badge.definition'
+           AND d.uri = r.json->'badge'->>'uri'
+           AND d.json @> '{"badgeType":"endorsement"}'::jsonb
+       )
+     ORDER BY r.indexed_at DESC, r.uri DESC
+     LIMIT 100;
+     ```
+- **Expected**:
+  - Step 1: `badge` field present, typed as the definition's
+    WhereInput.
+  - Step 2: returns awards whose subject matches AND whose
+    joined definition has `badgeType = "endorsement"`. No
+    GraphQL errors.
+  - Step 3: identical URIs in both result sets.
+  - Step 4: plan includes an `Index Scan using record_pkey on
+    record d` (or equivalent) for the inner subquery — the
+    join probes `record.uri` (primary key). No sequential
+    scan over the definition collection.
+- **Composition check (optional)**: the pinned description's
+  intersection+disjunction example —
+  ```graphql
+  { appCertifiedBadgeAward(where: {
+      subject: { eq: "did:plc:..." },
+      badge: { _or: [
+        { badgeType: { eq: "endorsement" } },
+        { badgeType: { eq: "verification" } }
+      ] }
+    }, first: 5) { edges { node { uri } } } }
+  ```
+  Expect results that satisfy both halves; confirms `_or` is
+  wired through inside the inner.
+- **Cleanup**: none.
+- **Refs**: issue #87; `KindStringSubject` is unaffected here —
+  the join uses `KindScalar` filters in the inner against
+  badge.definition's JSON properties; the EXISTS subquery
+  emission lives in
+  `internal/database/repositories/filter.go`
+  `buildFilterGroupRecursive` (search for "EXISTS");
+  registry entry at
+  `internal/graphql/schema/where.go` `joinedWhereRegistry`;
+  extractor branch at `extractFieldFiltersRecursive`.
 
 ---
 
