@@ -3,8 +3,12 @@
 > **If you are an AI assistant or a new contributor opening this
 > repo for the first time, this file is your complete onboarding.
 > Reading just this file should be enough to be useful. The other
-> docs (`docs/RUNBOOK.md`, `docs/archive/reviews/`, `SECURITY.md`,
-> `README.md`) are deeper references; this file is the digest.**
+> docs (`docs/RUNBOOK.md`, `docs/behavioral-tests.md`,
+> `docs/archive/reviews/`, `SECURITY.md`, `README.md`) are deeper
+> references; this file is the digest. When asked to verify that
+> something works end-to-end, prefer the named tests in
+> `docs/behavioral-tests.md` over inventing a new probe — and add
+> a new test to that file if the behavior isn't already covered.**
 
 If, after reading this file, you are unsure about anything that
 isn't covered here, that is a documentation bug — flag it to the
