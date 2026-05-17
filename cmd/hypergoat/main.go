@@ -607,18 +607,6 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 		})
 	})
 
-	// Placeholder for XRPC endpoints (AT Protocol)
-	r.Route("/xrpc", func(r chi.Router) {
-		r.Get("/*", func(w http.ResponseWriter, req *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error":   "NotImplemented",
-				"message": "XRPC endpoints are not yet implemented",
-			})
-		})
-	})
-
 	return r
 }
 
