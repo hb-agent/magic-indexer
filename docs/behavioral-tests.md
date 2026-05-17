@@ -102,6 +102,7 @@ Each test declares a `Target`:
 | [E6](#e6) | Keyset cursor returns deterministic pagination | EITHER | |
 | [E7](#e7) | Contributor filter is index-served, not O(collection) | EITHER | guards Track 1 regression test |
 | [E8](#e8) | BadgeAward `subject` filter matches `defs#did` object shape | EITHER | issue #65 |
+| [E9](#e9) | GraphFollow `subject` filter returns followers; index-served | EITHER | issue #86 |
 | **F — GraphQL subscriptions** |
 | [F1](#f1) | Subscription receives a live create event | EITHER | needs ws client (wscat) |
 | **G — OAuth (admin auth)** |
@@ -784,6 +785,88 @@ Each spec follows the same shape:
 - **Refs**: migrations 025 + 026, issue #65,
   `internal/database/repositories/filter.go`
   `buildBadgeAwardSubjectFilter`.
+
+---
+
+### E9
+**GraphFollow `subject` filter returns followers; index-served.**
+
+- **Coverage**: issue #86 — the certified-app `/profile/[handle]?tab=followers`
+  reads from the indexer via `appCertifiedGraphFollow(where: {
+  subject: { eq: <did> } }, first, after)`. Without an index, the
+  query degrades to a sequential scan over the follow collection;
+  migration 029's partial expression index
+  `idx_record_follow_subject` plus `KindStringSubject` filter SQL
+  are what makes it serve the read pattern.
+- **Target**: LOCAL for the `EXPLAIN ANALYZE` check (needs psql);
+  the wire-level half (`subject` filter returns matching records)
+  is EITHER once the lexicon is registered on the target.
+- **Preconditions**:
+  - Lexicon `app.certified.graph.follow` registered on the
+    target. On LOCAL: upload `testdata/lexicons/app/certified/graph/follow.json`
+    via the admin upload mutation (see B1 for the upload curl).
+    On DEV-DEPLOYED: requires the upstream `hypercerts-lexicon`
+    PR to have merged and a fresh upload — confirm with the
+    introspection query in step 1.
+  - At least a few follow records present on the target. On
+    LOCAL: insert directly via psql, or wait for Jetstream to
+    ingest some once the lexicon is up.
+- **Steps**:
+  1. Verify the schema includes the resolver and the field:
+     ```bash
+     curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
+       -d '{"query":"{ __type(name:\"AppCertifiedGraphFollowWhereInput\") { inputFields { name } } }"}' \
+       | jq -r '.data.__type.inputFields[].name' | sort
+     ```
+     Expect `_and _or createdAt did subject via` (or a superset).
+  2. Issue the canonical followers query for a DID that has at
+     least one follower:
+     ```bash
+     curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
+       -d '{"query":"{ appCertifiedGraphFollow(where: { subject: { eq: \"did:plc:...\" } }, first: 100) { totalCount edges { node { uri cid did createdAt } } pageInfo { hasNextPage endCursor } } }"}' \
+       | jq
+     ```
+  3. (LOCAL only — needs psql) Run `EXPLAIN ANALYZE` for the
+     equivalent SQL (reconstruct from the
+     internal/database/repositories/records.go query path or
+     enable slog at debug):
+     ```sql
+     EXPLAIN ANALYZE
+     SELECT r.uri, r.cid, r.did, r.json
+     FROM record r LEFT JOIN actor a ON r.did = a.did
+     WHERE r.collection = 'app.certified.graph.follow'
+       AND r.json->>'subject' = 'did:plc:...'
+     ORDER BY r.indexed_at DESC, r.uri DESC
+     LIMIT 100;
+     ```
+- **Expected**:
+  - Step 1: input fields include both `did` (auto-added record-
+    author filter) and `subject` (registry-injected).
+  - Step 2: returns follow records authored by other DIDs whose
+    `node.value.subject` (if queryable per the lexicon) or
+    underlying JSON subject equals the filter DID. Each `node.did`
+    is a follower. No GraphQL errors.
+  - Step 3: plan includes
+    `Index Scan using idx_record_follow_subject on record r` (or
+    `Bitmap Index Scan`). Execution time well under 100ms even on
+    a populated `record` table.
+- **Cleanup**: none for steps 1–2. For step 3, no state change.
+- **Composition check (optional)**: the pinned description
+  documents an `_or` shape for "I follow OR am followed by." Run
+  it once to confirm the schema accepts the recursive composition:
+  ```graphql
+  { appCertifiedGraphFollow(where: { _or: [
+      { did: { eq: "did:plc:me" } },
+      { subject: { eq: "did:plc:me" } }
+  ] }, first: 5) { edges { node { uri did } } } }
+  ```
+  Expect both authored-by-me and pointed-at-me follow records.
+- **Refs**: issue #86; migration 029
+  (`internal/database/migrations/postgres/029_add_follow_subject_index.up.sql`);
+  `buildStringSubjectFilter` in
+  `internal/database/repositories/filter.go`; registry entry in
+  `internal/graphql/schema/where.go`; regression test
+  `TestStringSubjectFilter_IndexExpressionMatchesMigration029`.
 
 ---
 
