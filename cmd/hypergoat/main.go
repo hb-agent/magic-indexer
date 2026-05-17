@@ -263,7 +263,7 @@ func initServices(cfg *config.Config) (*services, error) {
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("Database connected successfully", "dialect", db.Dialect().String())
+	slog.Info("Database connected successfully")
 
 	slog.Info("Running database migrations...")
 	if err := migrations.Run(context.Background(), db); err != nil {

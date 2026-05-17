@@ -14,7 +14,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/url"
 	"regexp"
@@ -200,28 +199,6 @@ func (e *Executor) Exec(ctx context.Context, sqlStr string, params []database.Va
 		return nil, database.QueryError("failed to execute statement", err)
 	}
 	return result, nil
-}
-
-// Dialect returns PostgreSQL.
-func (e *Executor) Dialect() database.Dialect {
-	return database.PostgreSQL
-}
-
-// Placeholder returns "$n" for the given parameter index (1-based).
-func (e *Executor) Placeholder(index int) string {
-	return fmt.Sprintf("$%d", index)
-}
-
-// Placeholders returns a comma-separated list of "$n" placeholders.
-func (e *Executor) Placeholders(count, startIndex int) string {
-	if count <= 0 {
-		return ""
-	}
-	placeholders := make([]string, count)
-	for i := 0; i < count; i++ {
-		placeholders[i] = fmt.Sprintf("$%d", startIndex+i)
-	}
-	return strings.Join(placeholders, ", ")
 }
 
 // Close closes the database connection.

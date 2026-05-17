@@ -1,29 +1,18 @@
 // Package database provides a unified interface for database operations.
+//
+// magic-indexer targets Postgres. The Dialect enum, ParseDialect helper,
+// and the Executor.Placeholder/Placeholders methods that previously
+// pretended dialect portability were removed in review-2026-05-17 part 2
+// (Track 7) — every repository now writes literal $N placeholders
+// directly.
 package database
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 )
-
-// Dialect identifies the database backend.
-type Dialect int
-
-const (
-	PostgreSQL Dialect = iota
-)
-
-func (d Dialect) String() string {
-	switch d {
-	case PostgreSQL:
-		return "postgresql"
-	default:
-		return "unknown"
-	}
-}
 
 // Value represents a parameter value for database queries.
 type Value interface {
@@ -101,6 +90,7 @@ func ConstraintError(msg string, cause error) *DbError {
 }
 
 // Executor provides a unified interface for database operations.
+// Postgres-only after review-2026-05-17 part 2.
 type Executor interface {
 	// QueryRow executes a query expected to return at most one row.
 	QueryRow(ctx context.Context, sql string, params []Value, dest ...any) error
@@ -113,16 +103,6 @@ type Executor interface {
 
 	// ConvertParams converts []Value to []any for use with direct *sql.DB calls.
 	ConvertParams(params []Value) []any
-
-	// Dialect returns the database dialect.
-	Dialect() Dialect
-
-	// Placeholder returns the placeholder for the given parameter index (1-based).
-	// PostgreSQL: "$1", "$2", etc.
-	Placeholder(index int) string
-
-	// Placeholders returns a comma-separated list of placeholders.
-	Placeholders(count, startIndex int) string
 
 	// Close closes the database connection.
 	Close() error
@@ -195,13 +175,4 @@ func NullableBool(b *bool) Value {
 		return Null()
 	}
 	return Bool(*b)
-}
-
-// ParseDialect determines the dialect from a database URL.
-func ParseDialect(databaseURL string) Dialect {
-	lower := strings.ToLower(databaseURL)
-	if strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://") {
-		return PostgreSQL
-	}
-	return Dialect(-1)
 }
