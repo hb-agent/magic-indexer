@@ -46,6 +46,10 @@ const contributorFieldDescription = `Filter to activities where any contributors
 // the policy at schema introspection.
 const badgeAwardSubjectDescription = `Filter badge awards by the subject DID. Matches awards whose subject resolves to the given DID across both lexicon refs of the subject union: app.certified.defs#did (object form {did: "did:plc:..."}) and com.atproto.repo.strongRef (object form {uri: "at://did:plc:.../...", cid: "..."} — DID is the at-uri authority). DIDs only — handle values are rejected at the GraphQL layer. Compose with the did filter via _or to express "issued by me OR targeting me": where: { _or: [ { did: { eq: "did:plc:me" } }, { subject: { eq: "did:plc:me" } } ] }.`
 
+// graphFollowSubjectDescription is pinned verbatim so consumers see
+// the policy at schema introspection.
+const graphFollowSubjectDescription = `Filter follows by the subject DID — the account being followed. Use this to assemble a followers list: where: { subject: { eq: <did> } } returns every follow record pointing at that DID. The follower is the record author (filter via the did field, or read from node.did). DIDs only — handle values are rejected at the GraphQL layer. Compose with the did filter via _or to express "I follow OR am followed by": where: { _or: [ { did: { eq: "did:plc:me" } }, { subject: { eq: "did:plc:me" } } ] }.`
+
 // filterRegistry maps lexicon ID → (GraphQL input field name →
 // descriptor) for every lexicon-specific filter that needs a bespoke
 // SQL shape. Adding a new entry is the only place to touch when a
@@ -71,6 +75,13 @@ var filterRegistry = map[string]map[string]filterDescriptor{
 			Kind:        repositories.KindUnionSubject,
 			FieldName:   "subject",
 			Description: badgeAwardSubjectDescription,
+		},
+	},
+	"app.certified.graph.follow": {
+		"subject": {
+			Kind:        repositories.KindStringSubject,
+			FieldName:   "subject",
+			Description: graphFollowSubjectDescription,
 		},
 	},
 }
@@ -118,6 +129,17 @@ func buildWhereInputType(lex *lexicon.Lexicon) *graphql.InputObject {
 	// Each is a DIDFilterInput today; if a future descriptor needs a
 	// different input shape, extend filterDescriptor with a Type field
 	// (or a factory func) and switch here.
+	//
+	// The registry intentionally overrides any property-derived field
+	// of the same name written by the loop above — for lexicons like
+	// app.certified.graph.follow whose `subject` is also a filterable
+	// scalar (`type: string, format: did`), the property loop writes a
+	// DIDFilterInput first and the registry then replaces it with the
+	// same DIDFilterInput plus the pinned description from the
+	// registry. extractFieldFiltersRecursive does the same registry-
+	// first routing, so the SQL path goes through the descriptor's
+	// FilterKind, not the default scalar path. Do not reorder these
+	// loops without revisiting both call sites.
 	for _, descriptor := range filterRegistry[lex.ID] {
 		fields[descriptor.FieldName] = &graphql.InputObjectFieldConfig{
 			Type:        types.DIDFilterInput,
