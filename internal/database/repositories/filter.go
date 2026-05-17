@@ -200,6 +200,7 @@ type FilterGroup struct {
 	Filters  []FieldFilter
 	Children []FilterGroup
 	Joined   []JoinedFilter
+	Arrays   []ArrayFilter
 }
 
 // JoinedFilter applies an inner FilterGroup to records in a
@@ -234,18 +235,62 @@ type JoinedFilter struct {
 	Inner            FilterGroup
 }
 
+// ArrayFilter applies an inner FilterGroup to elements of a JSON
+// array field on the outer record. Match semantics are "any element
+// satisfies" — emitted as:
+//
+//	EXISTS (
+//	  SELECT 1
+//	  FROM jsonb_array_elements(
+//	    CASE WHEN jsonb_typeof(<ArrayPath>) = 'array'
+//	         THEN <ArrayPath>
+//	         ELSE '[]'::jsonb END
+//	  ) AS e(json)
+//	  WHERE <Inner with alias "e">
+//	)
+//
+// ArrayPath is the SQL fragment that returns the jsonb array from
+// the outer record's JSON. For org.hypercerts.collection.items
+// it's `r.json->'items'`. The outer alias must be `r` for today's
+// call sites (no nested arrays inside joins yet).
+//
+// The CASE WHEN guard short-circuits to an empty array when the
+// field is missing, null, or non-array — jsonb_array_elements
+// raises SQLSTATE 22023 on non-array input, which would brick the
+// whole query (it's evaluated row-by-row in the EXISTS). One
+// corrupt record would otherwise take down the result set; the
+// guard makes the path defensive without per-registry duplication.
+//
+// SECURITY: ArrayPath is emitted verbatim into SQL. Values come
+// from arrayWhereRegistry in internal/graphql/schema/where.go —
+// code-defined, never sourced from request data. Treat additions
+// to that registry as a SQL diff. Same contract as
+// JoinedFilter.JoinExpr.
+//
+// One-level bound: Inner.Arrays must be empty (enforced by the
+// schema-side extractor). Nested EXISTS-over-array-elements is
+// expressible but adds no value at bounded volumes, and the SQL
+// planner has no way to share work across the two
+// jsonb_array_elements calls.
+type ArrayFilter struct {
+	FieldName string
+	ArrayPath string
+	Inner     FilterGroup
+}
+
 // IsEmpty returns true if the group has no filters, no children,
-// and no joined filters.
+// no joined filters, and no array filters.
 func (g *FilterGroup) IsEmpty() bool {
-	return len(g.Filters) == 0 && len(g.Children) == 0 && len(g.Joined) == 0
+	return len(g.Filters) == 0 && len(g.Children) == 0 &&
+		len(g.Joined) == 0 && len(g.Arrays) == 0
 }
 
 // CountConditions returns the total number of leaf filter conditions
-// across the entire tree, including any joined inner trees. The
-// global MaxFilterConditions cap is enforced against this count, so
-// a joined filter's inner leaves contribute to the parent's budget
+// across the entire tree, including any joined or array inner trees.
+// The global MaxFilterConditions cap is enforced against this count,
+// so joined / array inner leaves contribute to the parent's budget
 // (otherwise a query could bypass the cap by hiding leaves inside
-// joins).
+// the EXISTS subqueries).
 func (g *FilterGroup) CountConditions() int {
 	count := len(g.Filters)
 	for i := range g.Children {
@@ -253,6 +298,9 @@ func (g *FilterGroup) CountConditions() int {
 	}
 	for i := range g.Joined {
 		count += g.Joined[i].Inner.CountConditions()
+	}
+	for i := range g.Arrays {
+		count += g.Arrays[i].Inner.CountConditions()
 	}
 	return count
 }
@@ -379,6 +427,34 @@ func buildFilterGroupRecursive(group FilterGroup, paramIdx, depth int, alias str
 		params = append(params, innerParams...)
 		params = append(params, j.TargetCollection)
 		paramIdx = collParamIdx + 1
+	}
+
+	// Build array filters as EXISTS subqueries over
+	// jsonb_array_elements. The inner clause uses alias "e" against
+	// the synthetic row `e(json)`; the array path lives in the outer
+	// scope. The CASE WHEN jsonb_typeof = 'array' guard prevents a
+	// non-array value on a single record from raising 22023 and
+	// bricking the entire result set. Depth budget for the inner
+	// subtree resets to 0 — intentional and bounded by the one-level
+	// guard the extractor enforces on Inner.Arrays.
+	for _, arr := range group.Arrays {
+		innerClause, innerParams, err := buildFilterGroupClauseWithAlias(arr.Inner, paramIdx, "e")
+		if err != nil {
+			return "", nil, err
+		}
+		var existsClause string
+		if innerClause == "" {
+			existsClause = fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(%s) = 'array' THEN %s ELSE '[]'::jsonb END) AS e(json))",
+				arr.ArrayPath, arr.ArrayPath)
+		} else {
+			existsClause = fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(%s) = 'array' THEN %s ELSE '[]'::jsonb END) AS e(json) WHERE %s)",
+				arr.ArrayPath, arr.ArrayPath, innerClause)
+		}
+		clauses = append(clauses, existsClause)
+		params = append(params, innerParams...)
+		paramIdx += len(innerParams)
 	}
 
 	if len(clauses) == 0 {
@@ -564,19 +640,21 @@ func BuildFieldFilterClause(filters []FieldFilter, paramOffset int) (string, []i
 
 // buildSingleFilter dispatches a single FieldFilter to its SQL
 // emitter. The alias parameter qualifies column references and
-// JSON paths so this can be called both for the outer record
-// (alias "r") and for an inner joined-record subquery (alias
-// "d").
+// JSON paths so this can be called for the outer record (alias
+// "r"), an inner joined-record subquery (alias "d"), or an
+// inner array-element subquery (alias "e").
 //
 // Sentinel: the lexicon-specific filter kinds
 // (KindArrayContributor, KindUnionSubject, KindStringSubject)
 // emit hardcoded "r."-prefixed SQL fragments and are only
 // correct for the outer scope. Trying to use one inside an
-// EXISTS subquery (alias "d") would silently emit SQL that
-// references the wrong table. Reject with an error rather
-// than emit. Today no joined-where target collection has a
-// field that would route through these kinds, but the sentinel
-// future-proofs against an accidental registry edit.
+// EXISTS subquery (alias "d" or "e") would silently emit SQL
+// that references the wrong table or a non-existent column on
+// the synthetic row. Reject with an error rather than emit.
+// Today no joined-where target collection or array-element
+// type has a field that would route through these kinds, but
+// the sentinel future-proofs against an accidental registry
+// edit.
 func buildSingleFilter(f FieldFilter, paramIdx int, alias string) (string, []interface{}, int, error) {
 	if err := ValidateFieldName(f.FieldName); err != nil {
 		return "", nil, paramIdx, err
