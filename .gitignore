@@ -7,6 +7,9 @@
 /hypergoat
 /bin/
 
+# Linux core dumps
+/core
+
 # Test binary
 *.test
 
