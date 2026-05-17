@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 
 	"github.com/GainForest/hypergoat/internal/database"
 	"github.com/GainForest/hypergoat/internal/oauth"
@@ -22,39 +21,29 @@ func NewOAuthAuthRequestsRepository(db database.Executor) *OAuthAuthRequestsRepo
 
 // Insert creates a new OAuth authorization request.
 func (r *OAuthAuthRequestsRepository) Insert(ctx context.Context, req *oauth.AuthRequest) error {
-	sqlStr := fmt.Sprintf(`INSERT INTO oauth_auth_request (
+	_, err := r.db.Exec(ctx, `INSERT INTO oauth_auth_request (
 		session_id, client_id, redirect_uri, scope, state, code_challenge,
 		code_challenge_method, response_type, nonce, login_hint, created_at, expires_at
-	) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4),
-		r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7), r.db.Placeholder(8),
-		r.db.Placeholder(9), r.db.Placeholder(10), r.db.Placeholder(11), r.db.Placeholder(12))
-
-	params := []database.Value{
-		database.Text(req.SessionID),
-		database.Text(req.ClientID),
-		database.Text(req.RedirectURI),
-		database.NullableText(req.Scope),
-		database.NullableText(req.State),
-		database.NullableText(req.CodeChallenge),
-		database.NullableText(req.CodeChallengeMethod),
-		database.Text(req.ResponseType),
-		database.NullableText(req.Nonce),
-		database.NullableText(req.LoginHint),
-		database.Int(req.CreatedAt),
-		database.Int(req.ExpiresAt),
-	}
-
-	_, err := r.db.Exec(ctx, sqlStr, params)
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		[]database.Value{
+			database.Text(req.SessionID),
+			database.Text(req.ClientID),
+			database.Text(req.RedirectURI),
+			database.NullableText(req.Scope),
+			database.NullableText(req.State),
+			database.NullableText(req.CodeChallenge),
+			database.NullableText(req.CodeChallengeMethod),
+			database.Text(req.ResponseType),
+			database.NullableText(req.Nonce),
+			database.NullableText(req.LoginHint),
+			database.Int(req.CreatedAt),
+			database.Int(req.ExpiresAt),
+		})
 	return err
 }
 
 // Get retrieves an OAuth authorization request by session ID.
 func (r *OAuthAuthRequestsRepository) Get(ctx context.Context, sessionID string) (*oauth.AuthRequest, error) {
-	sqlStr := fmt.Sprintf(`SELECT session_id, client_id, redirect_uri, scope, state, code_challenge,
-		code_challenge_method, response_type, nonce, login_hint, created_at, expires_at
-	FROM oauth_auth_request WHERE session_id = %s`, r.db.Placeholder(1))
-
 	var (
 		req                 oauth.AuthRequest
 		scope               sql.NullString
@@ -65,7 +54,10 @@ func (r *OAuthAuthRequestsRepository) Get(ctx context.Context, sessionID string)
 		loginHint           sql.NullString
 	)
 
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(sessionID)},
+	err := r.db.QueryRow(ctx, `SELECT session_id, client_id, redirect_uri, scope, state, code_challenge,
+		code_challenge_method, response_type, nonce, login_hint, created_at, expires_at
+	FROM oauth_auth_request WHERE session_id = $1`,
+		[]database.Value{database.Text(sessionID)},
 		&req.SessionID, &req.ClientID, &req.RedirectURI, &scope, &state, &codeChallenge,
 		&codeChallengeMethod, &req.ResponseType, &nonce, &loginHint, &req.CreatedAt, &req.ExpiresAt)
 	if err != nil {
@@ -99,21 +91,21 @@ func (r *OAuthAuthRequestsRepository) Get(ctx context.Context, sessionID string)
 
 // Delete removes an OAuth authorization request.
 func (r *OAuthAuthRequestsRepository) Delete(ctx context.Context, sessionID string) error {
-	sqlStr := fmt.Sprintf("DELETE FROM oauth_auth_request WHERE session_id = %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(sessionID)})
+	_, err := r.db.Exec(ctx, "DELETE FROM oauth_auth_request WHERE session_id = $1",
+		[]database.Value{database.Text(sessionID)})
 	return err
 }
 
 // DeleteExpired removes all expired OAuth authorization requests.
 func (r *OAuthAuthRequestsRepository) DeleteExpired(ctx context.Context, beforeTimestamp int64) error {
-	sqlStr := fmt.Sprintf("DELETE FROM oauth_auth_request WHERE expires_at < %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Int(beforeTimestamp)})
+	_, err := r.db.Exec(ctx, "DELETE FROM oauth_auth_request WHERE expires_at < $1",
+		[]database.Value{database.Int(beforeTimestamp)})
 	return err
 }
 
 // DeleteByClientID removes all OAuth authorization requests for a client.
 func (r *OAuthAuthRequestsRepository) DeleteByClientID(ctx context.Context, clientID string) error {
-	sqlStr := fmt.Sprintf("DELETE FROM oauth_auth_request WHERE client_id = %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(clientID)})
+	_, err := r.db.Exec(ctx, "DELETE FROM oauth_auth_request WHERE client_id = $1",
+		[]database.Value{database.Text(clientID)})
 	return err
 }
