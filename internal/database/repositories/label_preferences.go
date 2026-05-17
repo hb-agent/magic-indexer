@@ -3,7 +3,6 @@ package repositories
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"time"
 
 	"github.com/GainForest/hypergoat/internal/database"
@@ -34,12 +33,10 @@ func NewLabelPreferencesRepository(db database.Executor) *LabelPreferencesReposi
 // GetByDID retrieves all label preferences for a user, across every
 // labeler.
 func (r *LabelPreferencesRepository) GetByDID(ctx context.Context, did string) ([]LabelPreference, error) {
-	sqlStr := fmt.Sprintf(`SELECT did, src, label_val, visibility, created_at
+	rows, err := r.db.DB().QueryContext(ctx, `SELECT did, src, label_val, visibility, created_at
 		FROM actor_label_preference
-		WHERE did = %s
-		ORDER BY src, label_val`, r.db.Placeholder(1))
-
-	rows, err := r.db.DB().QueryContext(ctx, sqlStr, did)
+		WHERE did = $1
+		ORDER BY src, label_val`, did)
 	if err != nil {
 		return nil, err
 	}
@@ -50,15 +47,12 @@ func (r *LabelPreferencesRepository) GetByDID(ctx context.Context, did string) (
 
 // Get retrieves a specific (did, src, labelVal) preference.
 func (r *LabelPreferencesRepository) Get(ctx context.Context, did, src, labelVal string) (*LabelPreference, error) {
-	sqlStr := fmt.Sprintf(`SELECT did, src, label_val, visibility, created_at
-		FROM actor_label_preference
-		WHERE did = %s AND src = %s AND label_val = %s`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
-
 	var pref LabelPreference
 	var createdAtStr string
 
-	err := r.db.QueryRow(ctx, sqlStr,
+	err := r.db.QueryRow(ctx, `SELECT did, src, label_val, visibility, created_at
+		FROM actor_label_preference
+		WHERE did = $1 AND src = $2 AND label_val = $3`,
 		[]database.Value{database.Text(did), database.Text(src), database.Text(labelVal)},
 		&pref.DID, &pref.Src, &pref.LabelVal, &pref.Visibility, &createdAtStr)
 	if err != nil {
@@ -71,21 +65,17 @@ func (r *LabelPreferencesRepository) Get(ctx context.Context, did, src, labelVal
 
 // Set creates or updates a label preference scoped to a specific labeler.
 func (r *LabelPreferencesRepository) Set(ctx context.Context, did, src, labelVal string, visibility LabelVisibility) (*LabelPreference, error) {
-	sqlStr := fmt.Sprintf(`INSERT INTO actor_label_preference (did, src, label_val, visibility)
-		VALUES (%s, %s, %s, %s)
+	_, err := r.db.Exec(ctx, `INSERT INTO actor_label_preference (did, src, label_val, visibility)
+		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (did, src, label_val) DO UPDATE SET
 			visibility = EXCLUDED.visibility,
 			created_at = NOW()`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
-
-	params := []database.Value{
-		database.Text(did),
-		database.Text(src),
-		database.Text(labelVal),
-		database.Text(string(visibility)),
-	}
-
-	_, err := r.db.Exec(ctx, sqlStr, params)
+		[]database.Value{
+			database.Text(did),
+			database.Text(src),
+			database.Text(labelVal),
+			database.Text(string(visibility)),
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -96,24 +86,20 @@ func (r *LabelPreferencesRepository) Set(ctx context.Context, did, src, labelVal
 // Delete removes a single preference (resetting it to the default
 // visibility for that labeler).
 func (r *LabelPreferencesRepository) Delete(ctx context.Context, did, src, labelVal string) error {
-	sqlStr := fmt.Sprintf(`DELETE FROM actor_label_preference
-		WHERE did = %s AND src = %s AND label_val = %s`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
-
-	params := []database.Value{
-		database.Text(did),
-		database.Text(src),
-		database.Text(labelVal),
-	}
-
-	_, err := r.db.Exec(ctx, sqlStr, params)
+	_, err := r.db.Exec(ctx, `DELETE FROM actor_label_preference
+		WHERE did = $1 AND src = $2 AND label_val = $3`,
+		[]database.Value{
+			database.Text(did),
+			database.Text(src),
+			database.Text(labelVal),
+		})
 	return err
 }
 
 // DeleteByDID removes all label preferences for a user.
 func (r *LabelPreferencesRepository) DeleteByDID(ctx context.Context, did string) error {
-	sqlStr := fmt.Sprintf("DELETE FROM actor_label_preference WHERE did = %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(did)})
+	_, err := r.db.Exec(ctx, "DELETE FROM actor_label_preference WHERE did = $1",
+		[]database.Value{database.Text(did)})
 	return err
 }
 

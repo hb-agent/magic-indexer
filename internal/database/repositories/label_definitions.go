@@ -75,10 +75,9 @@ func (r *LabelDefinitionsRepository) GetAll(ctx context.Context) ([]LabelDefinit
 // labeler. Pass SystemLabelerSrc to fetch only the pre-seeded Bluesky
 // defaults.
 func (r *LabelDefinitionsRepository) GetBySrc(ctx context.Context, src string) ([]LabelDefinition, error) {
-	sqlStr := fmt.Sprintf("SELECT src, val, description, severity, default_visibility, created_at FROM label_definition WHERE src = %s ORDER BY val",
-		r.db.Placeholder(1))
-
-	rows, err := r.db.DB().QueryContext(ctx, sqlStr, src)
+	rows, err := r.db.DB().QueryContext(ctx,
+		"SELECT src, val, description, severity, default_visibility, created_at FROM label_definition WHERE src = $1 ORDER BY val",
+		src)
 	if err != nil {
 		return nil, err
 	}
@@ -91,12 +90,10 @@ func (r *LabelDefinitionsRepository) GetBySrc(ctx context.Context, src string) (
 // owned by SystemLabelerSrc AND whose val does not start with `!`.
 // Used by the admin UI to list user-manageable labels.
 func (r *LabelDefinitionsRepository) GetNonSystem(ctx context.Context) ([]LabelDefinition, error) {
-	sqlStr := fmt.Sprintf(`SELECT src, val, description, severity, default_visibility, created_at
+	rows, err := r.db.DB().QueryContext(ctx, `SELECT src, val, description, severity, default_visibility, created_at
 		FROM label_definition
-		WHERE src <> %s AND val NOT LIKE '!%%'
-		ORDER BY src, val`, r.db.Placeholder(1))
-
-	rows, err := r.db.DB().QueryContext(ctx, sqlStr, SystemLabelerSrc)
+		WHERE src <> $1 AND val NOT LIKE '!%'
+		ORDER BY src, val`, SystemLabelerSrc)
 	if err != nil {
 		return nil, err
 	}
@@ -107,14 +104,12 @@ func (r *LabelDefinitionsRepository) GetNonSystem(ctx context.Context) ([]LabelD
 
 // Get retrieves a single label definition for a specific (src, val).
 func (r *LabelDefinitionsRepository) Get(ctx context.Context, src, val string) (*LabelDefinition, error) {
-	sqlStr := fmt.Sprintf(`SELECT src, val, description, severity, default_visibility, created_at
-		FROM label_definition WHERE src = %s AND val = %s`,
-		r.db.Placeholder(1), r.db.Placeholder(2))
-
 	var def LabelDefinition
 	var createdAtStr string
 
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(src), database.Text(val)},
+	err := r.db.QueryRow(ctx, `SELECT src, val, description, severity, default_visibility, created_at
+		FROM label_definition WHERE src = $1 AND val = $2`,
+		[]database.Value{database.Text(src), database.Text(val)},
 		&def.Src, &def.Val, &def.Description, &def.Severity, &def.DefaultVisibility, &createdAtStr)
 	if err != nil {
 		return nil, err
@@ -135,31 +130,26 @@ func (r *LabelDefinitionsRepository) Get(ctx context.Context, src, val string) (
 // Callers that specifically want to know whether a new row was created
 // vs a pre-existing row won in the race can call Exists() afterwards.
 func (r *LabelDefinitionsRepository) Insert(ctx context.Context, src, val, description string, severity LabelSeverity, defaultVisibility LabelVisibility) error {
-	sqlStr := fmt.Sprintf(`INSERT INTO label_definition (src, val, description, severity, default_visibility)
-		VALUES (%s, %s, %s, %s, %s)
+	_, err := r.db.Exec(ctx, `INSERT INTO label_definition (src, val, description, severity, default_visibility)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (src, val) DO NOTHING`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), r.db.Placeholder(5))
-
-	params := []database.Value{
-		database.Text(src),
-		database.Text(val),
-		database.Text(description),
-		database.Text(string(severity)),
-		database.Text(string(defaultVisibility)),
-	}
-
-	_, err := r.db.Exec(ctx, sqlStr, params)
+		[]database.Value{
+			database.Text(src),
+			database.Text(val),
+			database.Text(description),
+			database.Text(string(severity)),
+			database.Text(string(defaultVisibility)),
+		})
 	return err
 }
 
 // Exists checks whether a label definition exists for a specific
 // (src, val) combination.
 func (r *LabelDefinitionsRepository) Exists(ctx context.Context, src, val string) (bool, error) {
-	sqlStr := fmt.Sprintf("SELECT COUNT(*) FROM label_definition WHERE src = %s AND val = %s",
-		r.db.Placeholder(1), r.db.Placeholder(2))
-
 	var count int64
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(src), database.Text(val)}, &count)
+	err := r.db.QueryRow(ctx,
+		"SELECT COUNT(*) FROM label_definition WHERE src = $1 AND val = $2",
+		[]database.Value{database.Text(src), database.Text(val)}, &count)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 
 	"github.com/GainForest/hypergoat/internal/database"
 	"github.com/GainForest/hypergoat/internal/oauth"
@@ -22,25 +21,22 @@ func NewOAuthDPoPNoncesRepository(db database.Executor) *OAuthDPoPNoncesReposito
 
 // Insert creates a new DPoP nonce.
 func (r *OAuthDPoPNoncesRepository) Insert(ctx context.Context, nonce *oauth.DPoPNonce) error {
-	sqlStr := fmt.Sprintf(`INSERT INTO oauth_dpop_nonce (nonce, expires_at) VALUES (%s, %s)`,
-		r.db.Placeholder(1), r.db.Placeholder(2))
-
-	params := []database.Value{
-		database.Text(nonce.Nonce),
-		database.Int(nonce.ExpiresAt),
-	}
-
-	_, err := r.db.Exec(ctx, sqlStr, params)
+	_, err := r.db.Exec(ctx,
+		`INSERT INTO oauth_dpop_nonce (nonce, expires_at) VALUES ($1, $2)`,
+		[]database.Value{
+			database.Text(nonce.Nonce),
+			database.Int(nonce.ExpiresAt),
+		})
 	return err
 }
 
 // Get retrieves a DPoP nonce by nonce string.
 func (r *OAuthDPoPNoncesRepository) Get(ctx context.Context, nonceStr string) (*oauth.DPoPNonce, error) {
-	sqlStr := fmt.Sprintf(`SELECT nonce, expires_at FROM oauth_dpop_nonce WHERE nonce = %s`, r.db.Placeholder(1))
-
 	var nonce oauth.DPoPNonce
 
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(nonceStr)},
+	err := r.db.QueryRow(ctx,
+		`SELECT nonce, expires_at FROM oauth_dpop_nonce WHERE nonce = $1`,
+		[]database.Value{database.Text(nonceStr)},
 		&nonce.Nonce, &nonce.ExpiresAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -54,11 +50,10 @@ func (r *OAuthDPoPNoncesRepository) Get(ctx context.Context, nonceStr string) (*
 
 // Exists checks if a nonce exists and is not expired.
 func (r *OAuthDPoPNoncesRepository) Exists(ctx context.Context, nonceStr string, currentTimestamp int64) (bool, error) {
-	sqlStr := fmt.Sprintf(`SELECT 1 FROM oauth_dpop_nonce WHERE nonce = %s AND expires_at > %s`,
-		r.db.Placeholder(1), r.db.Placeholder(2))
-
 	var exists int
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(nonceStr), database.Int(currentTimestamp)}, &exists)
+	err := r.db.QueryRow(ctx,
+		`SELECT 1 FROM oauth_dpop_nonce WHERE nonce = $1 AND expires_at > $2`,
+		[]database.Value{database.Text(nonceStr), database.Int(currentTimestamp)}, &exists)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
@@ -71,14 +66,14 @@ func (r *OAuthDPoPNoncesRepository) Exists(ctx context.Context, nonceStr string,
 
 // Delete removes a DPoP nonce.
 func (r *OAuthDPoPNoncesRepository) Delete(ctx context.Context, nonceStr string) error {
-	sqlStr := fmt.Sprintf("DELETE FROM oauth_dpop_nonce WHERE nonce = %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(nonceStr)})
+	_, err := r.db.Exec(ctx, "DELETE FROM oauth_dpop_nonce WHERE nonce = $1",
+		[]database.Value{database.Text(nonceStr)})
 	return err
 }
 
 // DeleteExpired removes all expired DPoP nonces.
 func (r *OAuthDPoPNoncesRepository) DeleteExpired(ctx context.Context, beforeTimestamp int64) error {
-	sqlStr := fmt.Sprintf("DELETE FROM oauth_dpop_nonce WHERE expires_at < %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Int(beforeTimestamp)})
+	_, err := r.db.Exec(ctx, "DELETE FROM oauth_dpop_nonce WHERE expires_at < $1",
+		[]database.Value{database.Int(beforeTimestamp)})
 	return err
 }

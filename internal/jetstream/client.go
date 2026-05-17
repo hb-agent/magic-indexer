@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/GainForest/hypergoat/internal/metrics"
 )
 
 const (
@@ -60,6 +62,10 @@ func NewClient(config ClientConfig) *Client {
 	if config.URL == "" {
 		config.URL = DefaultJetstreamURL
 	}
+
+	// Publish the channel capacity once so operators can graph
+	// utilisation as depth/capacity (Track 4 observability).
+	metrics.JetstreamEventBufferCapacity(EventChannelBufferSize)
 
 	return &Client{
 		config: config,
@@ -145,6 +151,12 @@ func (c *Client) Run(ctx context.Context) error {
 	// Start ping sender
 	go c.pingLoop(ctx)
 
+	// Periodically publish the events-channel depth so operators
+	// can see how close we are to backpressure (Track 4). 5s is
+	// fine-grained enough to catch a producer surge before the
+	// channel fills, coarse enough to skip in tight benchmarks.
+	go c.bufferDepthLoop(ctx)
+
 	// Read loop
 	for {
 		select {
@@ -179,6 +191,23 @@ func (c *Client) Run(ctx context.Context) error {
 		case c.events <- event:
 		case <-ctx.Done():
 			return ctx.Err()
+		}
+	}
+}
+
+// bufferDepthLoop emits the events-channel depth metric on a
+// 5-second ticker. Stops on ctx.Done() or c.done.
+func (c *Client) bufferDepthLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.done:
+			return
+		case <-ticker.C:
+			metrics.JetstreamEventBufferDepth(len(c.events))
 		}
 	}
 }

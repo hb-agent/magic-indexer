@@ -45,18 +45,12 @@ func (r *ActorsRepository) Upsert(ctx context.Context, did, handle string) error
 // a previously-resolved value on the row is preserved via COALESCE so
 // transient resolution failures don't blank the field.
 func (r *ActorsRepository) UpsertWithPDS(ctx context.Context, did, handle, pds string) error {
-	p1 := r.db.Placeholder(1)
-	p2 := r.db.Placeholder(2)
-	p3 := r.db.Placeholder(3)
-
-	sqlStr := fmt.Sprintf(`INSERT INTO actor (did, handle, pds, indexed_at)
-		VALUES (%s, %s, NULLIF(%s, ''), NOW())
+	_, err := r.db.Exec(ctx, `INSERT INTO actor (did, handle, pds, indexed_at)
+		VALUES ($1, $2, NULLIF($3, ''), NOW())
 		ON CONFLICT(did) DO UPDATE SET
 			handle = EXCLUDED.handle,
 			pds = COALESCE(EXCLUDED.pds, actor.pds),
-			indexed_at = NOW()`, p1, p2, p3)
-
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{
+			indexed_at = NOW()`, []database.Value{
 		database.Text(did),
 		database.Text(handle),
 		database.Text(pds),
@@ -100,9 +94,7 @@ func (r *ActorsRepository) batchUpsertChunk(ctx context.Context, actors []ActorD
 
 	for i, actor := range actors {
 		base := i * 2
-		valueSet := fmt.Sprintf("(%s, %s, NOW())",
-			r.db.Placeholder(base+1),
-			r.db.Placeholder(base+2))
+		valueSet := fmt.Sprintf("($%d, $%d, NOW())", base+1, base+2)
 		valueSets = append(valueSets, valueSet)
 
 		params = append(params,
@@ -129,25 +121,22 @@ func (r *ActorsRepository) batchUpsertChunk(ctx context.Context, actors []ActorD
 // writing. Returns nil with no row update if the actor doesn't exist
 // — the backfill treats that as a benign skip rather than a failure.
 func (r *ActorsRepository) SetPDS(ctx context.Context, did, pds string) error {
-	sqlStr := fmt.Sprintf(
-		"UPDATE actor SET pds = NULLIF(%s, '') WHERE did = %s",
-		r.db.Placeholder(1), r.db.Placeholder(2),
-	)
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{
-		database.Text(pds),
-		database.Text(did),
-	})
+	_, err := r.db.Exec(ctx,
+		"UPDATE actor SET pds = NULLIF($1, '') WHERE did = $2",
+		[]database.Value{
+			database.Text(pds),
+			database.Text(did),
+		})
 	return err
 }
 
 // GetByDID retrieves an actor by their DID.
 func (r *ActorsRepository) GetByDID(ctx context.Context, did string) (*Actor, error) {
-	sqlStr := fmt.Sprintf("SELECT did, handle, indexed_at::text, COALESCE(pds, '') FROM actor WHERE did = %s",
-		r.db.Placeholder(1))
-
 	var actor Actor
 	var indexedAtStr string
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(did)},
+	err := r.db.QueryRow(ctx,
+		"SELECT did, handle, indexed_at::text, COALESCE(pds, '') FROM actor WHERE did = $1",
+		[]database.Value{database.Text(did)},
 		&actor.DID, &actor.Handle, &indexedAtStr, &actor.PDS)
 	if err != nil {
 		return nil, err
@@ -159,12 +148,11 @@ func (r *ActorsRepository) GetByDID(ctx context.Context, did string) (*Actor, er
 
 // GetByHandle retrieves an actor by their handle.
 func (r *ActorsRepository) GetByHandle(ctx context.Context, handle string) (*Actor, error) {
-	sqlStr := fmt.Sprintf("SELECT did, handle, indexed_at::text, COALESCE(pds, '') FROM actor WHERE handle = %s",
-		r.db.Placeholder(1))
-
 	var actor Actor
 	var indexedAtStr string
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(handle)},
+	err := r.db.QueryRow(ctx,
+		"SELECT did, handle, indexed_at::text, COALESCE(pds, '') FROM actor WHERE handle = $1",
+		[]database.Value{database.Text(handle)},
 		&actor.DID, &actor.Handle, &indexedAtStr, &actor.PDS)
 	if err != nil {
 		return nil, err
@@ -193,8 +181,7 @@ func (r *ActorsRepository) DeleteAll(ctx context.Context) error {
 // number of rows affected — caller should treat 0 as "actor was
 // already absent" rather than an error.
 func (r *ActorsRepository) DeleteByDIDTx(ctx context.Context, tx *sql.Tx, did string) (int64, error) {
-	sqlStr := fmt.Sprintf("DELETE FROM actor WHERE did = %s", r.db.Placeholder(1))
-	res, err := tx.ExecContext(ctx, sqlStr, did)
+	res, err := tx.ExecContext(ctx, "DELETE FROM actor WHERE did = $1", did)
 	if err != nil {
 		return 0, fmt.Errorf("delete actor: %w", err)
 	}
@@ -208,8 +195,8 @@ func (r *ActorsRepository) DeleteByDIDTx(ctx context.Context, tx *sql.Tx, did st
 // Exists checks if an actor exists by DID.
 func (r *ActorsRepository) Exists(ctx context.Context, did string) (bool, error) {
 	var count int64
-	sqlStr := fmt.Sprintf("SELECT COUNT(*) FROM actor WHERE did = %s", r.db.Placeholder(1))
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(did)}, &count)
+	err := r.db.QueryRow(ctx, "SELECT COUNT(*) FROM actor WHERE did = $1",
+		[]database.Value{database.Text(did)}, &count)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil

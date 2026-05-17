@@ -30,10 +30,9 @@ func NewConfigRepository(db database.Executor) *ConfigRepository {
 
 // Get retrieves a config value by key.
 func (r *ConfigRepository) Get(ctx context.Context, key string) (string, error) {
-	sqlStr := fmt.Sprintf("SELECT value FROM config WHERE key = %s", r.db.Placeholder(1))
-
 	var value string
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(key)}, &value)
+	err := r.db.QueryRow(ctx, "SELECT value FROM config WHERE key = $1",
+		[]database.Value{database.Text(key)}, &value)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", fmt.Errorf("config key not found: %s", key)
@@ -45,15 +44,11 @@ func (r *ConfigRepository) Get(ctx context.Context, key string) (string, error) 
 
 // Set inserts or updates a config value.
 func (r *ConfigRepository) Set(ctx context.Context, key, value string) error {
-	p1 := r.db.Placeholder(1)
-	p2 := r.db.Placeholder(2)
-	sqlStr := fmt.Sprintf(`INSERT INTO config (key, value, updated_at)
-		VALUES (%s, %s, NOW())
+	_, err := r.db.Exec(ctx, `INSERT INTO config (key, value, updated_at)
+		VALUES ($1, $2, NOW())
 		ON CONFLICT(key) DO UPDATE SET
 			value = EXCLUDED.value,
-			updated_at = NOW()`, p1, p2)
-
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{
+			updated_at = NOW()`, []database.Value{
 		database.Text(key),
 		database.Text(value),
 	})
@@ -62,8 +57,8 @@ func (r *ConfigRepository) Set(ctx context.Context, key, value string) error {
 
 // Delete removes a config value by key.
 func (r *ConfigRepository) Delete(ctx context.Context, key string) error {
-	sqlStr := fmt.Sprintf("DELETE FROM config WHERE key = %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(key)})
+	_, err := r.db.Exec(ctx, "DELETE FROM config WHERE key = $1",
+		[]database.Value{database.Text(key)})
 	return err
 }
 

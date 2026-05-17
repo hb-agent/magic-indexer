@@ -37,6 +37,13 @@ type ProcessOp struct {
 	CID        string
 	Operation  Operation
 	Record     json.RawMessage // nil for delete
+
+	// SourceEventID, when non-nil, is the upstream protocol's
+	// per-event identifier (Jetstream time_us, Tap event.id) used
+	// to dedupe redelivered events at LogActivity. Nil means the
+	// caller has no source identifier — the activity row is written
+	// without dedup, matching pre-2026-05-17-Track-4 behaviour.
+	SourceEventID *int64
 }
 
 // HookErrorPolicy controls what happens when a RecordHook returns an error.
@@ -120,7 +127,10 @@ func (p *RecordProcessor) ProcessRecord(ctx context.Context, op ProcessOp) error
 
 	processedAt := time.Now()
 
-	// Log activity.
+	// Log activity. On a redelivered event with a matching
+	// SourceEventID, the repository's ON CONFLICT path returns the
+	// existing row's id so the updateStatus call below targets that
+	// row instead of leaving a fresh 'pending' to be orphaned.
 	var activityID int64
 	if p.Activity != nil {
 		var err error
@@ -132,9 +142,11 @@ func (p *RecordProcessor) ProcessRecord(ctx context.Context, op ProcessOp) error
 			op.DID,
 			op.RKey,
 			string(op.Record),
+			op.SourceEventID,
 		)
 		if err != nil {
-			slog.Warn("Failed to log activity", "error", err)
+			slog.Error("Failed to log activity", "error", err)
+			metrics.ActivityLogFailed()
 		}
 	}
 

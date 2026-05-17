@@ -6,68 +6,6 @@ import (
 	"time"
 )
 
-func TestDialectString(t *testing.T) {
-	tests := []struct {
-		dialect Dialect
-		want    string
-	}{
-		{PostgreSQL, "postgresql"},
-		{Dialect(99), "unknown"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			got := tt.dialect.String()
-			if got != tt.want {
-				t.Errorf("Dialect(%d).String() = %q, want %q", tt.dialect, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestParseDialect(t *testing.T) {
-	tests := []struct {
-		name        string
-		databaseURL string
-		want        Dialect
-	}{
-		{
-			name:        "postgres URL",
-			databaseURL: "postgres://user:pass@localhost/db",
-			want:        PostgreSQL,
-		},
-		{
-			name:        "postgresql URL",
-			databaseURL: "postgresql://user:pass@localhost/db",
-			want:        PostgreSQL,
-		},
-		{
-			name:        "POSTGRES uppercase",
-			databaseURL: "POSTGRES://user:pass@localhost/db",
-			want:        PostgreSQL,
-		},
-		{
-			name:        "unknown returns invalid dialect",
-			databaseURL: "mysql://user:pass@localhost/db",
-			want:        Dialect(-1),
-		},
-		{
-			name:        "empty string returns invalid dialect",
-			databaseURL: "",
-			want:        Dialect(-1),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ParseDialect(tt.databaseURL)
-			if got != tt.want {
-				t.Errorf("ParseDialect(%q) = %v, want %v", tt.databaseURL, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestDbError(t *testing.T) {
 	t.Run("error with cause", func(t *testing.T) {
 		cause := errors.New("underlying error")

@@ -4,16 +4,20 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"github.com/GainForest/hypergoat/internal/consumer"
+	"github.com/GainForest/hypergoat/internal/metrics"
 )
 
-// EventHandler processes Tap events.
+// EventHandler processes Tap events. sourceEventID on
+// HandleRecord is the Tap envelope's event.id — flows through to
+// LogActivity for redelivery dedup.
 type EventHandler interface {
-	HandleRecord(ctx context.Context, event *RecordEvent) error
+	HandleRecord(ctx context.Context, event *RecordEvent, sourceEventID int64) error
 	HandleIdentity(ctx context.Context, event *IdentityEvent) error
 }
 
@@ -32,7 +36,46 @@ type Consumer struct {
 	config  ConsumerConfig
 	handler EventHandler
 	dialer  Dialer
+
+	// errLog implements the rate-limited error-logging policy:
+	// first N errors at error severity, then 1/min so a multi-hour
+	// DB outage doesn't fill the log with millions of identical
+	// lines. Counter survives reconnects so the "since last log"
+	// count is meaningful across the lifetime of the consumer.
+	errLog rateLimitedErrLogger
 }
+
+// rateLimitedErrLogger throttles repeated error lines from the
+// hot ingestion path. Mirrors the equivalent type in
+// internal/jetstream; they're deliberately not shared (A12 in
+// docs/review-2026-05-17/plan.md — don't refactor for a
+// hypothetical third consumer).
+//
+// suppressed + lastEmit are atomic because the throttle-emit
+// branch uses a CAS to ensure exactly one summary line per
+// throttle interval even if log() is called concurrently. In
+// practice the single dispatcher goroutine is the only caller,
+// so the CAS is belt-and-braces — but the cost is trivial.
+type rateLimitedErrLogger struct {
+	// loudCount is the number of errors logged at full severity
+	// before throttling kicks in.
+	loudCount int
+	loudLimit int
+	// throttleEvery is the interval at which a single suppressed-
+	// occurrences summary line is emitted.
+	throttleEvery time.Duration
+	suppressed    atomic.Int64
+	lastEmit      atomic.Int64 // unix nanoseconds
+}
+
+// Defaults for rateLimitedErrLogger. Per-package constants rather
+// than a shared helper so each consumer can tune independently;
+// see plan.md A12 for the "don't share consumer machinery"
+// decision.
+const (
+	defaultErrLogLoudLimit = 5
+	defaultErrLogThrottle  = time.Minute
+)
 
 // NewConsumer creates a new Tap consumer.
 func NewConsumer(config ConsumerConfig, handler EventHandler) *Consumer {
@@ -43,6 +86,33 @@ func NewConsumer(config ConsumerConfig, handler EventHandler) *Consumer {
 		config:  config,
 		handler: handler,
 		dialer:  &DefaultDialer{},
+		errLog: rateLimitedErrLogger{
+			loudLimit:     defaultErrLogLoudLimit,
+			throttleEvery: defaultErrLogThrottle,
+		},
+	}
+}
+
+// log decides whether to emit this error at full severity or
+// silently increment the suppressed counter. After the loud-limit
+// is reached, one summary line per throttleEvery is emitted
+// carrying the suppressed count. Caller passes the formatted error
+// and structured fields.
+func (l *rateLimitedErrLogger) log(msg string, args ...any) {
+	if l.loudCount < l.loudLimit {
+		l.loudCount++
+		slog.Error(msg, args...)
+		return
+	}
+	count := l.suppressed.Add(1)
+	now := time.Now().UnixNano()
+	last := l.lastEmit.Load()
+	if time.Duration(now-last) >= l.throttleEvery {
+		if l.lastEmit.CompareAndSwap(last, now) {
+			args = append(args, "occurrences_since_last_log", count)
+			slog.Error(msg+" (rate-limited)", args...)
+			l.suppressed.Store(0)
+		}
 	}
 }
 
@@ -94,13 +164,20 @@ func (c *Consumer) runOnce(ctx context.Context) error {
 			continue
 		}
 
-		// Dispatch with panic recovery.
-		if err := c.dispatch(ctx, event); err != nil {
-			slog.Warn("Failed to process Tap event",
+		// Dispatch with panic recovery + per-event latency
+		// histogram. Tap has no buffered channel between the WS
+		// reader and dispatch, so this histogram is the equivalent
+		// of jetstream's buffer-depth gauge for spotting stalls.
+		dispatchStart := time.Now()
+		dispatchErr := c.dispatch(ctx, event)
+		metrics.TapEventDispatchObserved(time.Since(dispatchStart).Seconds())
+		if dispatchErr != nil {
+			c.errLog.log("Failed to process Tap event",
 				"event_id", event.ID,
 				"type", event.Type,
-				"error", err,
+				"error", dispatchErr,
 			)
+			metrics.IngestionError(metrics.IngestionConsumerTap)
 			// Don't ack failed events — they'll be redelivered on reconnect.
 			continue
 		}
@@ -171,7 +248,7 @@ func (c *Consumer) handleEvent(ctx context.Context, event *Event) error {
 		if event.Record == nil {
 			return nil
 		}
-		return c.handler.HandleRecord(ctx, event.Record)
+		return c.handler.HandleRecord(ctx, event.Record, event.ID)
 	case EventTypeIdentity:
 		if event.Identity == nil {
 			return nil

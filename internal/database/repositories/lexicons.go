@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/GainForest/hypergoat/internal/database"
@@ -29,15 +28,10 @@ func NewLexiconsRepository(db database.Executor) *LexiconsRepository {
 
 // Upsert inserts or updates a lexicon.
 func (r *LexiconsRepository) Upsert(ctx context.Context, id, jsonData string) error {
-	p1 := r.db.Placeholder(1)
-	p2 := r.db.Placeholder(2)
-
-	sqlStr := fmt.Sprintf(`INSERT INTO lexicon (id, json)
-		VALUES (%s, %s::jsonb)
+	_, err := r.db.Exec(ctx, `INSERT INTO lexicon (id, json)
+		VALUES ($1, $2::jsonb)
 		ON CONFLICT(id) DO UPDATE SET
-			json = EXCLUDED.json`, p1, p2)
-
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{
+			json = EXCLUDED.json`, []database.Value{
 		database.Text(id),
 		database.Text(jsonData),
 	})
@@ -46,12 +40,11 @@ func (r *LexiconsRepository) Upsert(ctx context.Context, id, jsonData string) er
 
 // GetByID retrieves a lexicon by its ID.
 func (r *LexiconsRepository) GetByID(ctx context.Context, id string) (*Lexicon, error) {
-	sqlStr := fmt.Sprintf("SELECT id, json::text, created_at::text FROM lexicon WHERE id = %s",
-		r.db.Placeholder(1))
-
 	var lex Lexicon
 	var createdAtStr string
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(id)},
+	err := r.db.QueryRow(ctx,
+		"SELECT id, json::text, created_at::text FROM lexicon WHERE id = $1",
+		[]database.Value{database.Text(id)},
 		&lex.ID, &lex.JSON, &createdAtStr)
 	if err != nil {
 		return nil, err
@@ -87,8 +80,8 @@ func (r *LexiconsRepository) GetAll(ctx context.Context) ([]*Lexicon, error) {
 
 // Delete removes a lexicon by ID.
 func (r *LexiconsRepository) Delete(ctx context.Context, id string) error {
-	sqlStr := fmt.Sprintf("DELETE FROM lexicon WHERE id = %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(id)})
+	_, err := r.db.Exec(ctx, "DELETE FROM lexicon WHERE id = $1",
+		[]database.Value{database.Text(id)})
 	return err
 }
 
@@ -108,8 +101,8 @@ func (r *LexiconsRepository) GetCount(ctx context.Context) (int64, error) {
 // Exists checks if a lexicon exists.
 func (r *LexiconsRepository) Exists(ctx context.Context, id string) (bool, error) {
 	var count int64
-	sqlStr := fmt.Sprintf("SELECT COUNT(*) FROM lexicon WHERE id = %s", r.db.Placeholder(1))
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(id)}, &count)
+	err := r.db.QueryRow(ctx, "SELECT COUNT(*) FROM lexicon WHERE id = $1",
+		[]database.Value{database.Text(id)}, &count)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil

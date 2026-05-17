@@ -9,7 +9,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -87,10 +86,15 @@ type services struct {
 // backgroundServices tracks cancellable background goroutines for clean shutdown.
 type backgroundServices struct {
 	oauthCleanupCancel context.CancelFunc
-	workersCancel      context.CancelFunc
-	jsConsumer         *jetstream.Consumer
-	jsCancel           context.CancelFunc
-	tapCancel          context.CancelFunc
+	// oauthCleanupWG drains the OAuth cleanup goroutine on shutdown
+	// so it cannot be mid-DELETE when the deferred svc.db.Close()
+	// at the end of run() tears down the pool. Stop() Waits on it
+	// after firing oauthCleanupCancel.
+	oauthCleanupWG sync.WaitGroup
+	workersCancel  context.CancelFunc
+	jsConsumer     *jetstream.Consumer
+	jsCancel       context.CancelFunc
+	tapCancel      context.CancelFunc
 
 	// labelerMu guards the slice and the labeler cancel: startLabeler
 	// appends at startup, backgroundServices.Stop iterates at shutdown,
@@ -119,6 +123,11 @@ type backgroundServices struct {
 func (bg *backgroundServices) Stop() {
 	if bg.oauthCleanupCancel != nil {
 		bg.oauthCleanupCancel()
+		// Wait for the cleanup goroutine to observe the cancel and
+		// exit before any downstream tear-down (DB pool close in
+		// run()'s defer) could pull the rug out from under a
+		// concurrent DELETE.
+		bg.oauthCleanupWG.Wait()
 	}
 	if bg.workersCancel != nil {
 		bg.workersCancel()
@@ -254,7 +263,7 @@ func initServices(cfg *config.Config) (*services, error) {
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("Database connected successfully", "dialect", db.Dialect().String())
+	slog.Info("Database connected successfully")
 
 	slog.Info("Running database migrations...")
 	if err := migrations.Run(context.Background(), db); err != nil {
@@ -399,148 +408,13 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 		})
 	})
 
-	// Labeler cursor reset — operator escape hatch to force a re-backfill
-	// on the next startup for a specific labeler DID. Deletes both the
-	// subscription seq cursor and any in-progress backfill checkpoint.
+	// Raw HTTP admin endpoints — handlers live in admin_http.go.
 	// Gated behind ADMIN_API_KEY bearer auth (same mechanism as the
-	// admin GraphQL handler) with constant-time comparison.
-	// checkAdminBearer validates the ADMIN_API_KEY bearer token on a
-	// raw HTTP admin endpoint. Returns true if the caller should
-	// proceed; otherwise writes the error response and returns false.
-	// Centralised here so every /admin/* raw HTTP route uses the same
-	// constant-time comparison path instead of re-implementing it.
-	checkAdminBearer := func(w http.ResponseWriter, req *http.Request) bool {
-		if cfg.AdminAPIKey == "" {
-			http.Error(w, "admin endpoint disabled: ADMIN_API_KEY is not configured", http.StatusForbidden)
-			return false
-		}
-		auth := req.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			http.Error(w, "missing bearer token", http.StatusUnauthorized)
-			return false
-		}
-		token := strings.TrimPrefix(auth, "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.AdminAPIKey)) != 1 {
-			http.Error(w, "invalid bearer token", http.StatusUnauthorized)
-			return false
-		}
-		return true
-	}
-
-	r.Post("/admin/labeler/reset", func(w http.ResponseWriter, req *http.Request) {
-		if !checkAdminBearer(w, req) {
-			return
-		}
-		did := req.URL.Query().Get("did")
-		if did == "" {
-			http.Error(w, "missing did query parameter", http.StatusBadRequest)
-			return
-		}
-		// Validate the DID format before using it as a config key —
-		// otherwise an attacker with the API key could inject
-		// arbitrary config-key shapes like `labeler_cursor:../..` and
-		// delete unrelated rows.
-		if !didpkg.IsValid(did) {
-			http.Error(w, "invalid did format (expected did:plc: or did:web:)", http.StatusBadRequest)
-			return
-		}
-		reqCtx := req.Context()
-		if err := svc.config.Delete(reqCtx, "labeler_cursor:"+did); err != nil {
-			slog.Error("Labeler reset: failed to delete subscription cursor",
-				"did", did, "error", err)
-			http.Error(w, "failed to delete subscription cursor", http.StatusInternalServerError)
-			return
-		}
-		if err := svc.config.Delete(reqCtx, "labeler_backfill_cursor:"+did); err != nil {
-			slog.Error("Labeler reset: failed to delete backfill checkpoint",
-				"did", did, "error", err)
-			http.Error(w, "failed to delete backfill checkpoint", http.StatusInternalServerError)
-			return
-		}
-		slog.Info("Labeler cursor reset by admin request",
-			"did", did, "remote_addr", req.RemoteAddr)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"reset": true,
-			"did":   did,
-			"note":  "restart the server to re-run backfill for this labeler",
-		})
-	})
-
-	// Pause a single labeler subscription without restarting the
-	// process. Calls Stop() on the matching consumer and removes
-	// it from the labelerConsumers slice. The consumer's cursor is
-	// flushed before Stop returns, so resume on next startup picks
-	// up where it left off. A restart is still required to bring
-	// the consumer back up (we do not currently support in-process
-	// resume); this endpoint is for incident response.
-	r.Post("/admin/labeler/pause", func(w http.ResponseWriter, req *http.Request) {
-		if !checkAdminBearer(w, req) {
-			return
-		}
-		did := req.URL.Query().Get("did")
-		if did == "" {
-			http.Error(w, "missing did query parameter", http.StatusBadRequest)
-			return
-		}
-		if !didpkg.IsValid(did) {
-			http.Error(w, "invalid did format", http.StatusBadRequest)
-			return
-		}
-		bg.labelerMu.Lock()
-		var paused *labeler.Consumer
-		remaining := bg.labelerConsumers[:0]
-		for _, c := range bg.labelerConsumers {
-			if c.LabelerDID() == did && paused == nil {
-				paused = c
-				continue
-			}
-			remaining = append(remaining, c)
-		}
-		bg.labelerConsumers = remaining
-		bg.labelerMu.Unlock()
-
-		if paused == nil {
-			http.Error(w, "no active labeler consumer for this DID", http.StatusNotFound)
-			return
-		}
-		paused.Stop()
-		slog.Info("Labeler paused by admin request",
-			"did", did, "remote_addr", req.RemoteAddr)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"paused": true,
-			"did":    did,
-			"note":   "restart the server to bring this labeler back up",
-		})
-	})
-
-	// Label-chain inspection. Returns every label (active, negated,
-	// expired) on a single URI with src + val + neg + cts + exp so
-	// an operator can answer "why is this record hidden?" without
-	// attaching a debugger. Deliberately bypasses the exp / neg
-	// filters of the public query path — this is a diagnostic view.
-	r.Get("/admin/label-chain", func(w http.ResponseWriter, req *http.Request) {
-		if !checkAdminBearer(w, req) {
-			return
-		}
-		uri := req.URL.Query().Get("uri")
-		if uri == "" {
-			http.Error(w, "missing uri query parameter", http.StatusBadRequest)
-			return
-		}
-		rows, err := svc.labels.GetAllForURI(req.Context(), uri)
-		if err != nil {
-			slog.Error("label-chain lookup failed", "uri", uri, "error", err)
-			http.Error(w, "failed to query labels", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"uri":    uri,
-			"labels": rows,
-		})
-	})
+	// admin GraphQL handler); the shared checkAdminBearer there uses
+	// constant-time comparison.
+	r.Post("/admin/labeler/reset", newLabelerResetHandler(cfg.AdminAPIKey, svc))
+	r.Post("/admin/labeler/pause", newLabelerPauseHandler(cfg.AdminAPIKey, bg))
+	r.Get("/admin/label-chain", newLabelChainHandler(cfg.AdminAPIKey, svc))
 
 	// Stats endpoint. Includes per-labeler consumer counters so operators
 	// can inspect labeler ingestion health without attaching a debugger.
@@ -661,10 +535,11 @@ func setupOAuth(r *chi.Mux, cfg *config.Config, svc *services, bg *backgroundSer
 	r.Get("/oauth/dpop/nonce", server.HandleDPoPNonce)
 	r.Post("/oauth/dpop/nonce", server.HandleDPoPNonce)
 
-	// Start cleanup worker
+	// Start cleanup worker. WaitGroup is on bg so Stop() can drain
+	// the goroutine before run()'s deferred db.Close() fires.
 	oauthCleanupCtx, oauthCleanupCancel := context.WithCancel(context.Background())
 	bg.oauthCleanupCancel = oauthCleanupCancel
-	oauthHandlers.StartCleanupWorker(oauthCleanupCtx, 1*time.Hour)
+	oauthHandlers.StartCleanupWorker(oauthCleanupCtx, 1*time.Hour, &bg.oauthCleanupWG)
 
 	slog.Info("OAuth endpoints enabled",
 		"authorization_server", cfg.ExternalBaseURL+"/.well-known/oauth-authorization-server",
@@ -1488,7 +1363,7 @@ func populateActivityFromRecords(
 		timestamp := atproto.ExtractCreatedAt(rec.JSON, rec.IndexedAt)
 
 		// Log as a successful create operation
-		if _, logErr := activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success"); logErr == nil {
+		if _, logErr := activityRepo.LogActivityWithStatus(ctx, timestamp, "create", rec.Collection, rec.DID, rec.RKey, rec.JSON, "success", nil); logErr == nil {
 			count++
 		}
 		return nil

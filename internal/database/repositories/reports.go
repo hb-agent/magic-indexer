@@ -63,10 +63,9 @@ func NewReportsRepository(db database.Executor) *ReportsRepository {
 
 // Insert creates a new report.
 func (r *ReportsRepository) Insert(ctx context.Context, reporterDID, subjectURI string, reasonType ReportReasonType, reason *string) (*Report, error) {
-	sqlStr := fmt.Sprintf(`INSERT INTO report (reporter_did, subject_uri, reason_type, reason)
-		VALUES (%s, %s, %s, %s)
-		RETURNING id, reporter_did, subject_uri, reason_type, reason, status, resolved_by, resolved_at, created_at`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
+	const sqlStr = `INSERT INTO report (reporter_did, subject_uri, reason_type, reason)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, reporter_did, subject_uri, reason_type, reason, status, resolved_by, resolved_at, created_at`
 
 	params := []database.Value{
 		database.Text(reporterDID),
@@ -102,8 +101,8 @@ func (r *ReportsRepository) Insert(ctx context.Context, reporterDID, subjectURI 
 
 // Get retrieves a report by ID.
 func (r *ReportsRepository) Get(ctx context.Context, id int64) (*Report, error) {
-	sqlStr := fmt.Sprintf(`SELECT id, reporter_did, subject_uri, reason_type, reason, status, resolved_by, resolved_at, created_at
-		FROM report WHERE id = %s`, r.db.Placeholder(1))
+	const sqlStr = `SELECT id, reporter_did, subject_uri, reason_type, reason, status, resolved_by, resolved_at, created_at
+		FROM report WHERE id = $1`
 
 	var report Report
 	var reasonNull, resolvedByNull, resolvedAtNull sql.NullString
@@ -145,13 +144,13 @@ func (r *ReportsRepository) GetPaginated(ctx context.Context, statusFilter *Repo
 	paramIdx := 1
 
 	if statusFilter != nil {
-		conditions = append(conditions, fmt.Sprintf("status = %s", r.db.Placeholder(paramIdx)))
+		conditions = append(conditions, fmt.Sprintf("status = $%d", paramIdx))
 		params = append(params, string(*statusFilter))
 		paramIdx++
 	}
 
 	if afterID != nil {
-		conditions = append(conditions, fmt.Sprintf("id < %s", r.db.Placeholder(paramIdx)))
+		conditions = append(conditions, fmt.Sprintf("id < $%d", paramIdx))
 		params = append(params, *afterID)
 	}
 
@@ -198,10 +197,9 @@ func (r *ReportsRepository) GetPaginated(ctx context.Context, statusFilter *Repo
 
 // Resolve updates a report's status and resolution details.
 func (r *ReportsRepository) Resolve(ctx context.Context, id int64, status ReportStatus, resolvedBy string) (*Report, error) {
-	sqlStr := fmt.Sprintf(`UPDATE report
-		SET status = %s, resolved_by = %s, resolved_at = NOW()
-		WHERE id = %s`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3))
+	const sqlStr = `UPDATE report
+		SET status = $1, resolved_by = $2, resolved_at = NOW()
+		WHERE id = $3`
 
 	params := []database.Value{
 		database.Text(string(status)),
@@ -219,9 +217,8 @@ func (r *ReportsRepository) Resolve(ctx context.Context, id int64, status Report
 
 // GetByReporterAndSubject retrieves a report by reporter DID and subject URI.
 func (r *ReportsRepository) GetByReporterAndSubject(ctx context.Context, reporterDID, subjectURI string) (*Report, error) {
-	sqlStr := fmt.Sprintf(`SELECT id, reporter_did, subject_uri, reason_type, reason, status, resolved_by, resolved_at, created_at
-		FROM report WHERE reporter_did = %s AND subject_uri = %s`,
-		r.db.Placeholder(1), r.db.Placeholder(2))
+	const sqlStr = `SELECT id, reporter_did, subject_uri, reason_type, reason, status, resolved_by, resolved_at, created_at
+		FROM report WHERE reporter_did = $1 AND subject_uri = $2`
 
 	var report Report
 	var reasonNull, resolvedByNull, resolvedAtNull sql.NullString

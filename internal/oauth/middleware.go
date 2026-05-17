@@ -4,8 +4,10 @@ package oauth
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -25,6 +27,14 @@ const (
 
 // DefaultMaxDPoPAge is the default maximum age for DPoP proofs (5 minutes).
 const DefaultMaxDPoPAge = 300
+
+// DPoPJTICleanupSkewSeconds is the extra grace window added on top
+// of DefaultMaxDPoPAge when reaping DB-backed JTI rows. Bounds the
+// clock-skew tolerance for clients still presenting a proof whose
+// iat is within DefaultMaxDPoPAge but whose own clock is mildly
+// behind ours. Keeping this small keeps the JTI table at the size
+// needed for replay defence, not 12x larger.
+const DPoPJTICleanupSkewSeconds = 30
 
 // AccessTokenStore provides access to OAuth access tokens.
 type AccessTokenStore interface {
@@ -153,12 +163,28 @@ func (m *AuthMiddleware) validateDPoPToken(r *http.Request, token string) (*Auth
 		return nil, ErrTokenRevoked
 	}
 
-	// Verify DPoP binding
+	// Verify DPoP binding. The nil-check above must remain before
+	// the dereference below; the constant-time compare does not
+	// guard against nil. JKT is derived from public proof material,
+	// so a timing leak is mostly cosmetic — but the codebase already
+	// uses subtle.ConstantTimeCompare for PKCE (which has the same
+	// "public-ish material" property), so consistency is the
+	// strongest argument here.
+	//
+	// Response-shape collapse: on JKT mismatch we log the precise
+	// reason internally but return ErrInvalidToken (matching what
+	// the other post-validation invalid-token paths in this
+	// function return) so an attacker can't probe arbitrary keys
+	// and distinguish "JKT was wrong" from "JKT matched but you hit
+	// some other validation failure". Without this collapse the
+	// distinct `invalid_dpop_proof / DPoP key mismatch` body acts as
+	// an oracle even after the constant-time compare lands.
 	if accessToken.DPoPJKT == nil {
 		return nil, ErrTokenNotDPoPBound
 	}
-	if *accessToken.DPoPJKT != result.JKT {
-		return nil, ErrDPoPKeyMismatch
+	if subtle.ConstantTimeCompare([]byte(*accessToken.DPoPJKT), []byte(result.JKT)) != 1 {
+		slog.Debug("DPoP JKT mismatch", "internal_error", ErrDPoPKeyMismatch.Code)
+		return nil, ErrInvalidToken
 	}
 
 	// Check user

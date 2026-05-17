@@ -2,6 +2,9 @@ package repositories
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -707,5 +710,142 @@ func TestAsciiToLower(t *testing.T) {
 				t.Errorf("  byte 0x%02x: got 0x%02x, want 0x%02x", i, got[i], wantAll[i])
 			}
 		}
+	}
+}
+
+// TestContributorFilter_IndexExpressionMatchesMigration024 guards the
+// byte-for-byte coupling between `buildContributorFilter`'s emitted
+// SQL clause and the partial GIN index defined in migration 024.
+//
+// The index is keyed on `record_contributor_identities(json)`; the
+// runtime clause uses `record_contributor_identities(r.json)` (the
+// `r.` alias is the only permitted divergence). If migration 024 is
+// edited to rename the function, change its argument, or wrap it in
+// an outer expression, the planner can no longer match the runtime
+// clause to the index and queries silently degrade from index-scan
+// to O(collection-size) — the failure mode documented at filter.go's
+// `indexedExpr` constant.
+//
+// Failure here means: either update the index expression in
+// migration 024 to match the new clause shape, or update the clause
+// in `buildContributorFilter` to match the new index. The two MUST
+// agree.
+func TestContributorFilter_IndexExpressionMatchesMigration024(t *testing.T) {
+	// Locate the migration file relative to this test file. Walking
+	// up from the test's working directory keeps the test portable
+	// across `go test ./...` invocations from any subtree.
+	migrationPath := findRepoFile(t, "internal/database/migrations/postgres/024_add_contributor_identities_gin.up.sql")
+
+	migrationBytes, err := os.ReadFile(migrationPath)
+	if err != nil {
+		t.Fatalf("read migration 024: %v", err)
+	}
+	migration := string(migrationBytes)
+
+	// Extract the GIN index expression from `USING gin (<expr>)`.
+	// We do paren-balanced extraction by hand because the expression
+	// itself contains parens (function call) and a single-level
+	// regex group cannot capture them correctly.
+	indexedExprInMigration := extractGinExpression(t, migration)
+
+	// The runtime clause we want to compare against. We synthesise
+	// it by calling buildContributorFilter with a known operator and
+	// then stripping the operator/parameter scaffolding so what
+	// remains is the bare expression the planner has to match.
+	clause, _, _, err := buildContributorFilter(FieldFilter{
+		FieldName: "contributors",
+		Operator:  OpEq,
+		Value:     "did:plc:alice",
+		IsJSON:    true,
+		Kind:      KindArrayContributor,
+	}, 1)
+	if err != nil {
+		t.Fatalf("buildContributorFilter: %v", err)
+	}
+	// Clause shape is `(<indexedExpr> @> ARRAY[$1]::text[])` —
+	// extract the bit before ` @> `.
+	idx := strings.Index(clause, " @> ")
+	if idx < 0 {
+		t.Fatalf("clause missing ` @> ` separator: %s", clause)
+	}
+	indexedExprInClause := strings.TrimSpace(strings.TrimPrefix(clause, "("))[:idx-1]
+
+	// The only permitted divergence: the runtime clause references
+	// the aliased table (`r.json`), the migration references the
+	// unaliased column (`json`). Normalise both to the unaliased
+	// form for comparison.
+	normalize := func(s string) string {
+		s = strings.ReplaceAll(s, "(r.json)", "(json)")
+		// Collapse whitespace so that minor formatting drift in the
+		// migration file doesn't break the test.
+		return strings.Join(strings.Fields(s), " ")
+	}
+	wantExpr := normalize(indexedExprInMigration)
+	gotExpr := normalize(indexedExprInClause)
+
+	if wantExpr != gotExpr {
+		t.Fatalf("contributor filter expression drifted from migration 024 — planner will not match the partial GIN index\n  migration 024 indexes: %s\n  buildContributorFilter emits: %s (normalised to %s)\nIf this drift is intentional, update BOTH the migration's `USING gin (...)` expression AND the `indexedExpr` constant in filter.go.",
+			wantExpr, indexedExprInClause, gotExpr)
+	}
+
+	// Defence-in-depth: spot-check the function name itself so a
+	// rename is loudly named in the failure rather than buried in
+	// the diff above.
+	if !strings.Contains(wantExpr, "record_contributor_identities") {
+		t.Fatalf("migration 024 no longer references record_contributor_identities — buildContributorFilter must be updated to match the new function name. Migration expression: %s", wantExpr)
+	}
+}
+
+// extractGinExpression returns the expression text between the
+// outermost parens following `USING gin` in the given migration
+// SQL. Paren-balanced rather than regex because the indexed
+// expression itself contains a function-call paren pair.
+func extractGinExpression(t *testing.T, migration string) string {
+	t.Helper()
+	loc := regexp.MustCompile(`(?i)USING\s+gin\s*\(`).FindStringIndex(migration)
+	if loc == nil {
+		t.Fatalf("migration has no `USING gin (` clause:\n%s", migration)
+	}
+	// Scan from the opening paren, counting depth.
+	start := loc[1] // index just after the `(`
+	depth := 1
+	for i := start; i < len(migration); i++ {
+		switch migration[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return strings.TrimSpace(migration[start:i])
+			}
+		}
+	}
+	t.Fatalf("unterminated `USING gin (...)` in migration:\n%s", migration)
+	return ""
+}
+
+// findRepoFile walks up from the current working directory until it
+// finds a directory containing `go.mod`, then returns
+// `<repoRoot>/<relPath>`. Fails the test if the file does not exist
+// at that location.
+func findRepoFile(t *testing.T, relPath string) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			full := filepath.Join(dir, relPath)
+			if _, err := os.Stat(full); err != nil {
+				t.Fatalf("expected file at %s but stat failed: %v", full, err)
+			}
+			return full
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("walked to filesystem root without finding go.mod; cannot locate %s", relPath)
+		}
+		dir = parent
 	}
 }

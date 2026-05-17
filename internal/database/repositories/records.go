@@ -138,25 +138,18 @@ func (r *RecordsRepository) Insert(ctx context.Context, uri, cid, did, collectio
 // non-null sort_at unless the caller sends a new one; see the ON CONFLICT
 // clause below.
 func (r *RecordsRepository) InsertWithParams(ctx context.Context, p InsertParams) (InsertResult, error) {
-	p1 := r.db.Placeholder(1)
-	p2 := r.db.Placeholder(2)
-	p3 := r.db.Placeholder(3)
-	p4 := r.db.Placeholder(4)
-	p5 := r.db.Placeholder(5)
-	p6 := r.db.Placeholder(6)
-
 	// ON CONFLICT … WHERE filters out same-CID re-inserts so that
 	// RowsAffected == 0 when content is unchanged. sort_at uses
 	// COALESCE(EXCLUDED.sort_at, record.sort_at) so a subsequent insert
 	// that doesn't supply a sort_at doesn't wipe an existing one.
-	sqlStr := fmt.Sprintf(`INSERT INTO record (uri, cid, did, collection, json, sort_at)
-		VALUES (%s, %s, %s, %s, %s::jsonb, %s)
+	const sqlStr = `INSERT INTO record (uri, cid, did, collection, json, sort_at)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6)
 		ON CONFLICT(uri) DO UPDATE SET
 			cid = EXCLUDED.cid,
 			json = EXCLUDED.json,
 			indexed_at = NOW(),
 			sort_at = COALESCE(EXCLUDED.sort_at, record.sort_at)
-		WHERE record.cid IS DISTINCT FROM EXCLUDED.cid`, p1, p2, p3, p4, p5, p6)
+		WHERE record.cid IS DISTINCT FROM EXCLUDED.cid`
 
 	var sortAtVal database.Value
 	if p.SortAt != nil {
@@ -227,12 +220,8 @@ func (r *RecordsRepository) insertBatchTx(ctx context.Context, tx *sql.Tx, recor
 
 	for i, rec := range records {
 		base := i * 5
-		valueSet := fmt.Sprintf("(%s, %s, %s, %s, %s::jsonb)",
-			r.db.Placeholder(base+1),
-			r.db.Placeholder(base+2),
-			r.db.Placeholder(base+3),
-			r.db.Placeholder(base+4),
-			r.db.Placeholder(base+5))
+		valueSet := fmt.Sprintf("($%d, $%d, $%d, $%d, $%d::jsonb)",
+			base+1, base+2, base+3, base+4, base+5)
 		valueSets = append(valueSets, valueSet)
 
 		args = append(args, rec.URI, rec.CID, rec.DID, rec.Collection, rec.JSON)
@@ -252,8 +241,7 @@ func (r *RecordsRepository) insertBatchTx(ctx context.Context, tx *sql.Tx, recor
 
 // GetByURI retrieves a record by its URI.
 func (r *RecordsRepository) GetByURI(ctx context.Context, uri string) (*Record, error) {
-	sqlStr := fmt.Sprintf("SELECT %s FROM %s WHERE r.uri = %s",
-		r.recordColumns(), r.recordTable(), r.db.Placeholder(1))
+	sqlStr := "SELECT " + r.recordColumns() + " FROM " + r.recordTable() + " WHERE r.uri = $1"
 
 	var rec Record
 	var indexedAtStr string
@@ -273,14 +261,14 @@ func (r *RecordsRepository) GetByURIs(ctx context.Context, uris []string) ([]*Re
 		return nil, nil
 	}
 
-	placeholders := r.db.Placeholders(len(uris), 1)
-	sqlStr := fmt.Sprintf("SELECT %s FROM %s WHERE r.uri IN (%s)",
-		r.recordColumns(), r.recordTable(), placeholders)
-
+	phs := make([]string, len(uris))
 	params := make([]database.Value, len(uris))
 	for i, uri := range uris {
+		phs[i] = fmt.Sprintf("$%d", i+1)
 		params[i] = database.Text(uri)
 	}
+	sqlStr := "SELECT " + r.recordColumns() + " FROM " + r.recordTable() +
+		" WHERE r.uri IN (" + strings.Join(phs, ", ") + ")"
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, r.db.ConvertParams(params)...)
 	if err != nil {
@@ -305,14 +293,14 @@ func (r *RecordsRepository) GetByCollectionWithCursor(ctx context.Context, colle
 
 	if afterTimestamp == "" {
 		// No cursor - get first page, ordered by indexed_at DESC (newest first)
-		sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.collection = %s ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
-			r.recordColumns(), r.recordTable(), r.db.Placeholder(1), limit)
+		sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.collection = $1 ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
+			r.recordColumns(), r.recordTable(), limit)
 		args = []any{collection}
 	} else {
 		// With cursor - get records older than the cursor timestamp
 		// Using indexed_at < cursor for "load more" (older posts)
-		sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.collection = %s AND r.indexed_at < %s ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
-			r.recordColumns(), r.recordTable(), r.db.Placeholder(1), r.db.Placeholder(2), limit)
+		sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.collection = $1 AND r.indexed_at < $2 ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
+			r.recordColumns(), r.recordTable(), limit)
 		args = []any{collection, afterTimestamp}
 	}
 
@@ -334,14 +322,14 @@ func (r *RecordsRepository) GetByCollectionWithKeysetCursor(ctx context.Context,
 
 	if afterTimestamp == "" && afterURI == "" {
 		// No cursor - get first page
-		sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.collection = %s ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
-			r.recordColumns(), r.recordTable(), r.db.Placeholder(1), limit)
+		sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.collection = $1 ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
+			r.recordColumns(), r.recordTable(), limit)
 		args = []any{collection}
 	} else {
 		// Keyset pagination: get records that sort after (afterTimestamp, afterURI)
 		// ORDER BY indexed_at DESC, uri DESC means "after" = less than
-		sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.collection = %s AND (r.indexed_at < %s OR (r.indexed_at = %s AND r.uri < %s)) ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
-			r.recordColumns(), r.recordTable(), r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4), limit)
+		sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.collection = $1 AND (r.indexed_at < $2 OR (r.indexed_at = $3 AND r.uri < $4)) ORDER BY r.indexed_at DESC, r.uri DESC LIMIT %d",
+			r.recordColumns(), r.recordTable(), limit)
 		args = []any{collection, afterTimestamp, afterTimestamp, afterURI}
 	}
 
@@ -511,7 +499,7 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	)
 	paramIdx := 1
 	ph := func() string {
-		s := r.db.Placeholder(paramIdx)
+		s := fmt.Sprintf("$%d", paramIdx)
 		paramIdx++
 		return s
 	}
@@ -703,8 +691,8 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 
 // GetByDID retrieves records for a specific DID (up to 10 000).
 func (r *RecordsRepository) GetByDID(ctx context.Context, did string) ([]*Record, error) {
-	sqlStr := fmt.Sprintf("SELECT %s FROM %s WHERE r.did = %s ORDER BY r.indexed_at DESC LIMIT 10000",
-		r.recordColumns(), r.recordTable(), r.db.Placeholder(1))
+	sqlStr := "SELECT " + r.recordColumns() + " FROM " + r.recordTable() +
+		" WHERE r.did = $1 ORDER BY r.indexed_at DESC LIMIT 10000"
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, did)
 	if err != nil {
@@ -717,8 +705,8 @@ func (r *RecordsRepository) GetByDID(ctx context.Context, did string) ([]*Record
 
 // Delete removes a record by URI.
 func (r *RecordsRepository) Delete(ctx context.Context, uri string) error {
-	sqlStr := fmt.Sprintf("DELETE FROM record WHERE uri = %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(uri)})
+	_, err := r.db.Exec(ctx, "DELETE FROM record WHERE uri = $1",
+		[]database.Value{database.Text(uri)})
 	return err
 }
 
@@ -752,8 +740,8 @@ func (r *RecordsRepository) DB() *sql.DB {
 // against before the destructive call.
 func (r *RecordsRepository) CountByDID(ctx context.Context, did string) (int64, error) {
 	var count int64
-	sqlStr := fmt.Sprintf("SELECT COUNT(*) FROM record WHERE did = %s", r.db.Placeholder(1))
-	err := r.db.QueryRow(ctx, sqlStr, []database.Value{database.Text(did)}, &count)
+	err := r.db.QueryRow(ctx, "SELECT COUNT(*) FROM record WHERE did = $1",
+		[]database.Value{database.Text(did)}, &count)
 	return count, err
 }
 
@@ -762,8 +750,7 @@ func (r *RecordsRepository) CountByDID(ctx context.Context, did string) (int64, 
 // ActorsRepository.DeleteByDIDTx so both deletes commit (or fail)
 // atomically. Returns the number of rows deleted.
 func (r *RecordsRepository) DeleteByDIDTx(ctx context.Context, tx *sql.Tx, did string) (int64, error) {
-	sqlStr := fmt.Sprintf("DELETE FROM record WHERE did = %s", r.db.Placeholder(1))
-	res, err := tx.ExecContext(ctx, sqlStr, did)
+	res, err := tx.ExecContext(ctx, "DELETE FROM record WHERE did = $1", did)
 	if err != nil {
 		return 0, fmt.Errorf("delete records by did: %w", err)
 	}
@@ -785,7 +772,7 @@ func (r *RecordsRepository) GetCount(ctx context.Context) (int64, error) {
 func (r *RecordsRepository) GetCollectionCount(ctx context.Context, collection string) (int64, error) {
 	var count int64
 	err := r.db.QueryRow(ctx,
-		fmt.Sprintf("SELECT COUNT(*) FROM record WHERE collection = %s", r.db.Placeholder(1)),
+		"SELECT COUNT(*) FROM record WHERE collection = $1",
 		[]database.Value{database.Text(collection)}, &count)
 	return count, err
 }
@@ -858,13 +845,14 @@ func (r *RecordsRepository) GetCollectionStatsFiltered(ctx context.Context, coll
 		return r.GetCollectionStats(ctx)
 	}
 
-	placeholders := r.db.Placeholders(len(collections), 1)
-	sqlStr := fmt.Sprintf("SELECT collection, COUNT(*) as count FROM record WHERE collection IN (%s) GROUP BY collection ORDER BY count DESC", placeholders)
-
+	phs := make([]string, len(collections))
 	params := make([]database.Value, len(collections))
 	for i, c := range collections {
+		phs[i] = fmt.Sprintf("$%d", i+1)
 		params[i] = database.Text(c)
 	}
+	sqlStr := "SELECT collection, COUNT(*) as count FROM record WHERE collection IN (" +
+		strings.Join(phs, ", ") + ") GROUP BY collection ORDER BY count DESC"
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, r.db.ConvertParams(params)...)
 	if err != nil {
@@ -887,7 +875,7 @@ func (r *RecordsRepository) GetCollectionStatsFiltered(ctx context.Context, coll
 // GetCollectionTimeSeries returns time series data for a collection.
 // Records are grouped by date extracted from createdAt, eventDate, or indexed_at.
 func (r *RecordsRepository) GetCollectionTimeSeries(ctx context.Context, collection string) (*CollectionTimeSeries, error) {
-	sqlStr := fmt.Sprintf(`
+	const sqlStr = `
 		SELECT
 			DATE(COALESCE(
 				(json->>'createdAt')::timestamp,
@@ -896,9 +884,9 @@ func (r *RecordsRepository) GetCollectionTimeSeries(ctx context.Context, collect
 			)) as record_date,
 			COUNT(*) as count
 		FROM record
-		WHERE collection = %s
+		WHERE collection = $1
 		GROUP BY record_date
-		ORDER BY record_date`, r.db.Placeholder(1))
+		ORDER BY record_date`
 
 	rows, err := r.db.DB().QueryContext(ctx, sqlStr, collection)
 	if err != nil {
@@ -928,7 +916,7 @@ func (r *RecordsRepository) GetCollectionTimeSeries(ctx context.Context, collect
 
 	// Get total records and unique users
 	var totalRecords, uniqueUsers int64
-	countSQL := fmt.Sprintf("SELECT COUNT(*), COUNT(DISTINCT did) FROM record WHERE collection = %s", r.db.Placeholder(1))
+	const countSQL = "SELECT COUNT(*), COUNT(DISTINCT did) FROM record WHERE collection = $1"
 	if err := r.db.QueryRow(ctx, countSQL, []database.Value{database.Text(collection)}, &totalRecords, &uniqueUsers); err != nil {
 		return nil, fmt.Errorf("failed to get collection totals: %w", err)
 	}
@@ -996,13 +984,13 @@ func (r *RecordsRepository) GetCIDsByURIs(ctx context.Context, uris []string) (m
 		}
 		batch := uris[i:end]
 
-		placeholders := r.db.Placeholders(len(batch), 1)
-		sqlStr := fmt.Sprintf("SELECT uri, cid FROM record WHERE uri IN (%s)", placeholders)
-
+		phs := make([]string, len(batch))
 		params := make([]database.Value, len(batch))
 		for j, uri := range batch {
+			phs[j] = fmt.Sprintf("$%d", j+1)
 			params[j] = database.Text(uri)
 		}
+		sqlStr := "SELECT uri, cid FROM record WHERE uri IN (" + strings.Join(phs, ", ") + ")"
 
 		rows, err := r.db.DB().QueryContext(ctx, sqlStr, r.db.ConvertParams(params)...)
 		if err != nil {
@@ -1045,13 +1033,13 @@ func (r *RecordsRepository) GetExistingCIDs(ctx context.Context, cids []string) 
 		}
 		batch := cids[i:end]
 
-		placeholders := r.db.Placeholders(len(batch), 1)
-		sqlStr := fmt.Sprintf("SELECT cid FROM record WHERE cid IN (%s)", placeholders)
-
+		phs := make([]string, len(batch))
 		params := make([]database.Value, len(batch))
 		for j, cid := range batch {
+			phs[j] = fmt.Sprintf("$%d", j+1)
 			params[j] = database.Text(cid)
 		}
+		sqlStr := "SELECT cid FROM record WHERE cid IN (" + strings.Join(phs, ", ") + ")"
 
 		rows, err := r.db.DB().QueryContext(ctx, sqlStr, r.db.ConvertParams(params)...)
 		if err != nil {
@@ -1114,8 +1102,8 @@ func (r *RecordsRepository) IterateAll(ctx context.Context, batchSize int, fn fu
 				r.recordColumns(), r.recordTable(), batchSize)
 			params = nil
 		} else {
-			sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.uri > %s ORDER BY r.uri LIMIT %d",
-				r.recordColumns(), r.recordTable(), r.db.Placeholder(1), batchSize)
+			sqlStr = fmt.Sprintf("SELECT %s FROM %s WHERE r.uri > $1 ORDER BY r.uri LIMIT %d",
+				r.recordColumns(), r.recordTable(), batchSize)
 			params = []database.Value{database.Text(lastURI)}
 		}
 

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/GainForest/hypergoat/internal/database"
@@ -28,18 +27,13 @@ func (r *OAuthClientsRepository) Insert(ctx context.Context, client *oauth.Clien
 	grantTypesJSON, _ := json.Marshal(grantTypesToStrings(client.GrantTypes))
 	responseTypesJSON, _ := json.Marshal(responseTypesToStrings(client.ResponseTypes))
 
-	sqlStr := fmt.Sprintf(`INSERT INTO oauth_client (
+	const sqlStr = `INSERT INTO oauth_client (
 		client_id, client_secret, client_name, redirect_uris,
 		grant_types, response_types, scope, token_endpoint_auth_method,
 		client_type, created_at, updated_at, metadata,
 		access_token_expiration, refresh_token_expiration,
 		require_redirect_exact, registration_access_token, jwks
-	) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4),
-		r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7), r.db.Placeholder(8),
-		r.db.Placeholder(9), r.db.Placeholder(10), r.db.Placeholder(11), r.db.Placeholder(12),
-		r.db.Placeholder(13), r.db.Placeholder(14), r.db.Placeholder(15), r.db.Placeholder(16),
-		r.db.Placeholder(17))
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17::jsonb)`
 
 	params := []database.Value{
 		database.Text(client.ClientID),
@@ -67,12 +61,12 @@ func (r *OAuthClientsRepository) Insert(ctx context.Context, client *oauth.Clien
 
 // Get retrieves an OAuth client by client_id.
 func (r *OAuthClientsRepository) Get(ctx context.Context, clientID string) (*oauth.Client, error) {
-	sqlStr := fmt.Sprintf(`SELECT client_id, client_secret, client_name, redirect_uris,
+	const sqlStr = `SELECT client_id, client_secret, client_name, redirect_uris,
 		grant_types, response_types, scope, token_endpoint_auth_method,
 		client_type, created_at, updated_at, metadata::text,
 		access_token_expiration, refresh_token_expiration,
 		require_redirect_exact, registration_access_token, jwks::text
-	FROM oauth_client WHERE client_id = %s`, r.db.Placeholder(1))
+	FROM oauth_client WHERE client_id = $1`
 
 	var (
 		client            oauth.Client
@@ -166,18 +160,13 @@ func (r *OAuthClientsRepository) Update(ctx context.Context, client *oauth.Clien
 	grantTypesJSON, _ := json.Marshal(grantTypesToStrings(client.GrantTypes))
 	responseTypesJSON, _ := json.Marshal(responseTypesToStrings(client.ResponseTypes))
 
-	sqlStr := fmt.Sprintf(`UPDATE oauth_client SET
-		client_secret = %s, client_name = %s, redirect_uris = %s,
-		grant_types = %s, response_types = %s, scope = %s,
-		token_endpoint_auth_method = %s, updated_at = %s,
-		metadata = %s::jsonb, access_token_expiration = %s,
-		refresh_token_expiration = %s, require_redirect_exact = %s, jwks = %s::jsonb
-	WHERE client_id = %s`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-		r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6),
-		r.db.Placeholder(7), r.db.Placeholder(8), r.db.Placeholder(9),
-		r.db.Placeholder(10), r.db.Placeholder(11), r.db.Placeholder(12),
-		r.db.Placeholder(13), r.db.Placeholder(14))
+	const sqlStr = `UPDATE oauth_client SET
+		client_secret = $1, client_name = $2, redirect_uris = $3,
+		grant_types = $4, response_types = $5, scope = $6,
+		token_endpoint_auth_method = $7, updated_at = $8,
+		metadata = $9::jsonb, access_token_expiration = $10,
+		refresh_token_expiration = $11, require_redirect_exact = $12, jwks = $13::jsonb
+	WHERE client_id = $14`
 
 	params := []database.Value{
 		database.NullableText(client.ClientSecret),
@@ -202,8 +191,8 @@ func (r *OAuthClientsRepository) Update(ctx context.Context, client *oauth.Clien
 
 // Delete removes an OAuth client.
 func (r *OAuthClientsRepository) Delete(ctx context.Context, clientID string) error {
-	sqlStr := fmt.Sprintf("DELETE FROM oauth_client WHERE client_id = %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(clientID)})
+	_, err := r.db.Exec(ctx, "DELETE FROM oauth_client WHERE client_id = $1",
+		[]database.Value{database.Text(clientID)})
 	return err
 }
 

@@ -47,8 +47,7 @@ func Run(ctx context.Context, exec database.Executor) error {
 		return fmt.Errorf("failed to get applied migrations: %w", err)
 	}
 
-	// Load migrations for the current dialect
-	migrations, err := loadMigrations(exec.Dialect())
+	migrations, err := loadMigrations()
 	if err != nil {
 		return fmt.Errorf("failed to load migrations: %w", err)
 	}
@@ -108,11 +107,9 @@ func applyMigrationTx(ctx context.Context, exec database.Executor, m Migration) 
 		return fmt.Errorf("failed to apply migration %s: %w", m.Version, err)
 	}
 
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO schema_migrations (version) VALUES (%s)",
-		exec.Placeholder(1),
-	)
-	if _, err := tx.ExecContext(ctx, insertSQL, m.Version); err != nil {
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO schema_migrations (version) VALUES ($1)",
+		m.Version); err != nil {
 		return fmt.Errorf("failed to record migration %s: %w", m.Version, err)
 	}
 
@@ -141,11 +138,9 @@ func applyMigrationNoTx(ctx context.Context, exec database.Executor, m Migration
 		return fmt.Errorf("failed to apply non-transactional migration %s: %w", m.Version, err)
 	}
 
-	insertSQL := fmt.Sprintf(
-		"INSERT INTO schema_migrations (version) VALUES (%s)",
-		exec.Placeholder(1),
-	)
-	if _, err := exec.DB().ExecContext(ctx, insertSQL, m.Version); err != nil {
+	if _, err := exec.DB().ExecContext(ctx,
+		"INSERT INTO schema_migrations (version) VALUES ($1)",
+		m.Version); err != nil {
 		return fmt.Errorf("migration %s DDL succeeded but failed to record version (manual fix needed): %w", m.Version, err)
 	}
 
@@ -167,8 +162,7 @@ func Rollback(ctx context.Context, exec database.Executor) error {
 		return fmt.Errorf("failed to get last migration: %w", err)
 	}
 
-	// Load migrations
-	migrations, err := loadMigrations(exec.Dialect())
+	migrations, err := loadMigrations()
 	if err != nil {
 		return fmt.Errorf("failed to load migrations: %w", err)
 	}
@@ -213,11 +207,9 @@ func Rollback(ctx context.Context, exec database.Executor) error {
 		return fmt.Errorf("failed to rollback migration %s: %w", version, err)
 	}
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM schema_migrations WHERE version = %s",
-		exec.Placeholder(1),
-	)
-	if _, err := tx.ExecContext(ctx, deleteSQL, version); err != nil {
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM schema_migrations WHERE version = $1",
+		version); err != nil {
 		return fmt.Errorf("failed to remove migration record: %w", err)
 	}
 
@@ -242,11 +234,9 @@ func rollbackMigrationNoTx(ctx context.Context, exec database.Executor, m Migrat
 		return fmt.Errorf("failed to rollback non-transactional migration %s: %w", m.Version, err)
 	}
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM schema_migrations WHERE version = %s",
-		exec.Placeholder(1),
-	)
-	if _, err := exec.DB().ExecContext(ctx, deleteSQL, m.Version); err != nil {
+	if _, err := exec.DB().ExecContext(ctx,
+		"DELETE FROM schema_migrations WHERE version = $1",
+		m.Version); err != nil {
 		return fmt.Errorf("migration %s rollback DDL succeeded but failed to remove schema_migrations row (manual fix needed): %w", m.Version, err)
 	}
 
@@ -284,19 +274,9 @@ func getAppliedMigrations(ctx context.Context, exec database.Executor) (map[stri
 	return applied, rows.Err()
 }
 
-func loadMigrations(dialect database.Dialect) ([]Migration, error) {
-	var fs embed.FS
-	var dir string
-
-	switch dialect {
-	case database.PostgreSQL:
-		fs = postgresMigrations
-		dir = "postgres"
-	default:
-		return nil, fmt.Errorf("unsupported dialect: %s", dialect)
-	}
-
-	entries, err := fs.ReadDir(dir)
+func loadMigrations() ([]Migration, error) {
+	const dir = "postgres"
+	entries, err := postgresMigrations.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read migrations directory: %w", err)
 	}
@@ -333,7 +313,7 @@ func loadMigrations(dialect database.Dialect) ([]Migration, error) {
 			migrationFiles[version]["name"] = baseName
 		}
 
-		content, err := fs.ReadFile(filepath.Join(dir, name))
+		content, err := postgresMigrations.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			return nil, fmt.Errorf("failed to read migration %s: %w", name, err)
 		}

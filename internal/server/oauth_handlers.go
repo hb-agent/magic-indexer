@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	didpkg "github.com/GainForest/hypergoat/internal/atproto/did"
@@ -632,11 +633,16 @@ func (h *OAuthHandlers) handleAuthorizationCodeGrant(w http.ResponseWriter, r *h
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Authorization code expired")
 		return
 	}
-	if authCode.ClientID != clientID {
+	// Constant-time compares: both fields are attacker-controllable
+	// (form-body values) against stored auth-code state. Auth codes
+	// are one-time-use so an active attacker has a narrow window,
+	// but matching the existing PKCE pattern keeps the boundary
+	// uniform.
+	if subtle.ConstantTimeCompare([]byte(authCode.ClientID), []byte(clientID)) != 1 {
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Client ID mismatch")
 		return
 	}
-	if authCode.RedirectURI != redirectURI {
+	if subtle.ConstantTimeCompare([]byte(authCode.RedirectURI), []byte(redirectURI)) != 1 {
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Redirect URI mismatch")
 		return
 	}
@@ -807,7 +813,9 @@ func (h *OAuthHandlers) handleRefreshTokenGrant(w http.ResponseWriter, r *http.R
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Refresh token expired")
 		return
 	}
-	if oldRefreshToken.ClientID != clientID {
+	// Constant-time compare on the refresh-token grant for the same
+	// reason as the authorization-code grant above.
+	if subtle.ConstantTimeCompare([]byte(oldRefreshToken.ClientID), []byte(clientID)) != 1 {
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Client ID mismatch")
 		return
 	}
@@ -1159,10 +1167,21 @@ func ptrInt64(i int64) *int64 {
 	return &i
 }
 
-// StartCleanupWorker starts a background worker to clean up expired tokens.
-func (h *OAuthHandlers) StartCleanupWorker(ctx context.Context, interval time.Duration) {
+// StartCleanupWorker starts a background worker to clean up expired
+// tokens. If wg is non-nil, the worker registers itself with the
+// WaitGroup so the caller can Wait() for the goroutine to exit
+// before tearing down dependencies (notably the DB pool) — without
+// this drain, a tick firing concurrently with shutdown can run a
+// DELETE against a closed pool.
+func (h *OAuthHandlers) StartCleanupWorker(ctx context.Context, interval time.Duration, wg *sync.WaitGroup) {
 	ticker := time.NewTicker(interval)
+	if wg != nil {
+		wg.Add(1)
+	}
 	go func() {
+		if wg != nil {
+			defer wg.Done()
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -1178,7 +1197,13 @@ func (h *OAuthHandlers) StartCleanupWorker(ctx context.Context, interval time.Du
 					{"atp_requests", h.atpRequests.DeleteExpired(ctx, now)},
 					{"auth_codes", h.authCodes.DeleteExpired(ctx, now)},
 					{"access_tokens", h.accessTokens.DeleteExpired(ctx, now)},
-					{"dpop_jtis", h.dpopJTIs.DeleteOlderThan(ctx, now-3600)},
+					// DPoP JTI floor: keep just long enough that a
+					// still-valid proof (max age DefaultMaxDPoPAge =
+					// 300s) cannot be replayed by clock-skewed callers.
+					// The previous 1-hour floor kept rows ~12x longer
+					// than the proof itself is valid, with no replay-
+					// defence benefit.
+					{"dpop_jtis", h.dpopJTIs.DeleteOlderThan(ctx, now-oauth.DefaultMaxDPoPAge-oauth.DPoPJTICleanupSkewSeconds)},
 				} {
 					if task.err != nil {
 						slog.Warn("OAuth cleanup failed", "table", task.name, "error", task.err)
