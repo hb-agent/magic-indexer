@@ -740,8 +740,13 @@ DO NOTHING` keyed on the composite `(src, val)` PK from migration
   the lock around their state writes.
 - The lexicon change callback dynamically restarts the Jetstream
   consumer with a fresh `wantedCollections` list whenever
-  lexicons are uploaded via the admin API. No process restart
-  needed.
+  lexicons are uploaded via the admin API. This happens
+  **after** the process restart that rebuilds the GraphQL schema
+  — lexicon upload exits the process with code 42 and the
+  orchestrator brings it back up; the consumer reconnect is what
+  the new boot does first. See `docs/RUNBOOK.md` §"Restart-on-exit
+  contract" for why magic-indexer requires a restart-on-exit
+  supervisor in production.
 
 ### Security headers middleware (`internal/server/security_headers.go`)
 Emits `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
@@ -920,8 +925,13 @@ curl -X POST https://magic-indexer-dev.up.railway.app/admin/graphql \
 # expected: {"data":{"uploadLexicons":<count>}}
 ```
 
-After upload, the Jetstream consumer **automatically restarts**
-with the new union of `wantedCollections`. No human action needed.
+After upload, the process exits with code 42, the orchestrator
+restarts it, and the Jetstream consumer reconnects with the new
+union of `wantedCollections` during the fresh boot. No human
+action needed *if* the deploy target has a restart-on-exit
+supervisor (Railway does by default — see `docs/RUNBOOK.md`
+§"Restart-on-exit contract" for the full contract and which
+supervisors are confirmed-good).
 
 ### Labeler enable / disable / pause
 

@@ -292,6 +292,46 @@ curl -X POST https://magic-indexer-dev.up.railway.app/admin/graphql \
   -d '{"query":"{ lexicons { id } }"}'
 ```
 
+### Restart-on-exit contract (orchestrator dependency)
+
+Lexicon upload triggers a full GraphQL schema rebuild. That rebuild
+only happens on a fresh boot — `setupGraphQL()` runs once at
+process start, not on demand. To rebuild, the upload handler
+signals `serve()` to gracefully shut down and the process exits
+with code **42** (`cmd/hypergoat/main.go:55-68`). The supervising
+orchestrator is then expected to restart the process, which builds
+the new schema from the updated lexicons.
+
+**This means magic-indexer requires a restart-on-exit supervisor
+in production.** Confirmed-good supervisors:
+
+- **Railway** — restarts on any non-zero exit. Current production
+  setup. Nothing extra to configure.
+- **Docker / Docker Compose** with `restart: unless-stopped` or
+  `restart: always`. Both work; exit 42 is treated as a normal
+  failure and triggers the policy.
+- **Kubernetes** with the default `restartPolicy: Always`. Any
+  non-zero exit triggers a pod restart.
+- **systemd** with `Restart=on-failure` or `Restart=always`.
+
+**What breaks without such a supervisor.** Lexicon upload returns
+`{"data":{"uploadLexicons":<count>}}` and looks like it succeeded.
+The process then exits 42 and stays down. The service is offline
+and the schema is never rebuilt. There is no in-process fallback —
+hot-reload of the GraphQL schema is deliberately not attempted
+because the `graphql-go` schema is immutable once built and
+swapping it under live traffic would require holding requests
+through a full re-resolution.
+
+Code 42 is chosen to be distinguishable from other exit codes in
+logs and dashboards — operators can alert on "exit 42 without a
+preceding restart" as a sign the orchestrator is misconfigured.
+
+If you are evaluating a new deploy target, the test is: post a
+trivial lexicon upload, verify the process exits 42, and verify
+it comes back up within your acceptable downtime window. If it
+doesn't come back, no other feature works either.
+
 ---
 
 ## Labeler management
