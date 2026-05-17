@@ -276,10 +276,6 @@ func initServices(cfg *config.Config) (*services, error) {
 		reports:          repositories.NewReportsRepository(db),
 	}
 
-	if cfg.PLCDirectoryURL != "" {
-		svc.config.SetPLCDirectoryOverride(cfg.PLCDirectoryURL)
-	}
-
 	// Initialize config defaults and admin DIDs
 	ctx := context.Background()
 	if err := svc.config.InitializeDefaults(ctx); err != nil {
@@ -604,18 +600,6 @@ func setupRouter(cfg *config.Config, svc *services, bg *backgroundServices) *chi
 			"description": "AT Protocol AppView Server",
 			"version":     "0.1.0-dev",
 			"docs":        cfg.ExternalBaseURL + "/docs",
-		})
-	})
-
-	// Placeholder for XRPC endpoints (AT Protocol)
-	r.Route("/xrpc", func(r chi.Router) {
-		r.Get("/*", func(w http.ResponseWriter, req *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error":   "NotImplemented",
-				"message": "XRPC endpoints are not yet implemented",
-			})
 		})
 	})
 
@@ -1097,13 +1081,9 @@ func startJetstream(
 	// dominate the steady state and the firehose is not bottlenecked
 	// on plc.directory latency. The cleanup goroutine sweeps stale
 	// entries hourly to bound memory in the long-tail-DID case.
-	didResolverOpts := []oauth.DIDResolverOption{}
-	if cfg.PLCDirectoryURL != "" {
-		didResolverOpts = append(didResolverOpts, oauth.WithPLCDirectoryURL(cfg.PLCDirectoryURL))
-	}
 	didCache := oauth.NewDIDCache(
 		oauth.WithCacheTTL(24*time.Hour),
-		oauth.WithResolver(oauth.NewDIDResolver(didResolverOpts...)),
+		oauth.WithResolver(oauth.NewDIDResolverWithPLC(cfg.PLCDirectoryURL)),
 	)
 	stopDIDCacheCleanup := didCache.StartCleanupRoutine(time.Hour)
 	bg.didCacheStop = stopDIDCacheCleanup
@@ -1125,7 +1105,8 @@ func startJetstream(
 		notifService := notifications.NewService(notifRepo)
 		notifService.Register(notifextractors.NewEndorsementNotifier())
 		notifService.Register(notifextractors.NewActivityContributorNotifier())
-		processor.RecordHooks = append(processor.RecordHooks, notifService.Hook())
+		h := notifService.Hook()
+		processor.Hook = &h
 		slog.Info("Notifications subsystem enabled",
 			"extractors", []string{"endorsement", "activity-contributor"})
 	}
@@ -1133,13 +1114,10 @@ func startJetstream(
 	// If Tap is enabled, start the Tap consumer instead of Jetstream.
 	if cfg.TapEnabled {
 		// Build collection allowlist from config.
-		if cfg.TapCollectionFilters != "" {
-			allowedCollections := make(map[string]bool)
-			for _, col := range strings.Split(cfg.TapCollectionFilters, ",") {
-				col = strings.TrimSpace(col)
-				if col != "" {
-					allowedCollections[col] = true
-				}
+		if cols := config.SplitCSV(cfg.TapCollectionFilters); len(cols) > 0 {
+			allowedCollections := make(map[string]bool, len(cols))
+			for _, col := range cols {
+				allowedCollections[col] = true
 			}
 			processor.AllowedCollections = allowedCollections
 		}
@@ -1249,7 +1227,7 @@ func startJetstream(
 //   - LabelerCursorFlushInterval: seconds between cursor flushes
 //     (0 = package default of 5s).
 func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
-	raw := parseDIDs(cfg.LabelerDIDs)
+	raw := config.SplitCSV(cfg.LabelerDIDs)
 	if len(raw) == 0 {
 		slog.Info("Labeler subscriptions disabled (LABELER_DIDS is empty)")
 		return
@@ -1270,11 +1248,7 @@ func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
 		return
 	}
 
-	var resolverOpts []oauth.DIDResolverOption
-	if cfg.PLCDirectoryURL != "" {
-		resolverOpts = append(resolverOpts, oauth.WithPLCDirectoryURL(cfg.PLCDirectoryURL))
-	}
-	didResolver := oauth.NewDIDResolver(resolverOpts...)
+	didResolver := oauth.NewDIDResolverWithPLC(cfg.PLCDirectoryURL)
 
 	if cfg.LabelerDryRun {
 		for _, did := range dids {
@@ -1474,18 +1448,6 @@ func didWebHost(did string) string {
 		return ""
 	}
 	return did[len(prefix):]
-}
-
-// parseDIDs splits a comma-separated list of DIDs and trims whitespace.
-func parseDIDs(commaSeparated string) []string {
-	var out []string
-	for _, s := range strings.Split(commaSeparated, ",") {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
 }
 
 // loadLexiconsFromDir loads all lexicon JSON files from a directory tree.

@@ -1,5 +1,179 @@
 # Changelog
 
+## Unreleased — refactor: 8-track complexity reduction (May 2026)
+
+Surplus complexity that had accreted across the project's first three
+months, cleaned up in eight independent, behavior-preserving commits.
+Net ~285 LOC out, two new docs (`plan.md`, `review-round-1.md`,
+`review-round-2.md` under `docs/complexity-reduction/`) recording the
+plan and two review rounds. See those files for full per-track
+rationale.
+
+### Deletions
+
+- **`internal/database/executor.go`** — drop the unused
+  `database.Row` and `database.Rows` wrapper types. Zero callers
+  across the codebase; introduced "for consistent error handling"
+  but never adopted.
+- **`internal/database/repositories/records.go`** — drop the
+  deprecated `GetByCollectionWithLabelFilterAndKeysetCursor` (a
+  literal one-line forward to `GetByCollectionFiltered` with
+  `RecordFilter{Labels: filter}`). The five tests in
+  `records_labels_test.go` are migrated to call
+  `GetByCollectionFiltered` directly — negation, multi-labeler
+  union, and labeler-scoping coverage preserved.
+- **`cmd/hypergoat/main.go`** — drop the `/xrpc/*` 501 placeholder.
+  Magic Indexer does not serve XRPC (the notifications endpoint
+  mounts at `/notifications/graphql`, not under `/xrpc/`).
+  chi now returns the truthful 404 for `/xrpc/*`.
+- **`internal/database/repositories/config.go`** — drop the
+  in-memory PLC override mechanism that was dead in production:
+  `plcDirectoryOverride` field, `SetPLCDirectoryOverride`,
+  `GetPLCDirectoryURL`. The admin GraphQL `plc_directory_url`
+  Get/Set path is unaffected (uses the generic `Get`/`Set`).
+
+### Inlines and collapses
+
+- **`internal/server/oauth_dpop_nonce.go`,
+  `internal/server/oauth_par.go`** — inline `generateDPoPNonce`
+  and `generatePARRequestURI` (one-call-site helpers).
+- **`internal/server/graphiql.go`** — replace the local
+  `escapeHTML` helper with `html.EscapeString` from the stdlib
+  (semantically identical: both escape `<>&"'`). Renames the
+  local `html` variable in `HandleGraphiQL` to `page` to avoid
+  shadowing the stdlib import.
+- **`internal/ingestion/processor.go`** — collapse
+  `RecordHooks []RecordHook` to `Hook *RecordHook`. One hook
+  ever appended (notifications); per-hook `Policy == HookAbortTx`
+  and `Name` semantics preserved.
+
+### Centralization
+
+- **`internal/config/config.go`** — new `config.SplitCSV(s string)
+  []string` helper with drop-empty semantics, covered by a new
+  table-driven `TestSplitCSV` (12 subtests). Replaces the inline
+  split/trim/drop-empty loop for `TapCollectionFilters` and the
+  local `parseDIDs` in `cmd/hypergoat/main.go`, plus
+  `labelerDIDsCount` in the config package.
+- **AllowedOrigins** parsing deliberately stays inline at both
+  sites. The current behavior treats CORS misconfig `","` as
+  "deny all"; drop-empty `SplitCSV` would shift it to "allow all"
+  — a security-relevant delta in a permissive direction.
+- **`internal/oauth/did.go`** — new `oauth.NewDIDResolverWithPLC`
+  helper. Three callers (`cmd/hypergoat` jetstream startup,
+  `cmd/hypergoat` labeler startup, `cmd/backfill_pds`) replaced
+  their identical four-line `[]DIDResolverOption{}` + conditional
+  append + `NewDIDResolver(opts...)` pattern with a single call.
+
+### Docs
+
+- **`docs/archive/`** — moved out of the active docs surface:
+  `REVIEW-Feb5.md`, `IMPLEMENTATION_PLAN.md`, `docs/reviews/`.
+  Updated AGENTS.md (3 refs) and `docs/RUNBOOK.md` (1 ref) to
+  point at the new paths. `AUDIT_REPORT_2026-04-13.md`
+  deliberately stays at `docs/` root — three of its findings
+  (`F-DEP-001` x/crypto CVE-2024-45337, `F-LABELER-001` label
+  signature verification, `F-DOS-001` WebSocket subscription
+  DoS) remain open.
+
+### Non-goals (deliberate)
+
+- Notifications `Registry` plugin pattern kept — more notification
+  patterns are planned.
+- `populateActivityIfEmpty` boot-time backfill kept — future
+  migrations may need a similar shape.
+
+---
+
+## Unreleased — chore(testdata): sync lexicons to `@hypercerts-org/lexicon@0.12.0`
+
+Refreshes the in-repo testdata lexicons to match the canonical
+source of truth, closing the drift cataloged in issue #68 and
+the broader "lexicons up to date with npm?" ask in issue #66.
+
+The testdata under `testdata/lexicons/` had drifted along three
+axes per #68:
+
+- **Same-path content drift** — `claim/activity.json` was 126
+  lines off canonical (`description` is now a union covering
+  string / leaflet linearDocument / strongRef; the `#contributor`
+  inner refs `#contributorIdentity`, `#contributorRole`,
+  `#workScopeString` are now structured objects with named
+  properties matching production data shape; `workScope`
+  references the new `workscope.cel` lexicon).
+- **Path renames** — six files moved under the v0.12.0 schema
+  reorganization:
+  `claim/{attachment,measurement,evaluation}.json` →
+  `context/`, `claim/collection.json` → `collection.json` (NSID
+  dropped the `.claim.` segment to become `org.hypercerts.collection`),
+  `claim/contributionDetails.json` → `claim/contribution.json`,
+  `helper/workScopeTag.json` → `workscope/tag.json`.
+- **Missing files** — added the indexer-relevant subset:
+  `app/certified/actor/{organization,profile}.json`,
+  `app/certified/link/evm.json`,
+  `org/hypercerts/context/acknowledgement.json`,
+  `org/hypercerts/workscope/cel.json` (required by the new
+  `activity.json` `workScope` union ref).
+
+Deliberately skipped from the canonical tree:
+`org/hyperboards/*` (separate product), `app/bsky/*` (not
+indexed here), `pub/leaflet/**` (not used; existing testdata
+already references `pub.leaflet.pages.linearDocument` as an
+unresolved ref, which the schema builder tolerates).
+
+### Server
+
+- **fix(schema)**: union-type naming now disambiguates against
+  same-named object defs. The v0.12.0 `claim/activity.json`
+  exposes the latent bug: `#contributorIdentity` is a top-level
+  object def AND the `contributor.contributorIdentity` field is
+  a union. Both would otherwise generate
+  `OrgHypercertsClaimActivityContributorIdentity` and
+  `graphql-go` rejects schemas with duplicate type names. Fix:
+  when a field-level union name would collide with an existing
+  object type name, append `Union` to the union. The suffix is
+  applied **only on collision** so existing unions in the schema
+  keep their stable names. `TestUnionVsObjectName_Disambiguation`
+  pins the contract.
+- **chore(testdata)**: byte-identical to `@hypercerts-org/lexicon@0.12.0`
+  for every path covered. A verification script
+  (`diff -q` across the in-repo and tarball trees) reports zero
+  drift after this commit.
+
+### Internal
+
+- `Mapper.HasObjectTypeNamed(name string) bool` added — iterates
+  the object-type cache and returns true if any object carries
+  the given GraphQL type name. Called by `buildUnionType` on the
+  hot path of every union field.
+- Test references that pinned the old NSIDs updated:
+  - `internal/atproto/collections_test.go` — string-parser
+    fixtures use the canonical `org.hypercerts.collection` NSID.
+  - `internal/graphql/schema/where_test.go` —
+    `TestFilterRegistry_Contributor`'s absence assertion now
+    pins the canonical NSID.
+  - `internal/graphql/schema/builder_test.go` —
+    `TestStringFilterInput_CaseInsensitiveOperators_OnGeneratedWhereInput`
+    queries `orgHypercertsCollection` instead of
+    `orgHypercertsClaimCollection`.
+
+### Notes for consumers
+
+- **The GraphQL field name `orgHypercertsClaimCollection` is
+  gone.** On dev / prod the field is now `orgHypercertsCollection`.
+  This is a producer-side schema change driven by the lexicon
+  rename in v0.12.0; the indexer is only following. Consumers
+  querying `orgHypercertsClaimCollection` will see a "Cannot
+  query field" error and must migrate to `orgHypercertsCollection`.
+- **Schema-diff CI** (Apollo Rover, GraphQL Inspector) WILL flag
+  this as a breaking change. The schema diff is real — but it
+  reflects an already-shipped lexicon-side rename, not a magic-
+  indexer regression. The certified-app issue
+  ([hypercerts-org/certified-app#64](https://github.com/hypercerts-org/certified-app/issues/64))
+  already targets the new field name.
+
+---
+
 ## Unreleased — feat(graphql): case-insensitive string operators (`eqi`, `ini`)
 
 Adds two opt-in operators to `StringFilterInput` so consumers can

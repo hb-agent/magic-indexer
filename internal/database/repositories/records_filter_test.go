@@ -1428,11 +1428,9 @@ func TestContributorFilter_OverlongArrayGuard(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 // seedCaseInsensitiveRecords inserts a mixed-casing fixture for the
-// "all projects of a user" view exercised by the certified-app.
-// The collection NSID matches the live deployment's
-// `org.hypercerts.collection` lexicon (the testdata lexicon at
-// `org.hypercerts.claim.collection` is documented as stale in issue
-// #68); the JSON shape is the same regardless.
+// "all projects of a user" view exercised by the certified-app
+// against the `org.hypercerts.collection` lexicon (post-v0.12.0 sync;
+// the lexicon used to live at `org.hypercerts.claim.collection`).
 func seedCaseInsensitiveRecords(t *testing.T) *testutil.TestDB {
 	t.Helper()
 	db := testutil.SetupTestDB(t)

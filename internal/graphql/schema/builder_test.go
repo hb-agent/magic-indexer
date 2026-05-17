@@ -600,9 +600,12 @@ func TestStringFilterInput_CaseInsensitiveOperators_OnGeneratedWhereInput(t *tes
 		return nil
 	}
 
-	// org.hypercerts.claim.collection.type is a free-form string
-	// discriminator and the immediate driver for this feature.
-	collectionWhere := whereFieldsFor(t, "orgHypercertsClaimCollection")
+	// org.hypercerts.collection.type is a free-form string
+	// discriminator and the immediate driver for this feature
+	// (per the v0.12.0 lexicon sync — the previous testdata path
+	// `claim/collection.json` was renamed to `collection.json` and
+	// the NSID dropped the `.claim.` segment).
+	collectionWhere := whereFieldsFor(t, "orgHypercertsCollection")
 	typeField, ok := collectionWhere["type"]
 	if !ok {
 		t.Fatalf("type field missing on collection WhereInput")
@@ -693,5 +696,52 @@ func TestStringFilterInput_CaseInsensitiveOperators_OnGeneratedWhereInput(t *tes
 				t.Errorf("%s element missing %q on type field (StringFilterInput)", composer, op)
 			}
 		}
+	}
+}
+
+// TestUnionVsObjectName_Disambiguation pins the schema-builder behaviour
+// for the v0.12.0 lexicon shape where a def and a same-named union
+// field would otherwise produce duplicate GraphQL type names.
+//
+// `org.hypercerts.claim.activity` has BOTH:
+//   - a top-level `#contributorIdentity` def (object type, name
+//     `OrgHypercertsClaimActivityContributorIdentity`)
+//   - a `contributor.contributorIdentity` field that is a union
+//     (which would naturally generate the same name)
+//
+// The schema builder appends `Union` to the union name on collision.
+// A future refactor that removes the suffix or changes the collision
+// detection would fail to build the schema (graphql-go rejects
+// duplicate type names), so this test surfaces the contract.
+func TestUnionVsObjectName_Disambiguation(t *testing.T) {
+	lexicons, err := loadLexiconsFromDir("../../../testdata/lexicons")
+	if err != nil {
+		t.Fatalf("load lexicons: %v", err)
+	}
+	registry := lexicon.NewRegistry()
+	for _, lex := range lexicons {
+		registry.Register(lex)
+	}
+	builder := NewBuilder(registry)
+	schema, err := builder.Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	// Both names must exist as distinct types in the schema.
+	objType := schema.Type("OrgHypercertsClaimActivityContributorIdentity")
+	if objType == nil {
+		t.Fatalf("expected object type OrgHypercertsClaimActivityContributorIdentity to exist")
+	}
+	if _, isObject := objType.(*graphql.Object); !isObject {
+		t.Errorf("OrgHypercertsClaimActivityContributorIdentity is %T, want graphql.Object", objType)
+	}
+
+	unionType := schema.Type("OrgHypercertsClaimActivityContributorIdentityUnion")
+	if unionType == nil {
+		t.Fatalf("expected union type OrgHypercertsClaimActivityContributorIdentityUnion to exist (Union suffix is the disambiguator)")
+	}
+	if _, isUnion := unionType.(*graphql.Union); !isUnion {
+		t.Errorf("OrgHypercertsClaimActivityContributorIdentityUnion is %T, want graphql.Union", unionType)
 	}
 }

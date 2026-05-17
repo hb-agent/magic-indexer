@@ -453,8 +453,7 @@ func (f RecordFilter) IsEmpty() bool {
 // It applies the supplied RecordFilter over the existing composite
 // (indexed_at, uri) keyset cursor and returns up to `limit` records.
 //
-// The sibling methods GetByCollectionWithKeysetCursor and
-// GetByCollectionWithLabelFilterAndKeysetCursor are now thin wrappers
+// The sibling method GetByCollectionWithKeysetCursor is a thin wrapper
 // over this method; new callers should use GetByCollectionFiltered
 // directly and let the compose-ability of RecordFilter handle future
 // filter axes.
@@ -700,22 +699,6 @@ func (r *RecordsRepository) GetByCollectionFiltered(
 	defer rows.Close()
 
 	return scanRecords(rows)
-}
-
-// GetByCollectionWithLabelFilterAndKeysetCursor is the legacy label-only
-// filter entry point. Deprecated: use GetByCollectionFiltered with a
-// RecordFilter{Labels: filter} instead. This wrapper is retained for
-// backward compatibility with existing callers; it will be removed in a
-// follow-up cleanup.
-func (r *RecordsRepository) GetByCollectionWithLabelFilterAndKeysetCursor(
-	ctx context.Context,
-	collection string,
-	limit int,
-	afterTimestamp, afterURI string,
-	filter LabelFilter,
-) ([]*Record, error) {
-	return r.GetByCollectionFiltered(ctx, collection, limit, afterTimestamp, afterURI,
-		RecordFilter{Labels: filter}, nil, nil)
 }
 
 // GetByDID retrieves records for a specific DID (up to 10 000).

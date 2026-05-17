@@ -52,8 +52,7 @@ const (
 	HookAbortTx
 )
 
-// RecordHook is called after a record insert/update/delete. Hooks run
-// sequentially; ordering is defined by the slice position in RecordProcessor.RecordHooks.
+// RecordHook is called after a record insert/update/delete.
 type RecordHook struct {
 	Name   string
 	Policy HookErrorPolicy
@@ -74,8 +73,9 @@ type RecordProcessor struct {
 	// nil means all collections are allowed.
 	AllowedCollections map[string]bool
 
-	// RecordHooks run after each record insert/update/delete. See RecordHook.
-	RecordHooks []RecordHook
+	// Hook, when non-nil, runs after each record insert/update/delete.
+	// See RecordHook.
+	Hook *RecordHook
 
 	// DIDCache, when non-nil, is consulted on each actor upsert to
 	// resolve the author's PDS service endpoint. The resolved PDS is
@@ -244,15 +244,15 @@ func (p *RecordProcessor) ProcessRecord(ctx context.Context, op ProcessOp) error
 		slog.Debug("Deleted record", "uri", op.URI)
 	}
 
-	// Run post-processing hooks (notifications, etc.). Hooks run sequentially;
-	// each hook is independently isolated with panic recovery.
-	for _, hook := range p.RecordHooks {
-		if err := p.runHook(ctx, hook, op); err != nil {
-			if hook.Policy == HookAbortTx {
-				return fmt.Errorf("hook %q: %w", hook.Name, err)
+	// Run post-processing hook (notifications, etc.) if configured.
+	// Isolated with panic recovery inside runHook.
+	if p.Hook != nil {
+		if err := p.runHook(ctx, *p.Hook, op); err != nil {
+			if p.Hook.Policy == HookAbortTx {
+				return fmt.Errorf("hook %q: %w", p.Hook.Name, err)
 			}
 			slog.Warn("record hook failed",
-				"hook", hook.Name,
+				"hook", p.Hook.Name,
 				"collection", op.Collection,
 				"uri", op.URI,
 				"error", err)

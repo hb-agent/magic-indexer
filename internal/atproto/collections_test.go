@@ -22,13 +22,13 @@ func TestParseCollections(t *testing.T) {
 		},
 		{
 			name:  "multiple collections",
-			input: "org.hypercerts.claim.activity,org.hypercerts.claim.collection",
-			want:  []string{"org.hypercerts.claim.activity", "org.hypercerts.claim.collection"},
+			input: "org.hypercerts.claim.activity,org.hypercerts.collection",
+			want:  []string{"org.hypercerts.claim.activity", "org.hypercerts.collection"},
 		},
 		{
 			name:  "with spaces",
-			input: "org.hypercerts.claim.activity, org.hypercerts.claim.collection, org.hypercerts.claim.record",
-			want:  []string{"org.hypercerts.claim.activity", "org.hypercerts.claim.collection", "org.hypercerts.claim.record"},
+			input: "org.hypercerts.claim.activity, org.hypercerts.collection, org.hypercerts.claim.record",
+			want:  []string{"org.hypercerts.claim.activity", "org.hypercerts.collection", "org.hypercerts.claim.record"},
 		},
 		{
 			name:  "trailing comma",
@@ -37,8 +37,8 @@ func TestParseCollections(t *testing.T) {
 		},
 		{
 			name:  "empty entries",
-			input: "org.hypercerts.claim.activity,,org.hypercerts.claim.collection",
-			want:  []string{"org.hypercerts.claim.activity", "org.hypercerts.claim.collection"},
+			input: "org.hypercerts.claim.activity,,org.hypercerts.collection",
+			want:  []string{"org.hypercerts.claim.activity", "org.hypercerts.collection"},
 		},
 	}
 

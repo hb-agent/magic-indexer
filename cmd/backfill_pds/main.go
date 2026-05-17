@@ -82,13 +82,9 @@ func run() error {
 	}
 
 	actors := repositories.NewActorsRepository(db)
-	resolverOpts := []oauth.DIDResolverOption{}
-	if cfg.PLCDirectoryURL != "" {
-		resolverOpts = append(resolverOpts, oauth.WithPLCDirectoryURL(cfg.PLCDirectoryURL))
-	}
 	cache := oauth.NewDIDCache(
 		oauth.WithCacheTTL(24*time.Hour),
-		oauth.WithResolver(oauth.NewDIDResolver(resolverOpts...)),
+		oauth.WithResolver(oauth.NewDIDResolverWithPLC(cfg.PLCDirectoryURL)),
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

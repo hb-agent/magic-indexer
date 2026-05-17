@@ -3,8 +3,8 @@
 package server
 
 import (
+	"html"
 	"net/http"
-	"strings"
 )
 
 // GraphiQLConfig contains configuration for the GraphiQL handler.
@@ -46,7 +46,7 @@ const graphiqlCSP = "default-src 'none'; " +
 // HandleGraphiQL creates an HTTP handler that serves the GraphiQL IDE.
 func HandleGraphiQL(cfg GraphiQLConfig) http.HandlerFunc {
 	// Use CDN-hosted GraphiQL
-	html := generateGraphiQLHTML(cfg)
+	page := generateGraphiQLHTML(cfg)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -56,7 +56,7 @@ func HandleGraphiQL(cfg GraphiQLConfig) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Content-Security-Policy", graphiqlCSP)
-		_, _ = w.Write([]byte(html))
+		_, _ = w.Write([]byte(page))
 	}
 }
 
@@ -195,7 +195,7 @@ func generateGraphiQLHTML(cfg GraphiQLConfig) string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>` + escapeHTML(title) + `</title>
+  <title>` + html.EscapeString(title) + `</title>
   <style>
     body {
       height: 100%;
@@ -237,16 +237,4 @@ func generateGraphiQLHTML(cfg GraphiQLConfig) string {
   </script>
 </body>
 </html>`
-}
-
-// escapeHTML escapes HTML special characters.
-func escapeHTML(s string) string {
-	replacer := strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		"\"", "&quot;",
-		"'", "&#39;",
-	)
-	return replacer.Replace(s)
 }

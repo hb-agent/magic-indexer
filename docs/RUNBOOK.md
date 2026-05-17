@@ -730,4 +730,4 @@ or is recorded as a closed issue with a fix commit reference.
 
 - [`AGENTS.md`](../AGENTS.md) — package layout, code style, dev workflow
 - [`SECURITY.md`](../SECURITY.md) — required env vars, reverse-proxy rate limits, admin auth contract
-- [`docs/reviews/`](reviews/) — the 23-round overnight review history
+- [`docs/archive/reviews/`](archive/reviews/) — the 23-round overnight review history

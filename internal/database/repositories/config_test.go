@@ -380,35 +380,6 @@ func TestConfigRepository_URLDefaults(t *testing.T) {
 			want: "https://custom-relay.example.com",
 		},
 		{
-			name: "GetPLCDirectoryURL returns override when set via SetPLCDirectoryOverride",
-			setup: func(ctx context.Context, repo *repositories.ConfigRepository) {
-				_ = repo.SetPLCDirectoryURL(ctx, "https://db-value.example.com")
-				repo.SetPLCDirectoryOverride("https://override.example.com")
-			},
-			call: func(ctx context.Context, repo *repositories.ConfigRepository) string {
-				return repo.GetPLCDirectoryURL(ctx)
-			},
-			want: "https://override.example.com",
-		},
-		{
-			name: "GetPLCDirectoryURL returns DB value when override not set",
-			setup: func(ctx context.Context, repo *repositories.ConfigRepository) {
-				_ = repo.SetPLCDirectoryURL(ctx, "https://db-plc.example.com")
-			},
-			call: func(ctx context.Context, repo *repositories.ConfigRepository) string {
-				return repo.GetPLCDirectoryURL(ctx)
-			},
-			want: "https://db-plc.example.com",
-		},
-		{
-			name:  "GetPLCDirectoryURL returns default when neither override nor DB set",
-			setup: func(ctx context.Context, repo *repositories.ConfigRepository) {},
-			call: func(ctx context.Context, repo *repositories.ConfigRepository) string {
-				return repo.GetPLCDirectoryURL(ctx)
-			},
-			want: repositories.DefaultPLCDirectoryURL,
-		},
-		{
 			name:  "GetJetstreamURL returns default when not set",
 			setup: func(ctx context.Context, repo *repositories.ConfigRepository) {},
 			call: func(ctx context.Context, repo *repositories.ConfigRepository) string {

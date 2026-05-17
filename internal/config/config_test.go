@@ -556,3 +556,39 @@ func TestNormalizeExternalBaseURL(t *testing.T) {
 		})
 	}
 }
+
+func TestSplitCSV(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{name: "empty input returns nil", in: "", want: nil},
+		{name: "single entry", in: "alpha", want: []string{"alpha"}},
+		{name: "single entry with whitespace", in: "  alpha  ", want: []string{"alpha"}},
+		{name: "two entries", in: "alpha,beta", want: []string{"alpha", "beta"}},
+		{name: "two entries with whitespace around comma", in: "alpha , beta", want: []string{"alpha", "beta"}},
+		{name: "drops empty entry from trailing comma", in: "alpha,", want: []string{"alpha"}},
+		{name: "drops empty entry from leading comma", in: ",alpha", want: []string{"alpha"}},
+		{name: "drops interior empty entry", in: "alpha,,beta", want: []string{"alpha", "beta"}},
+		{name: "drops whitespace-only entry", in: "alpha,   ,beta", want: []string{"alpha", "beta"}},
+		{name: "input of only commas returns nil", in: ",,,", want: nil},
+		{name: "input of only whitespace returns nil", in: "   ", want: nil},
+		{name: "preserves duplicates", in: "alpha,alpha,beta", want: []string{"alpha", "alpha", "beta"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SplitCSV(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("SplitCSV(%q) length = %d, want %d (%v vs %v)",
+					tt.in, len(got), len(tt.want), got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("SplitCSV(%q)[%d] = %q, want %q",
+						tt.in, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

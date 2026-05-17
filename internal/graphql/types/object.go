@@ -323,6 +323,20 @@ func (b *ObjectBuilder) buildUnionType(contextLexiconID, fieldName string, refs 
 	// Create union name from context and field
 	unionName := lexicon.ToTypeName(contextLexiconID) + capitalizeFirst(fieldName)
 
+	// Disambiguate when a def-derived object type already carries this
+	// name. v0.12.0 of the hypercerts lexicon hit this on
+	// `org.hypercerts.claim.activity`: `#contributorIdentity` is a
+	// top-level object def (object type name
+	// `OrgHypercertsClaimActivityContributorIdentity`) AND the
+	// `contributor.contributorIdentity` field is a union that maps to
+	// the same generated name. graphql-go rejects schemas with
+	// duplicate type names, so we suffix the union with `Union`. The
+	// suffix is applied only on collision so existing unions in the
+	// schema keep their stable names.
+	if b.mapper.HasObjectTypeNamed(unionName) {
+		unionName += "Union"
+	}
+
 	// Check if union already exists
 	if u, ok := b.mapper.GetUnionType(unionName); ok {
 		return u

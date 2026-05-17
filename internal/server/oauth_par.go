@@ -126,8 +126,7 @@ func (h *OAuthPARHandler) HandlePAR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate PAR request URI
-	requestURI := generatePARRequestURI()
+	requestURI := "urn:ietf:params:oauth:request_uri:" + randomString(32)
 	now := oauth.CurrentTimestamp()
 	expiresIn := int64(60) // 60 seconds
 	expiresAt := now + expiresIn
@@ -157,10 +156,6 @@ func (h *OAuthPARHandler) HandlePAR(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(resp)
-}
-
-func generatePARRequestURI() string {
-	return "urn:ietf:params:oauth:request_uri:" + randomString(32)
 }
 
 func writePARError(w http.ResponseWriter, status int, errorCode, description string) {

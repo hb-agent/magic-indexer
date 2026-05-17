@@ -53,7 +53,16 @@ jobs:
         run: go build -trimpath -buildvcs=false -v ./...
 
       - name: Test
-        run: go test -v -race -coverprofile=coverage.out ./...
+        # -p 1 serializes packages. The repository tests share a single
+        # hypergoat_test Postgres database; running packages in parallel
+        # produces non-deterministic DB-state contention where one
+        # package's TRUNCATE / cleanup wipes another's seeded rows.
+        # Different scheduling orders fail different tests each run
+        # (e.g. actors/records/purge/notifications all rotate as victims),
+        # which made CI flaky. Serializing packages eliminates the
+        # cross-package contention; per-test parallelism within a package
+        # is unaffected.
+        run: go test -v -race -p 1 -coverprofile=coverage.out ./...
         env:
           TEST_DATABASE_URL: postgres://hypergoat:hypergoat@localhost:5432/hypergoat_test?sslmode=disable
 

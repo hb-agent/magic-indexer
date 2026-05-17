@@ -131,36 +131,6 @@ type Executor interface {
 	DB() *sql.DB
 }
 
-// Row wraps sql.Row for consistent error handling.
-type Row struct {
-	row *sql.Row
-}
-
-func (r *Row) Scan(dest ...any) error {
-	return r.row.Scan(dest...)
-}
-
-// Rows wraps sql.Rows for consistent error handling.
-type Rows struct {
-	rows *sql.Rows
-}
-
-func (r *Rows) Next() bool {
-	return r.rows.Next()
-}
-
-func (r *Rows) Scan(dest ...any) error {
-	return r.rows.Scan(dest...)
-}
-
-func (r *Rows) Close() error {
-	return r.rows.Close()
-}
-
-func (r *Rows) Err() error {
-	return r.rows.Err()
-}
-
 // Helper functions for Value conversions
 
 // Text creates a TextValue.

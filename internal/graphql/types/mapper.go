@@ -137,6 +137,21 @@ func (m *Mapper) GetUnionType(name string) (*graphql.Union, bool) {
 	return t, ok
 }
 
+// HasObjectTypeNamed reports whether any cached object type carries
+// the given GraphQL type name. Used by the union-type builder to
+// detect collisions between a def-derived object type and a same-
+// named field-level union (e.g. activity has `#contributorIdentity`
+// as an object def AND a `contributorIdentity` field that is a
+// union — both would otherwise want the same GraphQL type name).
+func (m *Mapper) HasObjectTypeNamed(name string) bool {
+	for _, t := range m.objectTypes {
+		if t.Name() == name {
+			return true
+		}
+	}
+	return false
+}
+
 // SetUnionType caches a union type by name.
 func (m *Mapper) SetUnionType(name string, t *graphql.Union) {
 	m.unionTypes[name] = t
