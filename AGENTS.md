@@ -3,7 +3,7 @@
 > **If you are an AI assistant or a new contributor opening this
 > repo for the first time, this file is your complete onboarding.
 > Reading just this file should be enough to be useful. The other
-> docs (`docs/RUNBOOK.md`, `docs/reviews/`, `SECURITY.md`,
+> docs (`docs/RUNBOOK.md`, `docs/archive/reviews/`, `SECURITY.md`,
 > `README.md`) are deeper references; this file is the digest.**
 
 If, after reading this file, you are unsure about anything that
@@ -977,8 +977,8 @@ minutes per labeler.
 This branch went through **23 rounds of overnight review**
 producing 59 fixes and 3 regression tests before the first
 deploy. The per-round logs and final reports are in
-[`docs/reviews/`](docs/reviews/). Read the index there if you
-suspect something has already been audited.
+[`docs/archive/reviews/`](docs/archive/reviews/). Read the index
+there if you suspect something has already been audited.
 
 A comprehensive security audit was performed on **2026-04-13**
 (see [`docs/AUDIT_REPORT_2026-04-13.md`](docs/AUDIT_REPORT_2026-04-13.md)).
@@ -1117,7 +1117,7 @@ doesn't survive.
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — full operator playbook
   with first-time deploy, lexicon walkthrough, secret rotation,
   incident response, every gotcha worked out long-form.
-- [`docs/reviews/README.md`](docs/reviews/README.md) — index of
+- [`docs/archive/reviews/README.md`](docs/archive/reviews/README.md) — index of
   the 23-round overnight review history.
 - [`SECURITY.md`](SECURITY.md) — required env vars, reverse-proxy
   rate limits, admin auth contract.
