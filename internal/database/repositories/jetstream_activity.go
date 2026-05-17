@@ -101,10 +101,15 @@ func (r *JetstreamActivityRepository) LogActivityWithStatus(
 	// 'pending' and the orphan janitor eventually marks it
 	// 'orphaned' even though processing succeeded the first time
 	// (R1.5).
-	sqlStr := fmt.Sprintf(`WITH ins AS (
+	//
+	// NB: $8 (source_event_id) is referenced TWICE — once in the
+	// INSERT VALUES, once in the fallback SELECT's WHERE clause.
+	// This is intentional; both references bind to the same
+	// sourceEventID parameter. Do not "fix" this to $8, $9.
+	const sqlInsert = `WITH ins AS (
 			INSERT INTO jetstream_activity
 				(timestamp, operation, collection, did, rkey, status, event_json, source_event_id)
-				VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 				ON CONFLICT (source_event_id)
 					WHERE source_event_id IS NOT NULL
 					DO NOTHING
@@ -113,12 +118,9 @@ func (r *JetstreamActivityRepository) LogActivityWithStatus(
 		SELECT id FROM ins
 		UNION ALL
 		SELECT id FROM jetstream_activity
-			WHERE source_event_id = %s
+			WHERE source_event_id = $8
 			AND NOT EXISTS (SELECT 1 FROM ins)
-		LIMIT 1`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-		r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6),
-		r.db.Placeholder(7), r.db.Placeholder(8), r.db.Placeholder(8))
+		LIMIT 1`
 
 	params := []database.Value{
 		database.Text(timestampStr),
@@ -132,7 +134,7 @@ func (r *JetstreamActivityRepository) LogActivityWithStatus(
 	}
 
 	var id int64
-	err := r.db.QueryRow(ctx, sqlStr, params, &id)
+	err := r.db.QueryRow(ctx, sqlInsert, params, &id)
 	return id, err
 }
 
@@ -144,10 +146,9 @@ func (r *JetstreamActivityRepository) UpdateStatus(
 	errorMessage *string,
 	isValid *bool,
 ) error {
-	sqlStr := fmt.Sprintf(`UPDATE jetstream_activity
-		SET status = %s, error_message = %s, is_valid = %s
-		WHERE id = %s`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4))
+	const sqlUpdate = `UPDATE jetstream_activity
+		SET status = $1, error_message = $2, is_valid = $3
+		WHERE id = $4`
 
 	params := []database.Value{
 		database.Text(status),
@@ -156,7 +157,7 @@ func (r *JetstreamActivityRepository) UpdateStatus(
 		database.Int(id),
 	}
 
-	_, err := r.db.Exec(ctx, sqlStr, params)
+	_, err := r.db.Exec(ctx, sqlUpdate, params)
 	return err
 }
 
