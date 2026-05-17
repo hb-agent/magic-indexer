@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 
 	"github.com/GainForest/hypergoat/internal/database"
 	"github.com/GainForest/hypergoat/internal/oauth"
@@ -22,16 +21,12 @@ func NewOAuthATPSessionsRepository(db database.Executor) *OAuthATPSessionsReposi
 
 // Insert creates a new ATP session.
 func (r *OAuthATPSessionsRepository) Insert(ctx context.Context, session *oauth.ATPSession) error {
-	sqlStr := fmt.Sprintf(`INSERT INTO oauth_atp_session (
+	const sqlStr = `INSERT INTO oauth_atp_session (
 		session_id, iteration, did, session_created_at, atp_oauth_state,
 		signing_key_jkt, dpop_key, access_token, refresh_token,
 		access_token_created_at, access_token_expires_at, access_token_scopes,
 		session_exchanged_at, exchange_error
-	) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3), r.db.Placeholder(4),
-		r.db.Placeholder(5), r.db.Placeholder(6), r.db.Placeholder(7), r.db.Placeholder(8),
-		r.db.Placeholder(9), r.db.Placeholder(10), r.db.Placeholder(11), r.db.Placeholder(12),
-		r.db.Placeholder(13), r.db.Placeholder(14))
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
 
 	params := []database.Value{
 		database.Text(session.SessionID),
@@ -56,11 +51,11 @@ func (r *OAuthATPSessionsRepository) Insert(ctx context.Context, session *oauth.
 
 // Get retrieves an ATP session by session ID and iteration.
 func (r *OAuthATPSessionsRepository) Get(ctx context.Context, sessionID string, iteration int64) (*oauth.ATPSession, error) {
-	sqlStr := fmt.Sprintf(`SELECT session_id, iteration, did, session_created_at, atp_oauth_state,
+	const sqlStr = `SELECT session_id, iteration, did, session_created_at, atp_oauth_state,
 		signing_key_jkt, dpop_key, access_token, refresh_token,
 		access_token_created_at, access_token_expires_at, access_token_scopes,
 		session_exchanged_at, exchange_error
-	FROM oauth_atp_session WHERE session_id = %s AND iteration = %s`, r.db.Placeholder(1), r.db.Placeholder(2))
+	FROM oauth_atp_session WHERE session_id = $1 AND iteration = $2`
 
 	session, err := r.scanSession(ctx, sqlStr, []database.Value{database.Text(sessionID), database.Int(iteration)})
 	if err != nil {
@@ -72,11 +67,11 @@ func (r *OAuthATPSessionsRepository) Get(ctx context.Context, sessionID string, 
 
 // GetLatest retrieves the latest iteration of an ATP session.
 func (r *OAuthATPSessionsRepository) GetLatest(ctx context.Context, sessionID string) (*oauth.ATPSession, error) {
-	sqlStr := fmt.Sprintf(`SELECT session_id, iteration, did, session_created_at, atp_oauth_state,
+	const sqlStr = `SELECT session_id, iteration, did, session_created_at, atp_oauth_state,
 		signing_key_jkt, dpop_key, access_token, refresh_token,
 		access_token_created_at, access_token_expires_at, access_token_scopes,
 		session_exchanged_at, exchange_error
-	FROM oauth_atp_session WHERE session_id = %s ORDER BY iteration DESC LIMIT 1`, r.db.Placeholder(1))
+	FROM oauth_atp_session WHERE session_id = $1 ORDER BY iteration DESC LIMIT 1`
 
 	session, err := r.scanSession(ctx, sqlStr, []database.Value{database.Text(sessionID)})
 	if err != nil {
@@ -88,11 +83,11 @@ func (r *OAuthATPSessionsRepository) GetLatest(ctx context.Context, sessionID st
 
 // GetByDID retrieves the latest ATP session for a DID.
 func (r *OAuthATPSessionsRepository) GetByDID(ctx context.Context, did string) (*oauth.ATPSession, error) {
-	sqlStr := fmt.Sprintf(`SELECT session_id, iteration, did, session_created_at, atp_oauth_state,
+	const sqlStr = `SELECT session_id, iteration, did, session_created_at, atp_oauth_state,
 		signing_key_jkt, dpop_key, access_token, refresh_token,
 		access_token_created_at, access_token_expires_at, access_token_scopes,
 		session_exchanged_at, exchange_error
-	FROM oauth_atp_session WHERE did = %s ORDER BY session_created_at DESC LIMIT 1`, r.db.Placeholder(1))
+	FROM oauth_atp_session WHERE did = $1 ORDER BY session_created_at DESC LIMIT 1`
 
 	session, err := r.scanSession(ctx, sqlStr, []database.Value{database.Text(did)})
 	if err != nil {
@@ -104,11 +99,11 @@ func (r *OAuthATPSessionsRepository) GetByDID(ctx context.Context, did string) (
 
 // GetByAccessToken retrieves an ATP session by access token.
 func (r *OAuthATPSessionsRepository) GetByAccessToken(ctx context.Context, accessToken string) (*oauth.ATPSession, error) {
-	sqlStr := fmt.Sprintf(`SELECT session_id, iteration, did, session_created_at, atp_oauth_state,
+	const sqlStr = `SELECT session_id, iteration, did, session_created_at, atp_oauth_state,
 		signing_key_jkt, dpop_key, access_token, refresh_token,
 		access_token_created_at, access_token_expires_at, access_token_scopes,
 		session_exchanged_at, exchange_error
-	FROM oauth_atp_session WHERE access_token = %s`, r.db.Placeholder(1))
+	FROM oauth_atp_session WHERE access_token = $1`
 
 	session, err := r.scanSession(ctx, sqlStr, []database.Value{database.Text(accessToken)})
 	if err != nil {
@@ -120,14 +115,11 @@ func (r *OAuthATPSessionsRepository) GetByAccessToken(ctx context.Context, acces
 
 // Update updates an existing ATP session.
 func (r *OAuthATPSessionsRepository) Update(ctx context.Context, session *oauth.ATPSession) error {
-	sqlStr := fmt.Sprintf(`UPDATE oauth_atp_session SET
-		did = %s, access_token = %s, refresh_token = %s,
-		access_token_created_at = %s, access_token_expires_at = %s, access_token_scopes = %s,
-		session_exchanged_at = %s, exchange_error = %s
-	WHERE session_id = %s AND iteration = %s`,
-		r.db.Placeholder(1), r.db.Placeholder(2), r.db.Placeholder(3),
-		r.db.Placeholder(4), r.db.Placeholder(5), r.db.Placeholder(6),
-		r.db.Placeholder(7), r.db.Placeholder(8), r.db.Placeholder(9), r.db.Placeholder(10))
+	const sqlStr = `UPDATE oauth_atp_session SET
+		did = $1, access_token = $2, refresh_token = $3,
+		access_token_created_at = $4, access_token_expires_at = $5, access_token_scopes = $6,
+		session_exchanged_at = $7, exchange_error = $8
+	WHERE session_id = $9 AND iteration = $10`
 
 	params := []database.Value{
 		database.NullableText(session.DID),
@@ -148,16 +140,16 @@ func (r *OAuthATPSessionsRepository) Update(ctx context.Context, session *oauth.
 
 // Delete removes an ATP session.
 func (r *OAuthATPSessionsRepository) Delete(ctx context.Context, sessionID string, iteration int64) error {
-	sqlStr := fmt.Sprintf("DELETE FROM oauth_atp_session WHERE session_id = %s AND iteration = %s",
-		r.db.Placeholder(1), r.db.Placeholder(2))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(sessionID), database.Int(iteration)})
+	_, err := r.db.Exec(ctx,
+		"DELETE FROM oauth_atp_session WHERE session_id = $1 AND iteration = $2",
+		[]database.Value{database.Text(sessionID), database.Int(iteration)})
 	return err
 }
 
 // DeleteAllIterations removes all iterations of an ATP session.
 func (r *OAuthATPSessionsRepository) DeleteAllIterations(ctx context.Context, sessionID string) error {
-	sqlStr := fmt.Sprintf("DELETE FROM oauth_atp_session WHERE session_id = %s", r.db.Placeholder(1))
-	_, err := r.db.Exec(ctx, sqlStr, []database.Value{database.Text(sessionID)})
+	_, err := r.db.Exec(ctx, "DELETE FROM oauth_atp_session WHERE session_id = $1",
+		[]database.Value{database.Text(sessionID)})
 	return err
 }
 
