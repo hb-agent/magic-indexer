@@ -1,0 +1,48 @@
+-- no-transaction
+-- Partial expression index on `json->>'subject'` for the
+-- KindStringSubject filter on app.certified.graph.follow. Pairs
+-- with the runtime SQL `r.json->>'subject' = $N` /
+-- `= ANY($N::text[])` emitted by buildStringSubjectFilter in
+-- internal/database/repositories/filter.go.
+--
+-- Without this index, a query for "who follows did:plc:X"
+-- degrades to a sequential scan over the follow collection that
+-- trips the 5s /graphql budget at scale — the same scaling
+-- problem migration 026 solved for badge.award subject.
+--
+-- Partial — scoped to follow records only. The collection
+-- predicate is matched against the resolver's parameter-bound
+-- `r.collection = $coll` via Postgres's partial-index implication
+-- (`predicate_implied_by`, same mechanism that powers
+-- idx_record_subject_did on badge.award, migration 026).
+--
+-- Why NOT `AND jsonb_typeof(json->'subject') = 'string'` here:
+-- an earlier draft included that as belt-and-suspenders. Removed
+-- in plan-review round 1 (item R1.1, docs/issue-86/review-round-1.md)
+-- because Postgres's structural predicate_implied_by cannot prove
+-- `r.json->>'subject' = $N` implies that typeof predicate — they
+-- reference different sub-expressions of the JSON. Adding the
+-- typeof clause would create an index the planner refuses to
+-- use, silently degrading the filter to a sequential scan. The
+-- lexicon requires `subject` to be a string, so non-string rows
+-- shouldn't exist; if they do, `->>` returns NULL and they
+-- index as NULL (btree stores compactly).
+--
+-- IMMUTABLE: `->>` on jsonb is IMMUTABLE in Postgres, so the
+-- expression is safe in an index.
+--
+-- CONCURRENTLY: no exclusive lock on the table, but must run
+-- outside a transaction. The migration runner detects
+-- `-- no-transaction` and skips its BEGIN/COMMIT wrapper. pgx
+-- still wraps a multi-statement Exec body in an implicit
+-- transaction (SQLSTATE 25001), so this stays one statement per
+-- file (lesson from CI commit cb06896 on migration 021).
+--
+-- Operator note: if this migration runs but the index ends up
+-- INVALID (a known foot-gun of CONCURRENTLY + IF NOT EXISTS),
+-- recover by running `REINDEX INDEX CONCURRENTLY
+-- idx_record_follow_subject` or `DROP INDEX CONCURRENTLY` + re-run.
+-- See docs/issue-86/plan.md §9b for the verification query.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_record_follow_subject
+    ON record ((json->>'subject'))
+    WHERE collection = 'app.certified.graph.follow';
