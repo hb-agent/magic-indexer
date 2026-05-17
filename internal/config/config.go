@@ -347,20 +347,34 @@ func looksLikeDID(s string) bool {
 	return strings.HasPrefix(s, "did:plc:") || strings.HasPrefix(s, "did:web:")
 }
 
+// SplitCSV splits a comma-separated string, trims whitespace from each
+// element, and drops empties. Returns nil for an empty input. Use for
+// DID lists, collection lists, and similar config values where empty
+// entries are never meaningful.
+//
+// Note: CORS allowlists deliberately do NOT use this — there, the
+// distinction between "no value set" (allow all) and "value set with
+// only empty entries" (allow nothing) is load-bearing for misconfig
+// safety. See the AllowedOrigins parsing in cmd/hypergoat/main.go.
+func SplitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 // labelerDIDsCount returns the number of non-empty entries in a
 // comma-separated DID list. Used when logging so we surface "how
 // many" without dumping the list of DIDs into the log stream.
 func labelerDIDsCount(raw string) int {
-	if raw == "" {
-		return 0
-	}
-	n := 0
-	for _, part := range strings.Split(raw, ",") {
-		if strings.TrimSpace(part) != "" {
-			n++
-		}
-	}
-	return n
+	return len(SplitCSV(raw))
 }
 
 // LogConfig logs the configuration (with sensitive values redacted).

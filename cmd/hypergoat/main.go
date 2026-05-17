@@ -1122,13 +1122,10 @@ func startJetstream(
 	// If Tap is enabled, start the Tap consumer instead of Jetstream.
 	if cfg.TapEnabled {
 		// Build collection allowlist from config.
-		if cfg.TapCollectionFilters != "" {
-			allowedCollections := make(map[string]bool)
-			for _, col := range strings.Split(cfg.TapCollectionFilters, ",") {
-				col = strings.TrimSpace(col)
-				if col != "" {
-					allowedCollections[col] = true
-				}
+		if cols := config.SplitCSV(cfg.TapCollectionFilters); len(cols) > 0 {
+			allowedCollections := make(map[string]bool, len(cols))
+			for _, col := range cols {
+				allowedCollections[col] = true
 			}
 			processor.AllowedCollections = allowedCollections
 		}
@@ -1238,7 +1235,7 @@ func startJetstream(
 //   - LabelerCursorFlushInterval: seconds between cursor flushes
 //     (0 = package default of 5s).
 func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
-	raw := parseDIDs(cfg.LabelerDIDs)
+	raw := config.SplitCSV(cfg.LabelerDIDs)
 	if len(raw) == 0 {
 		slog.Info("Labeler subscriptions disabled (LABELER_DIDS is empty)")
 		return
@@ -1463,18 +1460,6 @@ func didWebHost(did string) string {
 		return ""
 	}
 	return did[len(prefix):]
-}
-
-// parseDIDs splits a comma-separated list of DIDs and trims whitespace.
-func parseDIDs(commaSeparated string) []string {
-	var out []string
-	for _, s := range strings.Split(commaSeparated, ",") {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
 }
 
 // loadLexiconsFromDir loads all lexicon JSON files from a directory tree.
