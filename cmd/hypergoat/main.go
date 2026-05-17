@@ -276,10 +276,6 @@ func initServices(cfg *config.Config) (*services, error) {
 		reports:          repositories.NewReportsRepository(db),
 	}
 
-	if cfg.PLCDirectoryURL != "" {
-		svc.config.SetPLCDirectoryOverride(cfg.PLCDirectoryURL)
-	}
-
 	// Initialize config defaults and admin DIDs
 	ctx := context.Background()
 	if err := svc.config.InitializeDefaults(ctx); err != nil {
@@ -1085,13 +1081,9 @@ func startJetstream(
 	// dominate the steady state and the firehose is not bottlenecked
 	// on plc.directory latency. The cleanup goroutine sweeps stale
 	// entries hourly to bound memory in the long-tail-DID case.
-	didResolverOpts := []oauth.DIDResolverOption{}
-	if cfg.PLCDirectoryURL != "" {
-		didResolverOpts = append(didResolverOpts, oauth.WithPLCDirectoryURL(cfg.PLCDirectoryURL))
-	}
 	didCache := oauth.NewDIDCache(
 		oauth.WithCacheTTL(24*time.Hour),
-		oauth.WithResolver(oauth.NewDIDResolver(didResolverOpts...)),
+		oauth.WithResolver(oauth.NewDIDResolverWithPLC(cfg.PLCDirectoryURL)),
 	)
 	stopDIDCacheCleanup := didCache.StartCleanupRoutine(time.Hour)
 	bg.didCacheStop = stopDIDCacheCleanup
@@ -1256,11 +1248,7 @@ func startLabeler(cfg *config.Config, svc *services, bg *backgroundServices) {
 		return
 	}
 
-	var resolverOpts []oauth.DIDResolverOption
-	if cfg.PLCDirectoryURL != "" {
-		resolverOpts = append(resolverOpts, oauth.WithPLCDirectoryURL(cfg.PLCDirectoryURL))
-	}
-	didResolver := oauth.NewDIDResolver(resolverOpts...)
+	didResolver := oauth.NewDIDResolverWithPLC(cfg.PLCDirectoryURL)
 
 	if cfg.LabelerDryRun {
 		for _, did := range dids {

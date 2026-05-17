@@ -73,6 +73,18 @@ func WithHTTPClient(client *http.Client) DIDResolverOption {
 // exhausting memory in io.ReadAll.
 const maxDIDDocumentBytes = 256 * 1024
 
+// NewDIDResolverWithPLC builds a DIDResolver, applying the PLC
+// directory URL override when non-empty. Common case helper for
+// callers that just need to thread cfg.PLCDirectoryURL through; tests
+// and callers that need WithHTTPClient should call NewDIDResolver
+// directly with the option list.
+func NewDIDResolverWithPLC(plcDirectoryURL string) *DIDResolver {
+	if plcDirectoryURL == "" {
+		return NewDIDResolver()
+	}
+	return NewDIDResolver(WithPLCDirectoryURL(plcDirectoryURL))
+}
+
 // NewDIDResolver creates a new DID resolver.
 func NewDIDResolver(opts ...DIDResolverOption) *DIDResolver {
 	r := &DIDResolver{
