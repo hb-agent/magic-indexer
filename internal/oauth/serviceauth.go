@@ -23,6 +23,7 @@ package oauth
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -149,7 +150,9 @@ func (v *ServiceAuthVerifier) Verify(ctx context.Context, tokenStr, expectedLxm 
 	now := time.Now()
 
 	// Audience. Spec allows string-or-array; we only accept single string.
-	if claims.Aud != v.cfg.Audience {
+	// Constant-time compare: claims.Aud is attacker-controlled JWT
+	// content and v.cfg.Audience is fixed server config.
+	if subtle.ConstantTimeCompare([]byte(claims.Aud), []byte(v.cfg.Audience)) != 1 {
 		return "", ErrServiceAuthBadAudience
 	}
 
@@ -174,7 +177,9 @@ func (v *ServiceAuthVerifier) Verify(ctx context.Context, tokenStr, expectedLxm 
 	}
 
 	// lxm pinned to caller's expectation.
-	if claims.Lxm != expectedLxm {
+	// Constant-time compare: claims.Lxm is attacker-controlled JWT
+	// content and expectedLxm is per-endpoint fixed config.
+	if subtle.ConstantTimeCompare([]byte(claims.Lxm), []byte(expectedLxm)) != 1 {
 		return "", ErrServiceAuthBadLxm
 	}
 

@@ -632,11 +632,16 @@ func (h *OAuthHandlers) handleAuthorizationCodeGrant(w http.ResponseWriter, r *h
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Authorization code expired")
 		return
 	}
-	if authCode.ClientID != clientID {
+	// Constant-time compares: both fields are attacker-controllable
+	// (form-body values) against stored auth-code state. Auth codes
+	// are one-time-use so an active attacker has a narrow window,
+	// but matching the existing PKCE pattern keeps the boundary
+	// uniform.
+	if subtle.ConstantTimeCompare([]byte(authCode.ClientID), []byte(clientID)) != 1 {
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Client ID mismatch")
 		return
 	}
-	if authCode.RedirectURI != redirectURI {
+	if subtle.ConstantTimeCompare([]byte(authCode.RedirectURI), []byte(redirectURI)) != 1 {
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Redirect URI mismatch")
 		return
 	}
@@ -807,7 +812,9 @@ func (h *OAuthHandlers) handleRefreshTokenGrant(w http.ResponseWriter, r *http.R
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Refresh token expired")
 		return
 	}
-	if oldRefreshToken.ClientID != clientID {
+	// Constant-time compare on the refresh-token grant for the same
+	// reason as the authorization-code grant above.
+	if subtle.ConstantTimeCompare([]byte(oldRefreshToken.ClientID), []byte(clientID)) != 1 {
 		h.writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Client ID mismatch")
 		return
 	}

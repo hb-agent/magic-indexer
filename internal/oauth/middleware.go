@@ -4,6 +4,7 @@ package oauth
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -153,11 +154,17 @@ func (m *AuthMiddleware) validateDPoPToken(r *http.Request, token string) (*Auth
 		return nil, ErrTokenRevoked
 	}
 
-	// Verify DPoP binding
+	// Verify DPoP binding. The nil-check above must remain before
+	// the dereference below; the constant-time compare does not
+	// guard against nil. JKT is derived from public proof material,
+	// so a timing leak is mostly cosmetic — but the codebase already
+	// uses subtle.ConstantTimeCompare for PKCE (which has the same
+	// "public-ish material" property), so consistency is the
+	// strongest argument here.
 	if accessToken.DPoPJKT == nil {
 		return nil, ErrTokenNotDPoPBound
 	}
-	if *accessToken.DPoPJKT != result.JKT {
+	if subtle.ConstantTimeCompare([]byte(*accessToken.DPoPJKT), []byte(result.JKT)) != 1 {
 		return nil, ErrDPoPKeyMismatch
 	}
 

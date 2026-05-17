@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -359,10 +360,14 @@ func VerifyDPoPProofWithATH(proof, method, url, accessToken string, maxAgeSecond
 
 	// Verify ATH against the access token. The ATH claim was already
 	// extracted during the verified parse in VerifyDPoPProof.
+	// Constant-time compare for consistency with the PKCE path; ATH
+	// is derived from public material so the timing leak is
+	// cosmetic, but the codebase pattern is to avoid `==`/`!=` on
+	// any auth-bearing string.
 	if accessToken != "" {
 		expectedATH := sha256.Sum256([]byte(accessToken))
 		expectedATHStr := base64.RawURLEncoding.EncodeToString(expectedATH[:])
-		if result.ATH != expectedATHStr {
+		if subtle.ConstantTimeCompare([]byte(result.ATH), []byte(expectedATHStr)) != 1 {
 			return nil, ErrDPoPATHMismatch
 		}
 	}

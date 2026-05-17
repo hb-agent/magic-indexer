@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -363,6 +364,69 @@ func TestAuthMiddleware_RequireAuth_DPoP_KeyMismatch(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected status 401, got %d", rec.Code)
+	}
+}
+
+// TestAuthMiddleware_RequireAuth_DPoP_TokenNotDPoPBound guards the
+// nil-check ordering at the JKT comparison: a token with DPoPJKT==nil
+// reached via the DPoP authorization scheme must return
+// ErrTokenNotDPoPBound (401) — and must not panic on the pointer
+// dereference inside subtle.ConstantTimeCompare. The constant-time
+// switch in 2026-05-17 Track 3 keeps the nil guard before the
+// dereference; this test fails loudly if a future refactor reorders
+// them.
+func TestAuthMiddleware_RequireAuth_DPoP_TokenNotDPoPBound(t *testing.T) {
+	keyPair, err := GenerateDPoPKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+
+	userID := "did:plc:test123"
+	tokens := &mockTokenStore{
+		tokens: map[string]*AccessToken{
+			"plain-token": {
+				Token:     "plain-token",
+				TokenType: TokenDPoP,
+				UserID:    &userID,
+				ExpiresAt: time.Now().Add(time.Hour).Unix(),
+				Revoked:   false,
+				DPoPJKT:   nil, // not DPoP-bound at all
+			},
+		},
+	}
+
+	jtis := &mockJTIStore{jtis: make(map[string]bool)}
+	middleware := NewAuthMiddleware(tokens, jtis, "https://example.com")
+
+	handler := middleware.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called for non-DPoP-bound token under DPoP scheme")
+	}))
+
+	proof, err := keyPair.GenerateDPoPProof("GET", "https://example.com/protected", "", "")
+	if err != nil {
+		t.Fatalf("failed to generate DPoP proof: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/protected", nil)
+	req.Header.Set("Authorization", "DPoP plain-token")
+	req.Header.Set("DPoP", proof)
+	rec := httptest.NewRecorder()
+
+	// Must not panic.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("middleware panicked on nil DPoPJKT (nil-check ordering regression): %v", r)
+		}
+	}()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected status 401, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "invalid_token") {
+		t.Errorf("expected invalid_token error code in body, got: %s", body)
 	}
 }
 
