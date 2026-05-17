@@ -272,3 +272,103 @@ func TestJetstreamActivity_DeleteAll(t *testing.T) {
 		t.Errorf("GetCount() after DeleteAll = %d, want 0", count)
 	}
 }
+
+// TestJetstreamActivity_LogActivity_DedupOnSourceEventID guards
+// the load-bearing UNION-SELECT fallback in LogActivityWithStatus:
+// when a redelivered event arrives with the same source_event_id,
+// the second call must NOT insert a new row, and must return the
+// existing row's id so the caller's subsequent UpdateStatus
+// targets that row instead of orphaning a successful redelivery
+// (Track 4 of review-2026-05-17, item R1.5).
+func TestJetstreamActivity_LogActivity_DedupOnSourceEventID(t *testing.T) {
+	repo := setupActivityTest(t)
+	ctx := context.Background()
+	sourceID := int64(1000)
+
+	id1, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "abc123", `{"type":"create"}`, &sourceID)
+	if err != nil {
+		t.Fatalf("first LogActivity() error = %v", err)
+	}
+	if id1 <= 0 {
+		t.Fatalf("first LogActivity() returned id = %d, want > 0", id1)
+	}
+
+	// Same source_event_id — must return the same id, not insert a new row.
+	id2, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "abc123", `{"type":"create"}`, &sourceID)
+	if err != nil {
+		t.Fatalf("redelivered LogActivity() error = %v", err)
+	}
+	if id2 != id1 {
+		t.Errorf("redelivered LogActivity() returned id = %d, want %d (the existing row's id)", id2, id1)
+	}
+
+	count, err := repo.GetCount(ctx)
+	if err != nil {
+		t.Fatalf("GetCount() error = %v", err)
+	}
+	if count != 1 {
+		t.Errorf("GetCount() after redelivery = %d, want 1 (dedup must not produce a second row)", count)
+	}
+}
+
+// TestJetstreamActivity_LogActivity_DistinctSourceEventIDs_NoDedup
+// is the inverse guard: two distinct upstream events with the same
+// (did, rkey, cid) tuple but different source_event_id must each
+// produce their own row (a re-create after delete is legitimately
+// a new event, not a duplicate).
+func TestJetstreamActivity_LogActivity_DistinctSourceEventIDs_NoDedup(t *testing.T) {
+	repo := setupActivityTest(t)
+	ctx := context.Background()
+	id1Source := int64(2000)
+	id2Source := int64(2001)
+
+	id1, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "abc123", `{"type":"create"}`, &id1Source)
+	if err != nil {
+		t.Fatalf("first LogActivity() error = %v", err)
+	}
+
+	id2, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "abc123", `{"type":"create"}`, &id2Source)
+	if err != nil {
+		t.Fatalf("second LogActivity() error = %v", err)
+	}
+	if id2 == id1 {
+		t.Errorf("distinct source_event_ids returned the same id %d — dedup matched on the wrong key", id1)
+	}
+
+	count, err := repo.GetCount(ctx)
+	if err != nil {
+		t.Fatalf("GetCount() error = %v", err)
+	}
+	if count != 2 {
+		t.Errorf("GetCount() with two distinct sources = %d, want 2", count)
+	}
+}
+
+// TestJetstreamActivity_LogActivity_NilSourceEventID_NoDedup
+// covers historical and backfill rows: when sourceEventID is nil
+// the partial unique index does not apply, so two consecutive
+// calls must produce two rows (no accidental NULL-merge).
+func TestJetstreamActivity_LogActivity_NilSourceEventID_NoDedup(t *testing.T) {
+	repo := setupActivityTest(t)
+	ctx := context.Background()
+
+	id1, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "abc123", `{"type":"create"}`, nil)
+	if err != nil {
+		t.Fatalf("first LogActivity() error = %v", err)
+	}
+	id2, err := repo.LogActivity(ctx, time.Now(), "create", "app.bsky.feed.post", "did:plc:test1", "abc123", `{"type":"create"}`, nil)
+	if err != nil {
+		t.Fatalf("second LogActivity() error = %v", err)
+	}
+	if id2 == id1 {
+		t.Errorf("nil source_event_id should not dedup; got the same id %d twice", id1)
+	}
+
+	count, err := repo.GetCount(ctx)
+	if err != nil {
+		t.Fatalf("GetCount() error = %v", err)
+	}
+	if count != 2 {
+		t.Errorf("GetCount() with two nil-source rows = %d, want 2", count)
+	}
+}

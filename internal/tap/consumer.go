@@ -45,12 +45,17 @@ type Consumer struct {
 	errLog rateLimitedErrLogger
 }
 
-// rateLimitedErrLogger is shared between Jetstream and Tap consumers
-// in spirit but kept per-consumer here (and equivalently in the
-// Jetstream package) so the threshold counters don't share state
-// across subsystems. Goroutine-safe; the single dispatcher goroutine
-// reads/writes the fields but /metrics scraping could read the
-// counter, so atomic.Int64 is used to be conservative (R1.6).
+// rateLimitedErrLogger throttles repeated error lines from the
+// hot ingestion path. Mirrors the equivalent type in
+// internal/jetstream; they're deliberately not shared (A12 in
+// docs/review-2026-05-17/plan.md — don't refactor for a
+// hypothetical third consumer).
+//
+// suppressed + lastEmit are atomic because the throttle-emit
+// branch uses a CAS to ensure exactly one summary line per
+// throttle interval even if log() is called concurrently. In
+// practice the single dispatcher goroutine is the only caller,
+// so the CAS is belt-and-braces — but the cost is trivial.
 type rateLimitedErrLogger struct {
 	// loudCount is the number of errors logged at full severity
 	// before throttling kicks in.
@@ -63,6 +68,15 @@ type rateLimitedErrLogger struct {
 	lastEmit      atomic.Int64 // unix nanoseconds
 }
 
+// Defaults for rateLimitedErrLogger. Per-package constants rather
+// than a shared helper so each consumer can tune independently;
+// see plan.md A12 for the "don't share consumer machinery"
+// decision.
+const (
+	defaultErrLogLoudLimit = 5
+	defaultErrLogThrottle  = time.Minute
+)
+
 // NewConsumer creates a new Tap consumer.
 func NewConsumer(config ConsumerConfig, handler EventHandler) *Consumer {
 	if config.MaxRetries == 0 {
@@ -73,8 +87,8 @@ func NewConsumer(config ConsumerConfig, handler EventHandler) *Consumer {
 		handler: handler,
 		dialer:  &DefaultDialer{},
 		errLog: rateLimitedErrLogger{
-			loudLimit:     5,
-			throttleEvery: time.Minute,
+			loudLimit:     defaultErrLogLoudLimit,
+			throttleEvery: defaultErrLogThrottle,
 		},
 	}
 }

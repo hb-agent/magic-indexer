@@ -298,7 +298,10 @@ not collide on the same file as the next track lands.
 2. Pre-existing lint/test baseline captured before track 1, compared
    after each track — "no new errors" claim has to be measurable.
 3. `wc -l internal/graphql/admin/resolvers.go` after track 5: under
-   500 lines.
+   550 lines. (Relaxed from <500 per implementation-review round 2
+   item IR1.B — the ~50-line TOC comment is load-bearing for
+   preventing partition drift, which was the R2.5 obligation from
+   plan-review round 1; trimming the TOC would undo that fix.)
 4. `wc -l cmd/hypergoat/main.go` after track 6: under 1400 lines.
 5. Tap redelivery test (track 4) passes; queue-depth metric appears
    in `/metrics`; sustained DB-outage simulation logs at error

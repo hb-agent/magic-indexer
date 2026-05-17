@@ -65,6 +65,14 @@ type Consumer struct {
 // hot ingestion path. Mirrors the equivalent type in internal/tap;
 // they're deliberately not shared (A12 — don't refactor for a
 // hypothetical third consumer).
+//
+// suppressed + lastEmit are atomic because the throttle-emit
+// branch uses a CAS to ensure exactly one summary line per
+// throttle interval even if log() is called concurrently. In
+// practice both callers run on the single processEvents
+// goroutine, so the CAS is belt-and-braces — but the cost is
+// trivial and it future-proofs against a second caller (e.g. a
+// metrics handler reading the same struct).
 type rateLimitedErrLogger struct {
 	loudCount     int
 	loudLimit     int
@@ -72,6 +80,15 @@ type rateLimitedErrLogger struct {
 	suppressed    atomic.Int64
 	lastEmit      atomic.Int64 // unix nanoseconds
 }
+
+// Defaults for rateLimitedErrLogger. Per-package constants rather
+// than a shared helper so each consumer can tune independently;
+// see plan.md A12 for the "don't share consumer machinery"
+// decision.
+const (
+	defaultErrLogLoudLimit = 5
+	defaultErrLogThrottle  = time.Minute
+)
 
 func (l *rateLimitedErrLogger) log(msg string, args ...any) {
 	if l.loudCount < l.loudLimit {
@@ -117,8 +134,8 @@ func NewConsumer(
 		cursorDone: make(chan struct{}),
 		statsStart: time.Now(),
 		errLog: rateLimitedErrLogger{
-			loudLimit:     5,
-			throttleEvery: time.Minute,
+			loudLimit:     defaultErrLogLoudLimit,
+			throttleEvery: defaultErrLogThrottle,
 		},
 	}
 

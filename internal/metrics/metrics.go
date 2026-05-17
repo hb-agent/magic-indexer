@@ -635,9 +635,10 @@ var (
 	)
 )
 
-// init2 registers the Track 4 metrics. Kept separate from the main
-// init() so adding more metrics in this section doesn't conflict
-// with rebases of the original registration block.
+// init registers the Track 4 metrics. Go allows multiple init() per
+// file and runs them in source order; this one is kept separate
+// from the main init() above so adding metrics in this section
+// doesn't conflict with rebases of the original registration block.
 func init() {
 	Registry.MustRegister(
 		activityLogFailedTotal,
