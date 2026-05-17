@@ -195,7 +195,7 @@ Each spec follows the same shape:
 - **Target**: EITHER.
 - **Preconditions**: service running.
 - **Steps**:
-  1. `curl -s $BASE_URL/metrics | head -50 > /tmp/metrics.txt`
+  1. `curl -s $BASE_URL/metrics > /tmp/metrics.txt`
   2. Verify these series exist (one per line; ignore HELP/TYPE lines):
      - `hypergoat_http_requests_total`
      - `hypergoat_jetstream_events_total`
@@ -203,7 +203,6 @@ Each spec follows the same shape:
      - `hypergoat_jetstream_event_buffer_depth` *(Track 4)*
      - `hypergoat_jetstream_event_buffer_capacity` *(Track 4)*
      - `hypergoat_activity_log_failed_total` *(Track 4)*
-     - `hypergoat_ingestion_error_total` *(Track 4)*
      - `hypergoat_tap_event_dispatch_seconds_bucket` *(Track 4 histogram)*
   3. Confirm no metric label embeds raw user input (DID, URI, IP):
      `grep -E 'did:plc|at://|^[0-9]{1,3}\.[0-9]{1,3}\.' /tmp/metrics.txt`
@@ -211,6 +210,13 @@ Each spec follows the same shape:
 - **Expected**:
   - All series in step 2 appear.
   - Step 3 returns no matches (cardinality discipline).
+- **Note on absent CounterVec series**: labelled counters
+  (CounterVecs) do not appear in `/metrics` output until the first
+  `.WithLabelValues(...)` call. So `hypergoat_ingestion_error_total{consumer=jetstream|tap}`
+  is *expected* to be absent on a healthy deployment that has not
+  yet seen an ingestion error. Treat its absence as "no errors
+  yet," not as a missing metric. To force-initialise it, run
+  test [C4](#c4) (LOCAL — induces a DB outage).
 - **Cleanup**: `rm /tmp/metrics.txt`.
 - **Refs**: `internal/metrics/metrics.go`.
 
@@ -343,22 +349,30 @@ Each spec follows the same shape:
   collection produces traffic on Bluesky (e.g.
   `app.bsky.feed.post`).
 - **Steps**:
-  1. Note the current record count:
+  1. Capture the current per-collection event counts:
      ```bash
-     COUNT_BEFORE=$(curl -s $BASE_URL/stats | jq .records)
+     curl -s $BASE_URL/metrics \
+       | grep '^hypergoat_jetstream_events_total{' \
+       > /tmp/jetstream-before.txt
      ```
-  2. Wait 30 seconds (a popular collection produces multiple
-     records/sec on Jetstream).
-  3. Re-check:
+  2. Wait 60 seconds (a popular collection produces multiple
+     records/sec on Jetstream; a low-traffic deployment may only
+     see one event per ~30s).
+  3. Re-capture and diff:
      ```bash
-     COUNT_AFTER=$(curl -s $BASE_URL/stats | jq .records)
-     echo "delta: $((COUNT_AFTER - COUNT_BEFORE))"
+     curl -s $BASE_URL/metrics \
+       | grep '^hypergoat_jetstream_events_total{' \
+       > /tmp/jetstream-after.txt
+     diff /tmp/jetstream-before.txt /tmp/jetstream-after.txt
      ```
 - **Expected**:
-  - `COUNT_AFTER > COUNT_BEFORE` by at least 1.
-  - `hypergoat_jetstream_events_total` increased by at least the
-    same delta (cross-check via `/metrics`).
-- **Cleanup**: none.
+  - `diff` shows at least one series whose value increased.
+- **Note**: `/stats records` is a softer signal — update-only
+  events and create-then-delete cycles process correctly but
+  don't change the row count. `hypergoat_jetstream_events_total`
+  is the load-bearing counter; trust it over `/stats records` for
+  this test.
+- **Cleanup**: `rm /tmp/jetstream-*.txt`.
 - **Refs**: `internal/jetstream/consumer.go`,
   `internal/ingestion/processor.go`.
 
@@ -521,21 +535,33 @@ Each spec follows the same shape:
 - **Target**: EITHER.
 - **Preconditions**: at least one collection with > 2 records.
 - **Steps**:
-  1. Identify a populated collection (e.g.
-     `app.bsky.feed.post`):
+  1. List populated collections and pick one:
      ```bash
      curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
        -d '{"query":"{ collectionStats { collection count } }"}' | jq
      ```
-  2. Query the most-recent 5:
+  2. Query the most-recent 5 via the generic `records` resolver
+     (works for any registered collection):
      ```bash
      curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
-       -d '{"query":"{ records(collection:\"app.bsky.feed.post\", first:5) { edges { node { uri indexedAt } } } }"}' | jq
+       -d '{"query":"{ records(collection:\"org.hypercerts.claim.activity\", first:5) { edges { node { uri did rkey } } } }"}' | jq
      ```
 - **Expected**:
   - Five records returned.
-  - `indexedAt` values are strictly non-increasing (newest first).
   - Each `uri` is unique.
+  - Each `did` is a plausible DID.
+- **Notes**:
+  - The polymorphic `GenericRecord` type exposes only the
+    cross-collection scalars: `uri, did, rkey, cid, collection,
+    labels, pds`. The per-record `value` (the lexicon-typed
+    record body) is on the *auto-generated per-collection* types
+    (e.g. `orgHypercertsClaimActivity { value }`). Use the
+    per-collection resolver if you need to inspect or filter on
+    record-body fields.
+  - To verify the most-recent-first ordering, use the
+    per-collection resolver: it exposes `indexedAt` /
+    `createdAt` so the timestamps are visible. The generic
+    `records` resolver doesn't expose those scalars.
 - **Cleanup**: none.
 - **Refs**: `internal/database/repositories/records.go`
   `GetByCollectionWithKeysetCursor`.
@@ -547,15 +573,30 @@ Each spec follows the same shape:
 
 - **Coverage**: per-DID filtering, deduped + sorted before binding.
 - **Target**: EITHER.
-- **Preconditions**: identify two DIDs with records in the same
+- **Preconditions**: identify a DID with records in the target
   collection.
 - **Steps**:
-  1. Get a small unfiltered baseline (10 records).
+  1. Get a small unfiltered baseline from the per-collection
+     resolver:
+     ```bash
+     curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
+       -d '{"query":"{ orgHypercertsClaimActivity(first:10) { edges { node { did } } } }"}' | jq
+     ```
   2. Pick the DID of the first record from the baseline.
-  3. Query with `authors: ["did:plc:..."]` — single DID.
+  3. Filter by that DID:
+     ```bash
+     curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
+       -d '{"query":"{ orgHypercertsClaimActivity(authors:[\"did:plc:...\"], first:5) { edges { node { did } } } }"}' | jq
+     ```
 - **Expected**:
   - Every returned record has `did` matching the filter value.
   - Count is less than or equal to the baseline.
+- **Notes**: `authors` is an argument on the *per-collection*
+  auto-generated resolvers (e.g. `orgHypercertsClaimActivity`),
+  not on the polymorphic `records` resolver. The polymorphic
+  resolver only takes `collection, search, labels, labelerDids,
+  excludeLabels, excludePds, first, after` — author filtering
+  requires the per-collection path.
 - **Cleanup**: none.
 
 ---
@@ -569,17 +610,23 @@ Each spec follows the same shape:
   to "show everything."
 - **Target**: EITHER.
 - **Steps**:
-  1. Query with `authors: []` (empty list, NOT omitted):
+  1. Query a per-collection resolver with `authors: []` (empty
+     list, NOT omitted):
      ```bash
      curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
-       -d '{"query":"{ records(collection:\"app.bsky.feed.post\", authors: [], first:10) { edges { node { uri } } totalCount } }"}' | jq
+       -d '{"query":"{ orgHypercertsClaimActivity(authors:[], first:10) { edges { node { uri } } pageInfo { hasNextPage } } }"}' | jq
      ```
 - **Expected**:
   - `edges` is empty.
-  - `totalCount` is 0.
-  - Service log shows
+  - `pageInfo.hasNextPage` is `false`.
+  - Service log (when checkable on LOCAL) shows
     `"records filter short-circuited on empty authors"` — the
-    short-circuit avoids a DB round trip.
+    short-circuit avoids a DB round trip. Not observable on
+    DEV-DEPLOYED; the wire-level contract is the load-bearing
+    assertion.
+- **Notes**: same as E2 — use the per-collection resolver. The
+  polymorphic `records` resolver does not accept `authors`, so
+  the empty-vs-omitted distinction is not testable through it.
 - **Cleanup**: none.
 - **Refs**: `internal/database/repositories/records.go`
   `RecordFilter.Authors` doc, `GetByCollectionFiltered`.
@@ -614,15 +661,28 @@ Each spec follows the same shape:
 - **Coverage**: `search_vector` GIN index, `plainto_tsquery('english', ...)`.
 - **Target**: EITHER.
 - **Preconditions**: a collection whose records contain English
-  text (`app.bsky.feed.post` works).
+  text — pick any populated collection from `collectionStats`.
 - **Steps**:
-  1. Query with a common word likely to match many posts, e.g.
-     `search: "hello"`.
+  1. Note baseline of `hypergoat_records_search_applied_total`
+     in `/metrics`.
+  2. Query with a common word:
+     ```bash
+     curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
+       -d '{"query":"{ orgHypercertsClaimActivity(search:\"climate\", first:3) { edges { node { uri did } } } }"}' | jq
+     ```
+  3. Re-check the metric.
 - **Expected**:
-  - Results returned; each record's content includes the search
-    term or a tsvector-related stem.
-  - `hypergoat_records_search_applied_total` increased by 1
-    (check `/metrics`).
+  - Results returned (`edges` non-empty, assuming the term has
+    matches in the chosen collection).
+  - `hypergoat_records_search_applied_total` increased by 1.
+- **Notes**: per-collection types expose the lexicon-typed `value`
+  field (e.g. `{ value { description } }` on
+  `OrgHypercertsClaimActivity`), but field names vary per
+  collection — inspect with introspection
+  (`__type(name: "OrgHypercertsClaimActivity") { fields { name } }`)
+  before querying it. The minimum verifiable contract is "search
+  is wired and returns *some* result" — content relevance is
+  better checked by a per-collection test that knows its schema.
 - **Cleanup**: none.
 
 ---
@@ -655,29 +715,38 @@ Each spec follows the same shape:
   test in `filter_unit_test.go` guards the constant ↔ migration
   byte-level coupling; this behavioral test verifies the planner
   actually picks the index.
-- **Target**: EITHER (needs `EXPLAIN ANALYZE` access to the DB).
+- **Target**: LOCAL for the EXPLAIN check (needs psql); the wire-
+  level half (`contributor` filter returns matching records) is
+  EITHER.
 - **Preconditions**: at least 1000 records in
   `org.hypercerts.claim.activity` with various contributors.
 - **Steps**:
   1. Issue a contributor-filtered query that returns a small
-     result set:
+     result set (note: the field is `contributor` *singular*, not
+     `contributors`):
      ```graphql
      {
        orgHypercertsClaimActivity(
-         where: { contributors: { eq: "did:plc:..." } }
+         where: { contributor: { eq: "did:plc:..." } }
          first: 10
        ) { edges { node { uri } } }
      }
      ```
-  2. Connect to Postgres and run `EXPLAIN ANALYZE` for the
-     equivalent SQL (find it in the service log at debug level,
-     or reconstruct: `SELECT ... WHERE
+     Verify the response includes records authored both BY the
+     filtered DID and by other DIDs that LIST the filtered DID as
+     a contributor — the filter matches contributors, not
+     authors.
+  2. (LOCAL only — needs psql) Connect to Postgres and run
+     `EXPLAIN ANALYZE` for the equivalent SQL (reconstruct:
+     `SELECT ... WHERE
      record_contributor_identities(r.json) @> ARRAY['did:plc:...']::text[]`).
 - **Expected**:
-  - `EXPLAIN ANALYZE` shows
+  - Step 1: matching records returned, including both
+    authored-by and contributor-of records for the filter DID.
+  - Step 2: `EXPLAIN ANALYZE` shows
     `Bitmap Index Scan on idx_record_contributor_identities`.
-  - Execution time is under 100ms (vs. multiple seconds for a
-    sequential scan on a populated table).
+  - Step 2: Execution time is under 100ms (vs. multiple seconds
+    for a sequential scan on a populated table).
 - **Cleanup**: none.
 - **Refs**: migration 024,
   `internal/database/repositories/filter.go` `buildContributorFilter`,
