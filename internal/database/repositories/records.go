@@ -777,6 +777,37 @@ func (r *RecordsRepository) GetCollectionCount(ctx context.Context, collection s
 	return count, err
 }
 
+// CountAwardsByBadgeURI returns the number of
+// app.certified.badge.award records whose `badge.uri` strongRef
+// equals the given URI. Backs the awardCount derived field on
+// AppCertifiedBadgeDefinitionRecord (issue #89).
+//
+// The query uses a partial expression index from migration 030
+// — byte-for-byte expression match is load-bearing, pinned by
+// TestCountAwardsByBadgeURI_IndexExpressionMatchesMigration030.
+//
+// Empty URI returns (0, nil) — not an error. The resolver caller
+// (resolveAwardCount) treats a missing source URI the same as
+// zero awards.
+func (r *RecordsRepository) CountAwardsByBadgeURI(ctx context.Context, badgeURI string) (int64, error) {
+	if badgeURI == "" {
+		return 0, nil
+	}
+	var count int64
+	err := r.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM record
+		 WHERE collection = $1
+		   AND json->'badge'->>'uri' = $2`,
+		[]database.Value{
+			database.Text("app.certified.badge.award"),
+			database.Text(badgeURI),
+		}, &count)
+	if err != nil {
+		return 0, fmt.Errorf("count awards by badge URI: %w", err)
+	}
+	return count, nil
+}
+
 // fieldIndexName generates a deterministic index name from collection and field.
 func fieldIndexName(collection, field string) string {
 	col := strings.ReplaceAll(collection, ".", "_")

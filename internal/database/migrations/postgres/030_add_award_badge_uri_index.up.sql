@@ -1,0 +1,50 @@
+-- no-transaction
+-- Partial btree expression index on `json->'badge'->>'uri'` for
+-- app.certified.badge.award records. Pairs with the runtime SQL
+-- `r.collection = $1 AND r.json->'badge'->>'uri' = $2` emitted by
+-- RecordsRepository.CountAwardsByBadgeURI in
+-- internal/database/repositories/records.go.
+--
+-- Backs the awardCount derived field on
+-- AppCertifiedBadgeDefinitionRecord (issue #89), which fires once
+-- per definition row in a page. Without this index the COUNT
+-- query degrades to a sequential scan over the badge.award
+-- collection — even at modest scale that compounds into hundreds
+-- of milliseconds across a 100-row page.
+--
+-- Partial — scoped to badge.award records only. The collection
+-- predicate matches the resolver's parameter-bound
+-- `r.collection = $1` via Postgres's partial-index implication
+-- (predicate_implied_by, same mechanism that powers migrations
+-- 026 and 029).
+--
+-- Why NOT `AND jsonb_typeof(json->'badge') = 'object'` here: an
+-- earlier draft would have included that as defensive. Skipped
+-- for the same reason migration 029's R1.1 caught: Postgres's
+-- structural predicate_implied_by cannot prove that
+-- `r.json->'badge'->>'uri' = $2` implies the typeof predicate —
+-- they reference different sub-expressions. Adding the typeof
+-- clause would create an index the planner refuses to use,
+-- silently degrading the COUNT to a sequential scan. The lexicon
+-- requires `badge` to be a strongRef object; if a row violates
+-- that, `->>'uri'` returns NULL and indexes as NULL.
+--
+-- IMMUTABLE: `->'badge'->>'uri'` on jsonb is composed of
+-- IMMUTABLE operators, safe in an index.
+--
+-- CONCURRENTLY: no exclusive lock on the table, but must run
+-- outside a transaction. The migration runner detects the
+-- `-- no-transaction` directive on line 1 and skips its
+-- BEGIN/COMMIT wrapper. Without it pgx rejects with SQLSTATE
+-- 25001 (lesson from CI commit cb06896 on migration 021).
+--
+-- Operator note: if this migration runs but the index ends up
+-- INVALID (a known foot-gun of CONCURRENTLY + IF NOT EXISTS),
+-- recover by running `DROP INDEX CONCURRENTLY
+-- idx_record_award_badge_uri` then re-running this migration.
+-- A RUNBOOK section documenting this once for all CONCURRENTLY
+-- migrations is tracked as follow-up §9.5 in
+-- docs/issue-89/plan.md.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_record_award_badge_uri
+    ON record ((json->'badge'->>'uri'))
+    WHERE collection = 'app.certified.badge.award';

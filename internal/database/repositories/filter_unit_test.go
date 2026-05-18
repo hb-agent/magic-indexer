@@ -1378,6 +1378,48 @@ func TestBuildFilterGroupClause_JoinedFilter_CapEnforced(t *testing.T) {
 	}
 }
 
+// E12.4 (#89): byte-for-byte coupling between CountAwardsByBadgeURI's
+// emitted SQL and migration 030's partial expression index. If
+// either side is edited without the other, the planner stops matching
+// runtime queries to the index and CountAwardsByBadgeURI silently
+// degrades from index-scan to O(award-collection-size). Same shape as
+// TestStringSubjectFilter_IndexExpressionMatchesMigration029.
+//
+// Failure here means: update the migration's expression to match the
+// new helper SQL, or update the helper SQL to match the new index.
+// The two MUST agree.
+func TestCountAwardsByBadgeURI_IndexExpressionMatchesMigration030(t *testing.T) {
+	migrationPath := findRepoFile(t,
+		"internal/database/migrations/postgres/030_add_award_badge_uri_index.up.sql")
+	migrationBytes, err := os.ReadFile(migrationPath)
+	if err != nil {
+		t.Fatalf("read migration 030: %v", err)
+	}
+	migration := string(migrationBytes)
+
+	indexedExprInMigration := extractBtreeExpression(t, migration)
+	indexedExprInMigration = strings.TrimSpace(indexedExprInMigration)
+	indexedExprInMigration = strings.TrimPrefix(indexedExprInMigration, "(")
+	indexedExprInMigration = strings.TrimSuffix(indexedExprInMigration, ")")
+	indexedExprInMigration = strings.TrimSpace(indexedExprInMigration)
+	const wantExpr = "json->'badge'->>'uri'"
+	if indexedExprInMigration != wantExpr {
+		t.Errorf("migration 030 index expression = %q, want %q — if you changed the migration, also update CountAwardsByBadgeURI in records.go (and vice-versa)",
+			indexedExprInMigration, wantExpr)
+	}
+
+	// Cross-check the helper's SQL contains the same expression
+	// against the same column name. Read records.go and assert.
+	helperPath := findRepoFile(t, "internal/database/repositories/records.go")
+	helperBytes, err := os.ReadFile(helperPath)
+	if err != nil {
+		t.Fatalf("read records.go: %v", err)
+	}
+	if !strings.Contains(string(helperBytes), wantExpr) {
+		t.Errorf("CountAwardsByBadgeURI in records.go does not contain the expression %q — index/runtime drift", wantExpr)
+	}
+}
+
 // E11.1 (#88): single ArrayFilter with one inner equality leaf
 // emits the EXISTS+jsonb_array_elements+CASE-WHEN shape; inner
 // clause takes the JSON-containment path (`e.json @> ...::jsonb`)
