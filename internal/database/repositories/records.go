@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -814,9 +815,51 @@ func fieldIndexName(collection, field string) string {
 	return fmt.Sprintf("idx_record_%s_%s", col, field)
 }
 
+// collectionNameRegex is the strict shape an NSID-style collection
+// name must match before it can be interpolated into a DDL string.
+// Per the AT Protocol NSID spec: dot-separated segments, each
+// matching [a-z][a-z0-9-]* (no leading digit, no consecutive dots,
+// no uppercase, no special characters). The total-length cap of 256
+// is much larger than any real NSID; it's a defence against
+// pathological inputs, not a spec ceiling.
+//
+// This is the only validator standing between an admin-supplied
+// `collection` string and a CREATE/DROP INDEX DDL — Postgres does
+// not parameterise object identifiers, so the value is interpolated
+// raw into the SQL. The regex must NEVER be loosened without a
+// review of the call sites in CreateFieldIndex / DropFieldIndex.
+var collectionNameRegex = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z][a-zA-Z0-9-]*){2,}$`)
+
+// validateCollectionName returns an error if the given string is not
+// safe to interpolate into a DDL identifier or literal. Used by
+// CreateFieldIndex and DropFieldIndex; should be the FIRST line of
+// every admin path that consumes a collection name into raw SQL.
+func validateCollectionName(collection string) error {
+	if collection == "" {
+		return errors.New("collection name is required")
+	}
+	if len(collection) > 256 {
+		return fmt.Errorf("collection name exceeds 256-character cap (got %d)", len(collection))
+	}
+	if !collectionNameRegex.MatchString(collection) {
+		return fmt.Errorf("invalid collection name %q: must match NSID format [a-z][a-z0-9]*(.[a-z][a-zA-Z0-9-]*){2,}", collection)
+	}
+	return nil
+}
+
 // CreateFieldIndex creates a partial expression index on a JSON field for a
 // specific collection. Runs outside a transaction (CONCURRENTLY requirement).
+//
+// SECURITY: `collection` is interpolated raw into the DDL — Postgres
+// does not parameterise object identifiers or partial-index
+// predicates. validateCollectionName is the only gate that ensures
+// the value cannot break out of the single-quote wrapping or
+// otherwise inject SQL. Treat any change to that validator as a
+// security diff.
 func (r *RecordsRepository) CreateFieldIndex(ctx context.Context, collection, field string) (string, error) {
+	if err := validateCollectionName(collection); err != nil {
+		return "", err
+	}
 	if err := ValidateFieldName(field); err != nil {
 		return "", fmt.Errorf("invalid field name: %w", err)
 	}
@@ -834,7 +877,11 @@ func (r *RecordsRepository) CreateFieldIndex(ctx context.Context, collection, fi
 }
 
 // DropFieldIndex drops a previously created field expression index.
+// See CreateFieldIndex for the security note on the collection arg.
 func (r *RecordsRepository) DropFieldIndex(ctx context.Context, collection, field string) error {
+	if err := validateCollectionName(collection); err != nil {
+		return err
+	}
 	if err := ValidateFieldName(field); err != nil {
 		return fmt.Errorf("invalid field name: %w", err)
 	}

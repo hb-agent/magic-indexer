@@ -1682,3 +1682,78 @@ func TestBuildFilterGroupClause_ArrayFilter_CapEnforced(t *testing.T) {
 		t.Errorf("error message should mention the cap; got: %v", err)
 	}
 }
+
+// TestValidateCollectionName pins the regex shape that guards
+// CreateFieldIndex / DropFieldIndex from SQL injection via the
+// `collection` arg. The two DDL helpers interpolate `collection`
+// raw into a CREATE/DROP INDEX string because Postgres does not
+// parameterise object identifiers or partial-index predicates;
+// validateCollectionName is the only gate. Loosening this regex
+// without revisiting those call sites is a security diff. See
+// overnight finding S-1.
+func TestValidateCollectionName(t *testing.T) {
+	t.Parallel()
+
+	// Valid NSIDs — production examples + boundary cases.
+	for _, ok := range []string{
+		"app.bsky.feed.post",
+		"app.certified.badge.award",
+		"app.certified.badge.definition",
+		"app.certified.graph.follow",
+		"org.hypercerts.collection",
+		"com.atproto.repo.strongRef",
+		"a.b.c", // minimal 3-segment shape
+		"a1.b2.c3",
+		"a.b-c.d-e", // hyphens permitted after the first character
+	} {
+		ok := ok
+		t.Run("ok/"+ok, func(t *testing.T) {
+			t.Parallel()
+			if err := validateCollectionName(ok); err != nil {
+				t.Errorf("validateCollectionName(%q) returned error %v, want nil", ok, err)
+			}
+		})
+	}
+
+	// Invalid — must be rejected. The SQL-injection payloads are
+	// the load-bearing assertions here; the rest are general
+	// shape checks.
+	for _, bad := range []string{
+		"",                              // empty
+		"only",                          // too few segments
+		"only.one",                      // too few segments
+		"App.Bsky.Feed",                 // uppercase rejected
+		"app..bsky.feed",                // empty segment
+		"app.bsky.-feed",                // segment starts with hyphen
+		"app.bsky.feed_post",            // underscore not allowed
+		"app.bsky.feed post",            // whitespace
+		"1bad.first.char",               // segment starts with digit
+		"app.bsky.feed';--",             // SQL injection: terminator
+		"app.bsky.feed'; DROP TABLE r;", // SQL injection: DDL
+		"app.bsky.feed') OR ('1'='1",    // SQL injection: predicate
+		"app/bsky/feed",                 // path separator
+		"app\\bsky.feed",                // backslash
+		"app.bsky.\x00feed",             // null byte
+	} {
+		bad := bad
+		t.Run("bad/"+bad, func(t *testing.T) {
+			t.Parallel()
+			if err := validateCollectionName(bad); err == nil {
+				t.Errorf("validateCollectionName(%q) returned nil; expected error", bad)
+			}
+		})
+	}
+
+	t.Run("bad/over-256-chars", func(t *testing.T) {
+		t.Parallel()
+		// Build a string > 256 chars that would otherwise match the
+		// regex (alternating segments).
+		long := "a"
+		for len(long) < 257 {
+			long += ".bb"
+		}
+		if err := validateCollectionName(long); err == nil {
+			t.Errorf("validateCollectionName accepted %d-char string; cap should reject", len(long))
+		}
+	})
+}
