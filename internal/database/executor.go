@@ -81,10 +81,6 @@ func QueryError(msg string, cause error) *DbError {
 	return &DbError{Type: "query", Message: msg, Cause: cause}
 }
 
-func DecodeError(msg string, cause error) *DbError {
-	return &DbError{Type: "decode", Message: msg, Cause: cause}
-}
-
 func ConstraintError(msg string, cause error) *DbError {
 	return &DbError{Type: "constraint", Message: msg, Cause: cause}
 }
