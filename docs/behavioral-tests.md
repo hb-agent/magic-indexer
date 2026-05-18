@@ -104,6 +104,7 @@ Each test declares a `Target`:
 | [E8](#e8) | BadgeAward `subject` filter matches `defs#did` object shape | EITHER | issue #65 |
 | [E9](#e9) | GraphFollow `subject` filter returns followers; index-served | EITHER | issue #86 |
 | [E10](#e10) | BadgeAward nested-where on `badge` filters by joined definition | EITHER | issue #87 |
+| [E11](#e11) | Collection nested-where on `items` filters by array element | EITHER | issue #88 |
 | **F — GraphQL subscriptions** |
 | [F1](#f1) | Subscription receives a live create event | EITHER | needs ws client (wscat) |
 | **G — OAuth (admin auth)** |
@@ -962,6 +963,106 @@ Each spec follows the same shape:
   registry entry at
   `internal/graphql/schema/where.go` `joinedWhereRegistry`;
   extractor branch at `extractFieldFiltersRecursive`.
+
+---
+
+### E11
+**Collection nested-where on `items` filters by joined element.**
+
+- **Coverage**: issue #88 — the certified-app's cert-detail
+  page reads "what project collections contain this cert?" in
+  a single round-trip via
+  `orgHypercertsCollection(where: { type: { eqi: "project" },
+  items: { itemIdentifier: { uri: { eq: $certUri } } } })`.
+  The nested `items` filter translates to an EXISTS subquery
+  over `jsonb_array_elements(r.json->'items')` with any-element
+  semantics. Without this the client makes a PDS-only same-DID
+  scan (cross-DID projects are invisible) and joins client-side
+  on every item.
+- **Target**: EITHER for the wire-level query; LOCAL for the
+  `EXPLAIN ANALYZE` check.
+- **Preconditions**:
+  - `org.hypercerts.collection` lexicon registered with the
+    `#item` def present. On DEV-DEPLOYED already present (the
+    response field `items: [OrgHypercertsCollectionItem!]`
+    confirms the def is loaded).
+  - At least one collection of type `project` whose `items`
+    array contains a known cert URI.
+- **Steps**:
+  1. Verify schema:
+     ```bash
+     curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
+       -d '{"query":"{ __type(name:\"OrgHypercertsCollectionWhereInput\") { inputFields { name type { name } } } }"}' \
+       | jq '.data.__type.inputFields | map(select(.name == "items"))'
+     ```
+     Expect a single entry with
+     `type.name == "OrgHypercertsCollectionItemWhereInput"`.
+  2. Issue the exact query:
+     ```bash
+     curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
+       -d '{"query":"{ orgHypercertsCollection(where: { type: { eqi: \"project\" }, items: { itemIdentifier: { uri: { eq: \"<cert-uri>\" } } } }, first: 50) { edges { node { uri did title } } pageInfo { hasNextPage } } }"}' \
+       | jq
+     ```
+  3. Cross-check against the 2-call workaround (pull all
+     project collections via the issue's own PDS-only path;
+     client-side filter on `items[*].itemIdentifier.uri`).
+  4. (LOCAL only) `EXPLAIN ANALYZE` the equivalent SQL:
+     ```sql
+     EXPLAIN ANALYZE
+     SELECT r.uri, r.cid, r.did
+     FROM record r LEFT JOIN actor a ON r.did = a.did
+     WHERE r.collection = 'org.hypercerts.collection'
+       AND lower((r.json->>'type') COLLATE "C") = 'project'
+       AND EXISTS (
+         SELECT 1 FROM jsonb_array_elements(
+           CASE WHEN jsonb_typeof(r.json->'items') = 'array'
+                THEN r.json->'items'
+                ELSE '[]'::jsonb END
+         ) AS e(json)
+         WHERE e.json @> '{"itemIdentifier":{"uri":"<cert-uri>"}}'::jsonb
+       )
+     ORDER BY r.indexed_at DESC, r.uri DESC
+     LIMIT 50;
+     ```
+- **Expected**:
+  - Step 1: `items` field present, typed as the element's
+    WhereInput (`OrgHypercertsCollectionItemWhereInput`).
+  - Step 2: returns collections of type `project` whose `items`
+    array contains at least one element with a matching
+    `itemIdentifier.uri`. Cross-DID matches surface (the prior
+    same-DID-only limitation is lifted). No GraphQL errors.
+  - Step 3: identical URI sets — modulo cross-DID matches,
+    which the workaround would have missed.
+  - Step 4: plan shows `Function Scan on jsonb_array_elements`
+    nested under the outer `record` scan; no secondary record-
+    table scan.
+- **Composition check (optional)**: `_or` inside the inner —
+  ```graphql
+  { orgHypercertsCollection(where: {
+      items: { _or: [
+        { itemIdentifier: { uri: { eq: "<uri-1>" } } },
+        { itemIdentifier: { uri: { eq: "<uri-2>" } } }
+      ] }
+    }, first: 5) { edges { node { uri } } } }
+  ```
+  Confirms `_or` is wired inside the element pseudo-lexicon.
+- **Defensive-path check (optional)**: a collection with a
+  missing or non-array `items` field is silently skipped (no
+  SQLSTATE 22023 from `jsonb_array_elements` on non-array
+  input) — the emitter's `CASE WHEN jsonb_typeof = 'array'`
+  guard collapses to `'[]'::jsonb` and the EXISTS returns
+  false. Test by finding (or temporarily inserting on LOCAL) a
+  collection record whose `items` is `null` / scalar / object,
+  and confirming the result set is unchanged.
+- **Cleanup**: none.
+- **Refs**: issue #88; AST in
+  `internal/database/repositories/filter.go` (`ArrayFilter`,
+  search for "Arrays"); registry at
+  `internal/graphql/schema/where.go` `arrayWhereRegistry`;
+  extractor branch at `extractFieldFiltersRecursive`;
+  builder extension at
+  `internal/graphql/schema/builder.go` `buildWhereInputTypes`
+  pass 2.
 
 ---
 
