@@ -102,6 +102,14 @@ func (b *Builder) Build() (*graphql.Schema, error) {
 // buildQueryType (the previous approach) hit non-determinism on
 // map iteration.
 func (b *Builder) buildWhereInputTypes() {
+	// Call exactly once per Builder lifetime. Pass 2's
+	// AddFieldConfig overwrites by field-name within a parent
+	// input, but buildArrayElementInputType (#88) constructs a NEW
+	// *graphql.InputObject on each invocation — a second call here
+	// would register two distinct types with the same Name() and
+	// graphql-go's schema-validation pass would raise. Build()
+	// invokes once at line ~68; no other caller exists today
+	// (IR1.9).
 	// Pass 1.
 	for _, lex := range b.registry.GetCollectionLexicons() {
 		input := buildWhereInputType(lex)

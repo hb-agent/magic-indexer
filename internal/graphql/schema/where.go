@@ -452,6 +452,14 @@ func extractFieldFiltersRecursive(whereArg interface{}, lex *lexicon.Lexicon, re
 		// that the SQL builder will emit as an EXISTS-over-
 		// jsonb_array_elements subquery. One-level bound: the inner
 		// must not itself contain Arrays.
+		//
+		// Branch precedence at this `for fieldName, ...` loop:
+		// joined-where > array-where > filterRegistry > scalar fall-
+		// through. Today no fieldName appears in more than one
+		// registry for the same lexID, so the order is only
+		// load-bearing for a future contributor adding a colliding
+		// entry — the explicit ordering here makes that a deliberate
+		// edit rather than an accident (IR1.7).
 		if lex != nil {
 			if ad, ok := lookupArrayWhereDescriptor(lex.ID, fieldName); ok {
 				elemLex, err := makeElementPseudoLexicon(lex, ad)

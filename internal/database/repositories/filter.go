@@ -664,7 +664,7 @@ func buildSingleFilter(f FieldFilter, paramIdx int, alias string) (string, []int
 	case KindArrayContributor, KindUnionSubject, KindStringSubject:
 		if alias != "r" {
 			return "", nil, paramIdx, fmt.Errorf(
-				"lexicon-specific filter kind %v cannot be used inside a joined-where subquery (alias %q); only the outer scope is supported",
+				"lexicon-specific filter kind %v cannot be used inside a nested subquery (joined-where or array-element, alias %q); only the outer scope is supported",
 				f.Kind, alias)
 		}
 		switch f.Kind {
