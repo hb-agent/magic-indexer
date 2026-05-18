@@ -803,12 +803,16 @@ func (r *RecordsRepository) CountByCollectionFiltered(
 	filter RecordFilter,
 	filterGroup *FilterGroup,
 ) (int64, error) {
-	// No collection-name validation: this method is internal to the
-	// resolver layer; collection arrives via the GraphQL resolver
-	// which sourced it from the lexicon registry. The DDL paths
-	// (CreateFieldIndex / DropFieldIndex) are the ones that need
-	// validateCollectionName because they interpolate the value
-	// into raw SQL.
+	// No collection-name validation needed: the SQL emitted by this
+	// method binds collection as $1 (never interpolated into the
+	// query string), so an untrusted value can't escape parameter
+	// binding. The DDL paths (CreateFieldIndex / DropFieldIndex)
+	// run validateCollectionName because Postgres does not
+	// parameterise object identifiers — those paths build raw DDL
+	// strings and have a real injection surface. The generic
+	// `records(collection: String!)` resolver passes user-supplied
+	// collection through to this method; parameter binding is what
+	// keeps that safe, not upstream validation.
 
 	// Authors slice empty-but-non-nil → match nothing (same load-
 	// bearing semantic as GetByCollectionFiltered's short-circuit).
@@ -896,7 +900,14 @@ func (r *RecordsRepository) buildFilteredWhereForCount(
 			fmt.Sprintf("r.did IN (%s)", strings.Join(didPhs, ", ")))
 	}
 
-	// Full-text search.
+	// Full-text search. Metric emission is deliberately omitted
+	// here: this helper is called from the COUNT path
+	// (CountByCollectionFiltered) which runs ALONGSIDE the SELECT
+	// path on every filtered+totalCount request. If both emitted
+	// the metric we'd double-count the search-applied counter.
+	// The SELECT path's own copy still emits;
+	// CountByCollectionFiltered is a derived value and shouldn't
+	// double-fire.
 	if filter.Search != "" {
 		search := filter.Search
 		if len(search) > MaxSearchLength {
@@ -905,7 +916,6 @@ func (r *RecordsRepository) buildFilteredWhereForCount(
 		whereClauses = append(whereClauses,
 			fmt.Sprintf("r.search_vector @@ plainto_tsquery('english', %s)", ph()))
 		args = append(args, search)
-		metrics.RecordSearchApplied()
 	}
 
 	// Field filters from `where` argument.
