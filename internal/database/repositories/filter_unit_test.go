@@ -1418,6 +1418,19 @@ func TestCountAwardsByBadgeURI_IndexExpressionMatchesMigration030(t *testing.T) 
 	if !strings.Contains(string(helperBytes), wantExpr) {
 		t.Errorf("CountAwardsByBadgeURI in records.go does not contain the expression %q — index/runtime drift", wantExpr)
 	}
+	// IR1.1 (#89): the partial-index predicate is
+	// `WHERE collection = 'app.certified.badge.award'`. If the
+	// helper's collection literal drifts (e.g. a typo'd
+	// "app.certified.badge.awards"), predicate_implied_by would
+	// silently fail and the planner would seq-scan. Assert both
+	// sides contain the same collection literal.
+	const wantCollection = "app.certified.badge.award"
+	if !strings.Contains(migration, wantCollection) {
+		t.Errorf("migration 030 partial predicate does not contain collection literal %q", wantCollection)
+	}
+	if !strings.Contains(string(helperBytes), wantCollection) {
+		t.Errorf("CountAwardsByBadgeURI in records.go does not contain collection literal %q — index/runtime drift", wantCollection)
+	}
 }
 
 // E11.1 (#88): single ArrayFilter with one inner equality leaf

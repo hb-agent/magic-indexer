@@ -62,6 +62,13 @@ var derivedFieldRegistry = map[string]map[string]derivedFieldDescriptor{
 func resolveAwardCount(p graphql.ResolveParams) (interface{}, error) {
 	src, ok := p.Source.(map[string]interface{})
 	if !ok {
+		// IR1.2 (#89): the connection resolver always sets a
+		// map source (builder.go:952), so this path is
+		// "shouldn't happen." If a future refactor routes a
+		// typed struct through here, awardCount would silently
+		// return 0 without this warn — make the dead-letter
+		// case observable.
+		slog.WarnContext(p.Context, "awardCount: source is not a map", "type", fmt.Sprintf("%T", p.Source))
 		return 0, nil
 	}
 	uri, _ := src["uri"].(string)
