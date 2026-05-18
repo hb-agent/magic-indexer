@@ -100,6 +100,23 @@ var DIDFilterInput = graphql.NewInputObject(graphql.InputObjectConfig{
 	},
 })
 
+// StrongRefFilterInput provides per-subfield filtering on a
+// com.atproto.repo.strongRef shape ({uri, cid}). Both subfields
+// route through StringFilterInput. Currently used only inside
+// array-element WhereInputs (e.g. OrgHypercertsCollectionItem
+// WhereInput.itemIdentifier); see follow-up §9.8 in
+// docs/issue-88/plan.md for the dispatch-from-top-level path
+// when a record property of strongRef type wants direct
+// filtering.
+var StrongRefFilterInput = graphql.NewInputObject(graphql.InputObjectConfig{
+	Name:        "StrongRefFilterInput",
+	Description: "Filter conditions for a com.atproto.repo.strongRef value ({uri, cid}). Equality on uri is the load-bearing case — it matches a specific record identity, regardless of which version (cid) is currently referenced. Equality on cid additionally pins the exact version.",
+	Fields: graphql.InputObjectConfigFieldMap{
+		"uri": {Type: StringFilterInput, Description: "Filter by the strongRef's uri (at://...)."},
+		"cid": {Type: StringFilterInput, Description: "Filter by the strongRef's cid (content hash)."},
+	},
+})
+
 // FilterInputForLexiconType returns the appropriate filter input type for a
 // lexicon property type. Returns nil if the type is not filterable.
 func FilterInputForLexiconType(propType string) *graphql.InputObject {

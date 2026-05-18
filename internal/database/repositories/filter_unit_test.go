@@ -1124,6 +1124,10 @@ func TestBuildSingleFilter_AliasParameter_QualifiesColumnsAndJSON(t *testing.T) 
 // future accidental registry edit gets caught at request time
 // rather than silently producing SQL against the wrong table.
 func TestBuildSingleFilter_LockedKindsRejectNonRSeqAlias(t *testing.T) {
+	// E11.7 (#88): parameterise over both non-"r" aliases — "d"
+	// (joined-where, #87) and "e" (array-element, #88). The
+	// sentinel logic is alias-agnostic (anything != "r" must be
+	// rejected for these kinds); one parametric loop covers both.
 	for _, kind := range []FilterKind{KindArrayContributor, KindUnionSubject, KindStringSubject} {
 		kind := kind
 		t.Run(fmt.Sprintf("kind=%v", kind), func(t *testing.T) {
@@ -1138,10 +1142,15 @@ func TestBuildSingleFilter_LockedKindsRejectNonRSeqAlias(t *testing.T) {
 			if _, _, _, err := buildSingleFilter(f, 1, "r"); err != nil {
 				t.Errorf("kind %v rejected with alias r (should be accepted): %v", kind, err)
 			}
-			// Inner alias "d": rejected.
-			_, _, _, err := buildSingleFilter(f, 1, "d")
-			if err == nil {
-				t.Errorf("kind %v accepted with alias d (sentinel failed); future-proofing of locked-kind contract is broken", kind)
+			// Non-"r" aliases ("d" joined, "e" array-element): rejected.
+			for _, alias := range []string{"d", "e"} {
+				alias := alias
+				t.Run("alias="+alias, func(t *testing.T) {
+					_, _, _, err := buildSingleFilter(f, 1, alias)
+					if err == nil {
+						t.Errorf("kind %v accepted with alias %q (sentinel failed); future-proofing of locked-kind contract is broken", kind, alias)
+					}
+				})
 			}
 		})
 	}
@@ -1355,6 +1364,256 @@ func TestBuildFilterGroupClause_JoinedFilter_CapEnforced(t *testing.T) {
 					Filters: []FieldFilter{
 						{FieldName: "badgeType", Operator: OpEq, Value: "a", IsJSON: true},
 						{FieldName: "badgeType", Operator: OpEq, Value: "b", IsJSON: true},
+					},
+				},
+			},
+		},
+	}
+	_, _, err := BuildFilterGroupClause(group, 1)
+	if err == nil {
+		t.Fatalf("expected error when total conditions exceed MaxFilterConditions (%d), got nil", MaxFilterConditions)
+	}
+	if !strings.Contains(err.Error(), "too many filter conditions") {
+		t.Errorf("error message should mention the cap; got: %v", err)
+	}
+}
+
+// E11.1 (#88): single ArrayFilter with one inner equality leaf
+// emits the EXISTS+jsonb_array_elements+CASE-WHEN shape; inner
+// clause takes the JSON-containment path (`e.json @> ...::jsonb`)
+// since the leaf is IsJSON+OpEq. No collection parameter (unlike
+// joined-where) — array-element subqueries iterate r.json->...
+// directly.
+func TestBuildFilterGroupClause_ArrayFilter_Eq(t *testing.T) {
+	group := FilterGroup{
+		Operator: GroupAND,
+		Arrays: []ArrayFilter{
+			{
+				FieldName: "items",
+				ArrayPath: "r.json->'items'",
+				Inner: FilterGroup{
+					Operator: GroupAND,
+					Filters: []FieldFilter{
+						{
+							FieldName: "itemIdentifier__uri",
+							Operator:  OpEq,
+							Value:     "at://did:plc:x/org.hypercerts.claim.activity/abc",
+							IsJSON:    true,
+						},
+					},
+				},
+			},
+		},
+	}
+	clause, params, err := BuildFilterGroupClause(group, 1)
+	if err != nil {
+		t.Fatalf("BuildFilterGroupClause: %v", err)
+	}
+	if len(params) != 1 {
+		t.Fatalf("expected 1 param (inner containment literal only), got %d: %v", len(params), params)
+	}
+	if !strings.Contains(clause, "EXISTS (SELECT 1 FROM jsonb_array_elements(") {
+		t.Errorf("clause missing EXISTS+jsonb_array_elements prefix: %s", clause)
+	}
+	if !strings.Contains(clause, "CASE WHEN jsonb_typeof(r.json->'items') = 'array' THEN r.json->'items' ELSE '[]'::jsonb END") {
+		t.Errorf("clause missing the non-array defensive CASE WHEN guard: %s", clause)
+	}
+	if !strings.Contains(clause, ") AS e(json) WHERE ") {
+		t.Errorf("clause missing the e(json) row alias + WHERE tail: %s", clause)
+	}
+	if !strings.Contains(clause, "e.json @>") {
+		t.Errorf("inner clause should use the e alias for the JSON containment path: %s", clause)
+	}
+}
+
+// E11.2 (#88): empty inner ({items: {}}) emits a bare existence
+// check — "the array has at least one element" — without a
+// dangling `WHERE ()`.
+func TestBuildFilterGroupClause_ArrayFilter_EmptyInner(t *testing.T) {
+	group := FilterGroup{
+		Operator: GroupAND,
+		Arrays: []ArrayFilter{
+			{
+				FieldName: "items",
+				ArrayPath: "r.json->'items'",
+				Inner:     FilterGroup{Operator: GroupAND},
+			},
+		},
+	}
+	clause, params, err := BuildFilterGroupClause(group, 1)
+	if err != nil {
+		t.Fatalf("BuildFilterGroupClause: %v", err)
+	}
+	if len(params) != 0 {
+		t.Fatalf("expected 0 params (no inner predicates), got %d: %v", len(params), params)
+	}
+	if strings.Contains(clause, "WHERE )") || strings.Contains(clause, "WHERE ()") {
+		t.Errorf("clause contains dangling WHERE from empty inner: %s", clause)
+	}
+	if !strings.HasSuffix(clause, "AS e(json))") {
+		t.Errorf("clause should close with the AS-clause and no WHERE tail: %s", clause)
+	}
+}
+
+// E11.3 (#88): ArrayFilter inside _or with a normal leaf —
+// both clauses joined by ` OR ` with monotonically increasing
+// parameter numbering. Outer leaf at $1, array inner at $2.
+func TestBuildFilterGroupClause_ArrayFilter_InsideOr(t *testing.T) {
+	group := FilterGroup{
+		Operator: GroupAND,
+		Children: []FilterGroup{
+			{
+				Operator: GroupOR,
+				Filters: []FieldFilter{
+					{
+						FieldName: "did",
+						Operator:  OpEq,
+						Value:     "did:plc:me",
+						IsJSON:    false,
+					},
+				},
+				Arrays: []ArrayFilter{
+					{
+						FieldName: "items",
+						ArrayPath: "r.json->'items'",
+						Inner: FilterGroup{
+							Operator: GroupAND,
+							Filters: []FieldFilter{
+								{
+									FieldName: "itemIdentifier__uri",
+									Operator:  OpEq,
+									Value:     "at://did:plc:x/org.hypercerts.claim.activity/abc",
+									IsJSON:    true,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	clause, params, err := BuildFilterGroupClause(group, 1)
+	if err != nil {
+		t.Fatalf("BuildFilterGroupClause: %v", err)
+	}
+	if len(params) != 2 {
+		t.Fatalf("expected 2 params (outer leaf + inner containment), got %d: %v", len(params), params)
+	}
+	if !strings.Contains(clause, "r.did = $1") {
+		t.Errorf("clause missing the outer leaf at $1: %s", clause)
+	}
+	if !strings.Contains(clause, " OR ") {
+		t.Errorf("clause should join the OR children with ` OR `: %s", clause)
+	}
+	if !strings.Contains(clause, "$2::jsonb") {
+		t.Errorf("inner clause should bind the containment literal at $2: %s", clause)
+	}
+	if params[0] != "did:plc:me" {
+		t.Errorf("param[0] should be the did value, got %v", params[0])
+	}
+}
+
+// E11.4 (#88): the `e` alias qualifies JSON paths in the inner
+// emission. R2.1 note: element rows have no column-style
+// references (the only column on the synthetic e(json) row IS
+// `json`), so unlike #87's joined-d alias test, this test only
+// pins the JSON path. Forcing OpNeq bypasses the OpEq+IsJSON
+// containment short-circuit and routes through jsonExtract,
+// which is the path that consults the alias parameter for the
+// `e.json->>` shape.
+func TestBuildFilterGroupClause_ArrayFilter_AliasQualifiesColumns(t *testing.T) {
+	group := FilterGroup{
+		Operator: GroupAND,
+		Arrays: []ArrayFilter{
+			{
+				FieldName: "items",
+				ArrayPath: "r.json->'items'",
+				Inner: FilterGroup{
+					Operator: GroupAND,
+					Filters: []FieldFilter{
+						{
+							FieldName: "itemWeight",
+							Operator:  OpNeq,
+							Value:     "0",
+							IsJSON:    true,
+						},
+						{
+							FieldName: "itemIdentifier__uri",
+							Operator:  OpNeq,
+							Value:     "at://did:plc:x/dropped",
+							IsJSON:    true,
+						},
+					},
+				},
+			},
+		},
+	}
+	clause, _, err := BuildFilterGroupClause(group, 1)
+	if err != nil {
+		t.Fatalf("BuildFilterGroupClause: %v", err)
+	}
+	if !strings.Contains(clause, "e.json->>'itemWeight'") {
+		t.Errorf("clause missing the e-qualified scalar JSON path for itemWeight: %s", clause)
+	}
+	if !strings.Contains(clause, "e.json->'itemIdentifier'->>'uri'") {
+		t.Errorf("clause missing the e-qualified nested JSON path for itemIdentifier.uri: %s", clause)
+	}
+}
+
+// E11.5 (#88): the inner's leaf count rolls up to the outer's
+// CountConditions(). Without the Arrays arm in CountConditions,
+// the global MaxFilterConditions cap would be silently bypassed
+// by array filters (same hazard as #87's R1.1).
+func TestArrayFilter_CountConditions(t *testing.T) {
+	group := FilterGroup{
+		Filters: []FieldFilter{
+			{FieldName: "did", Operator: OpEq, Value: "x"},
+		},
+		Arrays: []ArrayFilter{
+			{
+				FieldName: "items",
+				ArrayPath: "r.json->'items'",
+				Inner: FilterGroup{
+					Filters: []FieldFilter{
+						{FieldName: "itemIdentifier__uri", Operator: OpEq, Value: "a", IsJSON: true},
+						{FieldName: "itemIdentifier__uri", Operator: OpEq, Value: "b", IsJSON: true},
+					},
+				},
+			},
+		},
+	}
+	got := group.CountConditions()
+	const want = 3 // 1 outer + 2 inner
+	if got != want {
+		t.Errorf("CountConditions = %d, want %d (cap bypass via Arrays would report 1)", got, want)
+	}
+}
+
+// E11.6 (#88): end-to-end pin of R1.1 hazard for ArrayFilter.
+// (MaxFilterConditions - 1) outer leaves + an ArrayFilter with
+// 2 inner leaves → total exceeds the cap by 1 → error.
+func TestBuildFilterGroupClause_ArrayFilter_CapEnforced(t *testing.T) {
+	outerLeaves := make([]FieldFilter, MaxFilterConditions-1)
+	for i := range outerLeaves {
+		outerLeaves[i] = FieldFilter{
+			FieldName: "did",
+			Operator:  OpEq,
+			Value:     "did:plc:x",
+			IsJSON:    false,
+		}
+	}
+	group := FilterGroup{
+		Operator: GroupAND,
+		Filters:  outerLeaves,
+		Arrays: []ArrayFilter{
+			{
+				FieldName: "items",
+				ArrayPath: "r.json->'items'",
+				Inner: FilterGroup{
+					Operator: GroupAND,
+					Filters: []FieldFilter{
+						{FieldName: "itemIdentifier__uri", Operator: OpEq, Value: "a", IsJSON: true},
+						{FieldName: "itemIdentifier__uri", Operator: OpEq, Value: "b", IsJSON: true},
 					},
 				},
 			},

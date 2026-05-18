@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/GainForest/hypergoat/internal/database/repositories"
+	"github.com/GainForest/hypergoat/internal/graphql/types"
 	"github.com/GainForest/hypergoat/internal/lexicon"
 )
 
@@ -431,4 +432,248 @@ func TestExtractFieldFilters_NestedJoined_Rejected(t *testing.T) {
 	// surfaces ONE entry per parent lexicon, and the extractor's
 	// `len(inner.Joined) > 0` check (where.go) handles the
 	// future case.
+}
+
+// loadCollectionLexicon returns a registry with just
+// org.hypercerts.collection populated. Used by the array-where
+// extractor tests below.
+func loadCollectionLexicon(t *testing.T) (*lexicon.Registry, *lexicon.Lexicon) {
+	t.Helper()
+	r := lexicon.NewRegistry()
+	for _, path := range []string{
+		"../../../testdata/lexicons/org/hypercerts/collection.json",
+		"../../../testdata/lexicons/com/atproto/repo/strongRef.json",
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		lex, err := lexicon.ParseBytes(data)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		r.Register(lex)
+	}
+	lex, _ := r.GetLexicon("org.hypercerts.collection")
+	return r, lex
+}
+
+// E11.S1 (#88): pin the array-where registry shape. The literal
+// strings here are the SQL fragment surface — changes go through
+// review.
+func TestArrayWhereRegistry_CollectionItems(t *testing.T) {
+	ad, ok := lookupArrayWhereDescriptor("org.hypercerts.collection", "items")
+	if !ok {
+		t.Fatalf("registry entry for (org.hypercerts.collection, \"items\") is missing")
+	}
+	if ad.FieldName != "items" {
+		t.Errorf("FieldName = %q, want \"items\"", ad.FieldName)
+	}
+	const wantArrayPath = "r.json->'items'"
+	if ad.ArrayPath != wantArrayPath {
+		t.Errorf("ArrayPath = %q, want %q — emitted verbatim into the EXISTS subquery", ad.ArrayPath, wantArrayPath)
+	}
+	if ad.ElementDef != "item" {
+		t.Errorf("ElementDef = %q, want \"item\"", ad.ElementDef)
+	}
+	if ad.Description != collectionItemsArrayDescription {
+		t.Errorf("Description drifted from collectionItemsArrayDescription — the pinned schema-introspection text is the consumer-facing contract")
+	}
+	// Negative entries: the registry must not list lexicons that don't
+	// participate in array-where today.
+	for _, lexID := range []string{"app.certified.badge.award", "app.certified.badge.definition"} {
+		if _, hit := lookupArrayWhereDescriptor(lexID, "items"); hit {
+			t.Errorf("unexpected registry entry for (%q, \"items\")", lexID)
+		}
+	}
+}
+
+// E11.S2 (#88): schema-introspection style — confirm that
+// buildArrayElementInputType synthesises a non-nil input type
+// from the collection lexicon's #item def, exposes itemIdentifier
+// + itemWeight as filterable subfields, and that the generated
+// name follows the <RecordType>WhereInput precedent.
+func TestBuildArrayElementInputType_CollectionItem(t *testing.T) {
+	_, lex := loadCollectionLexicon(t)
+	ad, _ := lookupArrayWhereDescriptor("org.hypercerts.collection", "items")
+	input := buildArrayElementInputType(lex, ad)
+	if input == nil {
+		t.Fatalf("buildArrayElementInputType returned nil for collection.items")
+	}
+	const wantName = "OrgHypercertsCollectionItemWhereInput"
+	if input.Name() != wantName {
+		t.Errorf("input name = %q, want %q", input.Name(), wantName)
+	}
+	fields := input.Fields()
+	for _, want := range []string{"itemIdentifier", "itemWeight", "_and", "_or"} {
+		if _, ok := fields[want]; !ok {
+			t.Errorf("input is missing %q field", want)
+		}
+	}
+	// itemIdentifier must be StrongRefFilterInput, not the unfiltered ref skip.
+	if fd, ok := fields["itemIdentifier"]; ok {
+		if fd.Type != types.StrongRefFilterInput {
+			t.Errorf("itemIdentifier type = %v, want StrongRefFilterInput", fd.Type)
+		}
+	}
+}
+
+// E11.S3 (#88): happy path for the array-where extractor. The
+// where payload from the issue's example produces one Arrays
+// entry whose Inner contains the itemIdentifier__uri leaf at
+// OpEq+IsJSON (routes through the existing JSON containment
+// shape in the SQL builder).
+func TestExtractFieldFilters_NestedItemsWhere(t *testing.T) {
+	registry, lex := loadCollectionLexicon(t)
+
+	where := map[string]interface{}{
+		"type": map[string]interface{}{
+			"eqi": "project",
+		},
+		"items": map[string]interface{}{
+			"itemIdentifier": map[string]interface{}{
+				"uri": map[string]interface{}{
+					"eq": "at://did:plc:alice/org.hypercerts.claim.activity/abc",
+				},
+			},
+		},
+	}
+
+	group, err := extractFieldFilters(where, lex, registry)
+	if err != nil {
+		t.Fatalf("extractFieldFilters: %v", err)
+	}
+
+	if len(group.Filters) != 1 {
+		t.Fatalf("expected 1 outer Filters entry (type), got %d", len(group.Filters))
+	}
+	if group.Filters[0].FieldName != "type" {
+		t.Errorf("outer filter field = %q, want \"type\"", group.Filters[0].FieldName)
+	}
+	if len(group.Arrays) != 1 {
+		t.Fatalf("expected 1 Arrays entry, got %d", len(group.Arrays))
+	}
+	arr := group.Arrays[0]
+	if arr.FieldName != "items" {
+		t.Errorf("Arrays[0].FieldName = %q, want \"items\"", arr.FieldName)
+	}
+	if arr.ArrayPath != "r.json->'items'" {
+		t.Errorf("Arrays[0].ArrayPath = %q", arr.ArrayPath)
+	}
+	if len(arr.Inner.Filters) != 1 {
+		t.Fatalf("inner has %d filters, want 1", len(arr.Inner.Filters))
+	}
+	leaf := arr.Inner.Filters[0]
+	if leaf.FieldName != "itemIdentifier__uri" {
+		t.Errorf("inner leaf field = %q, want \"itemIdentifier__uri\" (__-path)", leaf.FieldName)
+	}
+	if leaf.Operator != repositories.OpEq {
+		t.Errorf("inner leaf operator = %v, want OpEq", leaf.Operator)
+	}
+	if leaf.Value != "at://did:plc:alice/org.hypercerts.claim.activity/abc" {
+		t.Errorf("inner leaf value = %v", leaf.Value)
+	}
+	if !leaf.IsJSON {
+		t.Errorf("inner leaf IsJSON = false, want true")
+	}
+	// Inner must not contain Arrays — one-level bound.
+	if len(arr.Inner.Arrays) != 0 {
+		t.Errorf("inner.Arrays should be empty (one-level bound)")
+	}
+}
+
+// E11.S4 (#88): extractor branch precedence. Joined-where is
+// checked before array-where; array-where is checked before
+// filterRegistry; filterRegistry is checked before the property
+// fall-through. Today no collision exists for the collection
+// lexicon (`items` is ONLY in arrayWhereRegistry, not in
+// joinedWhereRegistry or filterRegistry), so the test pins that
+// `items` flows into Arrays and a known scalar property
+// (`title`) flows into Filters in the same payload.
+func TestExtractFieldFilters_ItemsExtractorPrecedence(t *testing.T) {
+	registry, lex := loadCollectionLexicon(t)
+
+	where := map[string]interface{}{
+		"title": map[string]interface{}{"eq": "Q1 Impact"},
+		"items": map[string]interface{}{
+			"itemIdentifier": map[string]interface{}{
+				"uri": map[string]interface{}{"eq": "at://did:plc:alice/x/y"},
+			},
+		},
+	}
+	group, err := extractFieldFilters(where, lex, registry)
+	if err != nil {
+		t.Fatalf("extractFieldFilters: %v", err)
+	}
+	if len(group.Filters) != 1 {
+		t.Fatalf("title should land in Filters; got %d filters", len(group.Filters))
+	}
+	if group.Filters[0].FieldName != "title" {
+		t.Errorf("Filters[0].FieldName = %q, want \"title\"", group.Filters[0].FieldName)
+	}
+	if len(group.Arrays) != 1 {
+		t.Fatalf("items should land in Arrays; got %d entries", len(group.Arrays))
+	}
+}
+
+// E11.S5 (#88): depth-cap pin per R2.6. The minimal payload
+// trips MaxFilterDepth=3 at the first inner _and after the
+// items array boundary (depth=4); a second inner _and would be
+// unreachable. Assert the error contains the literal substring
+// "exceeds maximum depth" — verbatim from the extractor's error
+// format at where.go (R2.6).
+func TestExtractFieldFilters_NestedItemsWhere_DepthCap(t *testing.T) {
+	registry, lex := loadCollectionLexicon(t)
+	// outer _and (depth=1) → inner _and (depth=2) → items (depth=3, the cap) → inner _and (depth=4, rejected).
+	where := map[string]interface{}{
+		"_and": []interface{}{
+			map[string]interface{}{
+				"_and": []interface{}{
+					map[string]interface{}{
+						"items": map[string]interface{}{
+							"_and": []interface{}{
+								map[string]interface{}{
+									"itemWeight": map[string]interface{}{"eq": "1"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err := extractFieldFilters(where, lex, registry)
+	if err == nil {
+		t.Fatalf("expected depth-cap error for deeply-nested array-where; got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum depth") {
+		t.Errorf("error message should contain literal \"exceeds maximum depth\"; got: %v", err)
+	}
+}
+
+// E11.S6 (#88): documented-tautology placeholder mirroring the
+// #87 NestedJoined_Rejected test. No element-def lexicon today
+// has its own array-where registry entry, so the
+// `len(inner.Arrays) > 0` guard at where.go cannot fire from
+// any current payload. When a second array-where registry entry
+// lands whose element type itself has another array-where
+// entry, extend this test with a real two-level payload (R1.7
+// follow-up in plan §9.5).
+func TestExtractFieldFilters_NestedArrayWhere_Rejected(t *testing.T) {
+	registry, lex := loadCollectionLexicon(t)
+	// Baseline: a single-level items payload extracts cleanly.
+	where := map[string]interface{}{
+		"items": map[string]interface{}{
+			"itemIdentifier": map[string]interface{}{
+				"uri": map[string]interface{}{"eq": "at://did:plc:alice/x/y"},
+			},
+		},
+	}
+	if _, err := extractFieldFilters(where, lex, registry); err != nil {
+		t.Fatalf("baseline extractFieldFilters: %v", err)
+	}
+	// True two-level guard is unreachable today — the registry has
+	// no element-def with its own array-where entry. The check
+	// lives at where.go's `len(inner.Arrays) > 0` and is exercised
+	// the moment a second registration creates a candidate.
 }

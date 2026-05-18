@@ -90,15 +90,26 @@ func (b *Builder) Build() (*graphql.Schema, error) {
 //   - Pass 1: build the input with property-derived fields, the
 //     auto-added `did`, lexicon-specific filter-registry fields,
 //     and `_and`/`_or`. Store in b.whereInputs.
-//   - Pass 2: iterate joinedWhereRegistry and inject joined-where
+//   - Pass 2: iterate joinedWhereRegistry (issue #87) and
+//     arrayWhereRegistry (issue #88) and inject the nested-where
 //     fields via *graphql.InputObject.AddFieldConfig, looking up
-//     each target lexicon's WhereInput from b.whereInputs.
+//     each joined target lexicon's WhereInput from b.whereInputs
+//     and constructing each array-element WhereInput from the
+//     parent's element def.
 //
 // The two-pass split is necessary because joined-where targets
 // reference other lexicons' WhereInputs; building lazily inside
 // buildQueryType (the previous approach) hit non-determinism on
 // map iteration.
 func (b *Builder) buildWhereInputTypes() {
+	// Call exactly once per Builder lifetime. Pass 2's
+	// AddFieldConfig overwrites by field-name within a parent
+	// input, but buildArrayElementInputType (#88) constructs a NEW
+	// *graphql.InputObject on each invocation — a second call here
+	// would register two distinct types with the same Name() and
+	// graphql-go's schema-validation pass would raise. Build()
+	// invokes once at line ~68; no other caller exists today
+	// (IR1.9).
 	// Pass 1.
 	for _, lex := range b.registry.GetCollectionLexicons() {
 		input := buildWhereInputType(lex)
@@ -107,7 +118,7 @@ func (b *Builder) buildWhereInputTypes() {
 		}
 	}
 
-	// Pass 2: wire joined fields after all base inputs exist.
+	// Pass 2: wire joined and array fields after all base inputs exist.
 	for _, lex := range b.registry.GetCollectionLexicons() {
 		parentInput := b.whereInputs[lex.ID]
 		if parentInput == nil {
@@ -128,6 +139,27 @@ func (b *Builder) buildWhereInputTypes() {
 			parentInput.AddFieldConfig(jd.FieldName, &graphql.InputObjectFieldConfig{
 				Type:        targetInput,
 				Description: jd.Description,
+			})
+		}
+
+		// Issue #88: array-element nested-where injection. Each
+		// descriptor synthesises a per-element WhereInput from the
+		// parent's named element def. If the parent lexicon doesn't
+		// expose the referenced element def (typically because dev
+		// hasn't upgraded the parent lexicon to the version that
+		// added it), buildArrayElementInputType returns nil — log
+		// and skip, same shape as the joined-where unregistered-
+		// target path.
+		for _, ad := range arrayWhereRegistry[lex.ID] {
+			elementInput := buildArrayElementInputType(lex, ad)
+			if elementInput == nil {
+				slog.Warn("arrayWhereRegistry entry references missing element def — skipping field",
+					"parent", lex.ID, "field", ad.FieldName, "elementDef", ad.ElementDef)
+				continue
+			}
+			parentInput.AddFieldConfig(ad.FieldName, &graphql.InputObjectFieldConfig{
+				Type:        elementInput,
+				Description: ad.Description,
 			})
 		}
 	}

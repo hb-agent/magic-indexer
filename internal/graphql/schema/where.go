@@ -55,6 +55,11 @@ const graphFollowSubjectDescription = `Filter follows by the subject DID — the
 // (issue #87). Visible at schema introspection.
 const badgeAwardBadgeDescription = `Filter badge awards by properties of the joined badge definition record. Every field on AppCertifiedBadgeDefinitionWhereInput is available — most usefully badgeType (e.g. {eq: "endorsement"}) for the Endorsements-tab read pattern, but title / description / severity / did all work too. The filter resolves via an EXISTS subquery: only awards whose strongRef badge.uri resolves to a definition that matches the inner where are returned. An award pointing at a missing or deleted definition fails the existence check, so {badge: {}} (no inner filter) can be used to drop awards with broken refs. Compose with the outer subject + did filters via the usual _and (the default) or _or. Example, "endorsements OR verifications received by me": where: { subject: { eq: "did:plc:me" }, badge: { _or: [ { badgeType: { eq: "endorsement" } }, { badgeType: { eq: "verification" } } ] } }.`
 
+// collectionItemsArrayDescription is the pinned description for
+// the OrgHypercertsCollectionWhereInput.items array-element
+// nested-where filter (issue #88). Visible at schema introspection.
+const collectionItemsArrayDescription = `Filter collections to those whose items array contains at least one element matching the inner where (any-element semantics). Every property on the #item element def is filterable — itemIdentifier (a com.atproto.repo.strongRef, queryable via {uri: {eq: "at://..."}} or {cid: {eq: "..."}}) and itemWeight (string). Compose with the outer type / title / did filters via the usual _and (default) or _or, and inside the inner you can use _and/_or to mix item-element conditions. The filter resolves via an EXISTS subquery over jsonb_array_elements(json->'items'); a collection with an empty or absent items array fails the existence check, so {items: {}} (no inner predicate) filters to collections that have at least one item. Example, "project collections containing this cert": where: { type: { eqi: "project" }, items: { itemIdentifier: { uri: { eq: "at://did:plc:.../org.hypercerts.claim.activity/abc" } } } }.`
+
 // joinedWhereDescriptor describes a strongRef-style filter that
 // joins to records in a different collection.
 //
@@ -98,6 +103,51 @@ func lookupJoinedWhereDescriptor(lexID, fieldName string) (joinedWhereDescriptor
 		return d, ok
 	}
 	return joinedWhereDescriptor{}, false
+}
+
+// arrayWhereDescriptor describes an array-element nested-where
+// filter on a lexicon's array-of-objects property (issue #88).
+//
+// SECURITY: ArrayPath is emitted verbatim into SQL by the
+// EXISTS-subquery builder in
+// internal/database/repositories/filter.go. Registry values are
+// code-defined and must NEVER source from request data — they
+// form the SQL fragment for the EXISTS subquery's array path.
+// Treat additions to this registry as a SQL diff. Same contract
+// as joinedWhereDescriptor.JoinExpr.
+type arrayWhereDescriptor struct {
+	FieldName   string // the array property name on the outer record (e.g. "items")
+	ArrayPath   string // SQL fragment yielding the jsonb array, e.g. "r.json->'items'"
+	ElementDef  string // the local def name within the parent lexicon (e.g. "item")
+	Description string // pinned consumer-facing text
+}
+
+// arrayWhereRegistry maps parentLexiconID → fieldName → descriptor
+// for every array-element nested-where field.
+//
+// First entry (issue #88): org.hypercerts.collection.items, an
+// array of #item objects, each with itemIdentifier:strongRef and
+// optional itemWeight:string. Enables the certified-app's cross-
+// DID "projects containing this cert" read in one round-trip.
+var arrayWhereRegistry = map[string]map[string]arrayWhereDescriptor{
+	"org.hypercerts.collection": {
+		"items": {
+			FieldName:   "items",
+			ArrayPath:   "r.json->'items'",
+			ElementDef:  "item",
+			Description: collectionItemsArrayDescription,
+		},
+	},
+}
+
+// lookupArrayWhereDescriptor returns the descriptor for a
+// (lexicon, field) pair if the array-where registry has one.
+func lookupArrayWhereDescriptor(lexID, fieldName string) (arrayWhereDescriptor, bool) {
+	if byField, ok := arrayWhereRegistry[lexID]; ok {
+		d, ok := byField[fieldName]
+		return d, ok
+	}
+	return arrayWhereDescriptor{}, false
 }
 
 // filterRegistry maps lexicon ID → (GraphQL input field name →
@@ -227,6 +277,78 @@ func buildWhereInputType(lex *lexicon.Lexicon) *graphql.InputObject {
 	return whereInput
 }
 
+// buildArrayElementInputType constructs the per-element WhereInput
+// for a registered array-where descriptor (issue #88). The input
+// name reuses the existing response-side element type with a
+// WhereInput suffix — for org.hypercerts.collection.items the
+// response type is OrgHypercertsCollectionItem so the input is
+// OrgHypercertsCollectionItemWhereInput. Matches the
+// <RecordType>WhereInput precedent (R2.3).
+//
+// Property dispatch:
+//   - scalar properties (string / integer / datetime / etc.) route
+//     through propertyToFilterInput.
+//   - ref properties pointing at com.atproto.repo.strongRef get
+//     StrongRefFilterInput (uri + cid as StringFilterInput).
+//   - other ref / union / array / object properties are skipped
+//     silently (not filterable in v1; follow-up §9.4 to relax).
+//
+// _and / _or are injected via AddFieldConfig at the bottom so the
+// inner can use the same boolean composition as the outer.
+//
+// Returns nil if the parent lexicon does not contain the referenced
+// element def — caller logs and skips the field injection.
+func buildArrayElementInputType(parentLex *lexicon.Lexicon, descriptor arrayWhereDescriptor) *graphql.InputObject {
+	elementDef, ok := parentLex.Defs.Others[descriptor.ElementDef]
+	if !ok || !elementDef.IsObject() {
+		return nil
+	}
+
+	fields := graphql.InputObjectConfigFieldMap{}
+	for _, entry := range elementDef.Object.Properties {
+		var filterType *graphql.InputObject
+		switch {
+		case entry.Property.Type == "ref" && entry.Property.Ref == "com.atproto.repo.strongRef":
+			filterType = types.StrongRefFilterInput
+		default:
+			filterType = propertyToFilterInput(entry.Property)
+		}
+		if filterType == nil {
+			continue
+		}
+		fields[entry.Name] = &graphql.InputObjectFieldConfig{
+			Type:        filterType,
+			Description: fmt.Sprintf("Filter by %s on each element", entry.Name),
+		}
+	}
+
+	if len(fields) == 0 {
+		return nil
+	}
+
+	parentFieldName := lexicon.ToFieldName(parentLex.ID)
+	name := capitalize(parentFieldName) + capitalize(descriptor.ElementDef) + "WhereInput"
+
+	input := graphql.NewInputObject(graphql.InputObjectConfig{
+		Name:        name,
+		Description: fmt.Sprintf("Filter conditions for a %s.%s element. Field-level conditions are AND-composed. Use _and/_or for boolean composition (max depth %d).", parentLex.ID, descriptor.ElementDef, repositories.MaxFilterDepth),
+		Fields:      fields,
+	})
+
+	// Inject _and / _or after type registration so the inner can compose
+	// the same way the outer WhereInput does.
+	input.AddFieldConfig("_and", &graphql.InputObjectFieldConfig{
+		Type:        graphql.NewList(input),
+		Description: "All conditions in this list must match (AND). Supports nesting.",
+	})
+	input.AddFieldConfig("_or", &graphql.InputObjectFieldConfig{
+		Type:        graphql.NewList(input),
+		Description: "At least one condition in this list must match (OR). Supports nesting.",
+	})
+
+	return input
+}
+
 // propertyToFilterInput returns the appropriate GraphQL filter input type for
 // a lexicon property. Returns nil if the property is not filterable.
 func propertyToFilterInput(prop lexicon.Property) *graphql.InputObject {
@@ -318,6 +440,44 @@ func extractFieldFiltersRecursive(whereArg interface{}, lex *lexicon.Lexicon, re
 					TargetCollection: jd.TargetLexicon,
 					JoinExpr:         jd.JoinExpr,
 					Inner:            inner,
+				})
+				continue
+			}
+		}
+
+		// Array-where? Dispatch through the array-where registry
+		// (issue #88). The inner is recursively extracted against a
+		// synthetic pseudo-lexicon whose Main RecordDef wraps the
+		// parent's element ObjectDef, then wrapped in an ArrayFilter
+		// that the SQL builder will emit as an EXISTS-over-
+		// jsonb_array_elements subquery. One-level bound: the inner
+		// must not itself contain Arrays.
+		//
+		// Branch precedence at this `for fieldName, ...` loop:
+		// joined-where > array-where > filterRegistry > scalar fall-
+		// through. Today no fieldName appears in more than one
+		// registry for the same lexID, so the order is only
+		// load-bearing for a future contributor adding a colliding
+		// entry — the explicit ordering here makes that a deliberate
+		// edit rather than an accident (IR1.7).
+		if lex != nil {
+			if ad, ok := lookupArrayWhereDescriptor(lex.ID, fieldName); ok {
+				elemLex, err := makeElementPseudoLexicon(lex, ad)
+				if err != nil {
+					return repositories.FilterGroup{}, fmt.Errorf("field %q: %w", fieldName, err)
+				}
+				inner, err := extractElementFilters(filterInput, elemLex, depth+1)
+				if err != nil {
+					return repositories.FilterGroup{}, fmt.Errorf("field %q: %w", fieldName, err)
+				}
+				if len(inner.Arrays) > 0 {
+					return repositories.FilterGroup{}, fmt.Errorf(
+						"field %q: nested array-where not supported (max one level)", fieldName)
+				}
+				group.Arrays = append(group.Arrays, repositories.ArrayFilter{
+					FieldName: ad.FieldName,
+					ArrayPath: ad.ArrayPath,
+					Inner:     inner,
 				})
 				continue
 			}
@@ -497,4 +657,212 @@ func buildDIDOnlyEqInFilter(descriptor filterDescriptor, filterMap map[string]in
 		}, nil
 	}
 	return repositories.FieldFilter{}, fmt.Errorf("%s filter requires `eq` or `in`", descriptor.FieldName)
+}
+
+// makeElementPseudoLexicon wraps the parent lexicon's element
+// ObjectDef in a synthetic *lexicon.Lexicon whose Defs.Main is a
+// RecordDef carrying the same property list. This lets the
+// recursive extractor walk the inner where with the standard
+// signature (which expects a parent record, not a bare object).
+//
+// The synthetic ID uses the `#`-anchor convention
+// (`<parent>#<elementDef>`) because real lexicon IDs never
+// contain `#` — this guarantees no lookup against
+// filterRegistry / joinedWhereRegistry / arrayWhereRegistry under
+// the pseudo-ID can collide with a real lexicon's entries.
+//
+// `RecordDef` and `ObjectDef` carry the same `[]PropertyEntry`
+// field but are distinct types — the helper does a value-level
+// rewrite, not pointer reuse. The `sync.Once` + `propIndex`
+// private fields zero-init correctly and the lazy index is built
+// the first time GetProperty is called on the synthetic
+// RecordDef.
+func makeElementPseudoLexicon(parent *lexicon.Lexicon, ad arrayWhereDescriptor) (*lexicon.Lexicon, error) {
+	elemDef, ok := parent.Defs.Others[ad.ElementDef]
+	if !ok || !elemDef.IsObject() {
+		return nil, fmt.Errorf("element def %q not found or not an object on lexicon %q", ad.ElementDef, parent.ID)
+	}
+	return &lexicon.Lexicon{
+		ID: parent.ID + "#" + ad.ElementDef,
+		Defs: lexicon.Defs{
+			Main: &lexicon.RecordDef{
+				Type:       "object",
+				Properties: elemDef.Object.Properties,
+			},
+		},
+	}, nil
+}
+
+// extractElementFilters extracts the inner FilterGroup for an
+// array-element nested-where (issue #88). Mirrors the body of
+// extractFieldFiltersRecursive but with a critical addition:
+// per-property dispatch runs BEFORE the existing scalar-operator
+// loop so ref-property fields (`itemIdentifier:
+// com.atproto.repo.strongRef`) get decomposed via
+// extractStrongRefFilter rather than silently dropped by the
+// scalar loop's `parseOperator("uri") -> ("", false)` path.
+//
+// The parent lexicon is forwarded so registry lookups inside the
+// inner (joined-where, array-where) can still resolve — today
+// none of the element-def properties trigger those branches, but
+// the bound is "Inner.Arrays must be empty" enforced by the
+// caller, not "no registries inside an array inner."
+func extractElementFilters(whereArg interface{}, elemLex *lexicon.Lexicon, depth int) (repositories.FilterGroup, error) {
+	whereMap, ok := whereArg.(map[string]interface{})
+	if !ok {
+		return repositories.FilterGroup{Operator: repositories.GroupAND}, nil
+	}
+
+	if depth > repositories.MaxFilterDepth {
+		return repositories.FilterGroup{}, fmt.Errorf("filter nesting exceeds maximum depth of %d", repositories.MaxFilterDepth)
+	}
+
+	group := repositories.FilterGroup{Operator: repositories.GroupAND}
+
+	// Cache the parent's element ObjectDef so per-property dispatch
+	// can read each property's lexicon type. The pseudo-RecordDef
+	// would also work, but the parent's Others map is the canonical
+	// source — re-reading it keeps the dispatch logic obviously
+	// keyed to the registry, not the synthetic shape.
+	elementDef := elemLex.Defs.Main // synthetic RecordDef wrapping the parent's ObjectDef
+
+	for fieldName, filterInput := range whereMap {
+		// _and / _or composition (same shape as the outer extractor).
+		if fieldName == "_and" || fieldName == "_or" {
+			list, ok := filterInput.([]interface{})
+			if !ok {
+				continue
+			}
+			childOp := repositories.GroupAND
+			if fieldName == "_or" {
+				childOp = repositories.GroupOR
+			}
+			childGroup := repositories.FilterGroup{Operator: childOp}
+			for _, item := range list {
+				subGroup, err := extractElementFilters(item, elemLex, depth+1)
+				if err != nil {
+					return repositories.FilterGroup{}, err
+				}
+				childGroup.Children = append(childGroup.Children, subGroup)
+			}
+			group.Children = append(group.Children, childGroup)
+			continue
+		}
+
+		filterMap, ok := filterInput.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		prop := elementDef.GetProperty(fieldName)
+		if prop == nil {
+			// Field not in element def — skip silently (mirrors the
+			// outer extractor's behaviour for unknown fields).
+			continue
+		}
+
+		// Ref dispatch BEFORE the scalar-operator loop. Without
+		// this, {itemIdentifier: {uri: {eq: ...}}} would hit the
+		// scalar loop at the `uri` key and warn-and-continue
+		// (silent drop). See plan §5.5.1 + review-round-1 R1.4.
+		if prop.Type == "ref" && prop.Ref == "com.atproto.repo.strongRef" {
+			leaves, err := extractStrongRefFilter(fieldName, filterMap)
+			if err != nil {
+				return repositories.FilterGroup{}, fmt.Errorf("field %q: %w", fieldName, err)
+			}
+			group.Filters = append(group.Filters, leaves...)
+			continue
+		}
+
+		// Scalar-operator dispatch (mirrors the outer extractor).
+		lexiconType := effectiveType(prop)
+		for opStr, value := range filterMap {
+			op, isNullOp := parseOperator(opStr)
+			if isNullOp {
+				boolVal, ok := value.(bool)
+				if !ok {
+					continue
+				}
+				f := repositories.FieldFilter{
+					FieldName:   fieldName,
+					IsNull:      &boolVal,
+					IsJSON:      true, // element rows: always JSON
+					LexiconType: lexiconType,
+				}
+				if err := f.Validate(); err != nil {
+					return repositories.FilterGroup{}, fmt.Errorf("field %q: %w", fieldName, err)
+				}
+				group.Filters = append(group.Filters, f)
+				continue
+			}
+			if op == "" {
+				slog.Warn("Unknown filter operator", "field", fieldName, "op", opStr)
+				continue
+			}
+			f := repositories.FieldFilter{
+				FieldName:   fieldName,
+				Operator:    op,
+				Value:       value,
+				IsJSON:      true,
+				LexiconType: lexiconType,
+			}
+			if err := f.Validate(); err != nil {
+				return repositories.FilterGroup{}, fmt.Errorf("field %q, op %q: %w", fieldName, opStr, err)
+			}
+			group.Filters = append(group.Filters, f)
+		}
+	}
+
+	return group, nil
+}
+
+// extractStrongRefFilter decomposes a strongRef-shaped filter
+// input ({uri: {eq: ...}, cid: {eq: ...}}) into one FieldFilter
+// per sub-key using the `__`-nested-path convention that
+// jsonExtract + buildNestedContainment already understand. The
+// emitted FieldFilters have FieldName "<fieldName>__uri" /
+// "<fieldName>__cid" and route through the scalar OpEq+IsJSON
+// path which emits `<alias>.json @>
+// '{"<fieldName>":{"uri":...}}'::jsonb` via the JSONB containment
+// shape.
+//
+// Today only `eq` and `in` are routed; other operators
+// (`contains`, `startsWith`, ...) on the sub-keys would also
+// type-check but aren't useful for strongRefs (uri/cid are
+// content-hashed identifiers, not search targets). Reject them
+// with a clear error so a future contributor reading the GraphQL
+// surface knows the intentional restriction.
+func extractStrongRefFilter(fieldName string, filterMap map[string]interface{}) ([]repositories.FieldFilter, error) {
+	var leaves []repositories.FieldFilter
+	for subKey, subValue := range filterMap {
+		if subKey != "uri" && subKey != "cid" {
+			return nil, fmt.Errorf("strongRef filter on %q: unknown subfield %q (only uri and cid are supported)", fieldName, subKey)
+		}
+		subMap, ok := subValue.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("strongRef filter on %q.%q: expected an input object, got %T", fieldName, subKey, subValue)
+		}
+		path := fieldName + "__" + subKey
+		for opStr, value := range subMap {
+			op, isNullOp := parseOperator(opStr)
+			if isNullOp {
+				return nil, fmt.Errorf("strongRef filter on %q.%q: isNull is not supported (strongRef subfields are always present when the ref itself is)", fieldName, subKey)
+			}
+			if op != repositories.OpEq && op != repositories.OpIn {
+				return nil, fmt.Errorf("strongRef filter on %q.%q: operator %q is not supported (use eq or in)", fieldName, subKey, opStr)
+			}
+			f := repositories.FieldFilter{
+				FieldName:   path,
+				Operator:    op,
+				Value:       value,
+				IsJSON:      true,
+				LexiconType: "string",
+			}
+			if err := f.Validate(); err != nil {
+				return nil, fmt.Errorf("field %q, op %q: %w", path, opStr, err)
+			}
+			leaves = append(leaves, f)
+		}
+	}
+	return leaves, nil
 }
