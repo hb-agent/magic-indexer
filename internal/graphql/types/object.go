@@ -48,13 +48,35 @@ type ObjectBuilder struct {
 	// single-threaded during startup; if that ever changes, this
 	// needs to move into a per-call parameter.
 	depth int
+	// derivedFieldsByLexicon maps lexiconID → fieldName → field for
+	// synthetic record-level fields (e.g. awardCount, issue #89)
+	// that don't come from the lexicon's own properties. Nil-safe —
+	// the per-record builder treats nil as no derived fields.
+	//
+	// Owned by the schema package's derivedFieldRegistry; passed in
+	// at construction so this package stays free of schema-layer
+	// imports.
+	derivedFieldsByLexicon map[string]map[string]*graphql.Field
 }
 
-// NewObjectBuilder creates a new object builder.
+// NewObjectBuilder creates a new object builder with no derived
+// fields. Legacy ctor — kept stable for the 5 existing test sites
+// that construct ObjectBuilder directly. Production code should
+// use NewObjectBuilderWithDerivedFields.
 func NewObjectBuilder(mapper *Mapper, registry *lexicon.Registry) *ObjectBuilder {
+	return NewObjectBuilderWithDerivedFields(mapper, registry, nil)
+}
+
+// NewObjectBuilderWithDerivedFields constructs a builder that
+// injects the given per-lexicon synthetic fields into each
+// per-collection record type after the lexicon-property loop.
+// The schema-package Builder uses this ctor with the registry-
+// derived map (see internal/graphql/schema/derived_fields.go).
+func NewObjectBuilderWithDerivedFields(mapper *Mapper, registry *lexicon.Registry, derivedFieldsByLexicon map[string]map[string]*graphql.Field) *ObjectBuilder {
 	return &ObjectBuilder{
-		mapper:   mapper,
-		registry: registry,
+		mapper:                 mapper,
+		registry:               registry,
+		derivedFieldsByLexicon: derivedFieldsByLexicon,
 	}
 }
 
@@ -178,6 +200,22 @@ func (b *ObjectBuilder) buildRecordFields(lexiconID string, def *lexicon.RecordD
 		if field != nil {
 			fields[entry.Name] = field
 		}
+	}
+
+	// Inject synthetic record-level fields from the derived-fields
+	// registry (issue #89). Lexicon properties take precedence —
+	// a derived field that collides with a lexicon property is
+	// silently skipped with a warn log, mirroring the
+	// ReservedRecordFields policy above. (Collisions with the
+	// reserved metadata fields panic at registry init time, see
+	// internal/graphql/schema/derived_fields.go MustNotReserveField.)
+	for fieldName, field := range b.derivedFieldsByLexicon[lexiconID] {
+		if _, collide := fields[fieldName]; collide {
+			slog.Warn("Derived field collides with lexicon property — keeping lexicon property",
+				"lexicon", lexiconID, "field", fieldName)
+			continue
+		}
+		fields[fieldName] = field
 	}
 
 	return fields

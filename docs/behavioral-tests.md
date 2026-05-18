@@ -105,6 +105,7 @@ Each test declares a `Target`:
 | [E9](#e9) | GraphFollow `subject` filter returns followers; index-served | EITHER | issue #86 |
 | [E10](#e10) | BadgeAward nested-where on `badge` filters by joined definition | EITHER | issue #87 |
 | [E11](#e11) | Collection nested-where on `items` filters by array element | EITHER | issue #88 |
+| [E12](#e12) | BadgeDefinition `awardCount` returns per-list count | EITHER | issue #89 |
 | **F — GraphQL subscriptions** |
 | [F1](#f1) | Subscription receives a live create event | EITHER | needs ws client (wscat) |
 | **G — OAuth (admin auth)** |
@@ -1063,6 +1064,79 @@ Each spec follows the same shape:
   builder extension at
   `internal/graphql/schema/builder.go` `buildWhereInputTypes`
   pass 2.
+
+---
+
+### E12
+**BadgeDefinition awardCount returns per-list count in one
+round-trip.**
+
+- **Coverage**: issue #89 — the certified-app's Lists section
+  reads the master view via
+  `appCertifiedBadgeDefinition(where: { did: { eq: $did },
+  badgeType: { eq: "endorsement" } }) { edges { node { uri
+  title awardCount } } }`. The `awardCount` field returns the
+  count of awards whose `badge.uri` strongRef points at this
+  definition. Without this the client makes a second PDS
+  round-trip to `listAwards(did)` and groups client-side.
+- **Target**: EITHER for the wire-level query; LOCAL for the
+  EXPLAIN ANALYZE check.
+- **Preconditions**:
+  - `app.certified.badge.definition` and
+    `app.certified.badge.award` lexicons registered (already
+    present on DEV-DEPLOYED post-#65/#87).
+  - At least one definition with `badgeType = "endorsement"`
+    with at least one award pointing at it.
+- **Steps**:
+  1. Schema introspection:
+     ```bash
+     curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
+       -d '{"query":"{ __type(name:\"AppCertifiedBadgeDefinitionRecord\") { fields { name type { name kind ofType { name } } } } }"}' \
+       | jq '.data.__type.fields | map(select(.name == "awardCount"))'
+     ```
+     Expect a single entry with `type.kind == "NON_NULL"`
+     wrapping `name == "Int"`.
+  2. Wire-level query:
+     ```bash
+     curl -s -X POST $BASE_URL/graphql -H 'Content-Type: application/json' \
+       -d '{"query":"{ appCertifiedBadgeDefinition(where: { did: { eq: \"did:plc:...\" }, badgeType: { eq: \"endorsement\" } }, first: 100) { edges { node { uri title awardCount } } pageInfo { hasNextPage } } }"}' \
+       | jq
+     ```
+  3. Cross-check: sum `awardCount` across the returned page;
+     compare to
+     `appCertifiedBadgeAward(where: { did: { eq: <did> } }) {
+     totalCount }`. The sum should equal the totalCount minus
+     any awards whose `badge` points at definitions outside
+     the `badgeType = "endorsement"` set on that DID.
+  4. (LOCAL only) EXPLAIN ANALYZE the per-definition COUNT:
+     ```sql
+     EXPLAIN ANALYZE
+     SELECT COUNT(*) FROM record
+     WHERE collection = 'app.certified.badge.award'
+       AND json->'badge'->>'uri' = 'at://did:plc:.../app.certified.badge.definition/...';
+     ```
+- **Expected**:
+  - Step 1: `awardCount` field present, non-null Int.
+  - Step 2: each definition's `awardCount` is a non-negative
+    integer; no GraphQL errors.
+  - Step 3: sums match within the badgeType filter scope.
+  - Step 4: plan shows `Index Scan using
+    idx_record_award_badge_uri on record`. No sequential scan
+    over the award collection.
+- **N+1 note**: the resolver fires once per definition row in
+  the page. Bounded cost (≤100 rows × sub-millisecond indexed
+  COUNT each). Dataloader batching is a documented follow-up
+  in `docs/issue-89/plan.md` §9.1.
+- **Cleanup**: none.
+- **Refs**: issue #89; resolver at
+  `internal/graphql/schema/derived_fields.go`
+  (`derivedFieldRegistry` + `resolveAwardCount`); repository
+  helper at `internal/database/repositories/records.go`
+  (`CountAwardsByBadgeURI`); migration
+  `internal/database/migrations/postgres/030_add_award_badge_uri_index.up.sql`;
+  builder hook at
+  `internal/graphql/types/object.go` `buildRecordFields`
+  (derived-fields injection).
 
 ---
 

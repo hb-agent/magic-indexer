@@ -966,3 +966,80 @@ func TestRecordsRepository_IterateAll(t *testing.T) {
 		}
 	})
 }
+
+// E12.1 (#89): CountAwardsByBadgeURI returns the number of awards
+// whose badge.uri strongRef equals the requested URI. Seeds a
+// mixed set (N awards pointing at one definition, M at another),
+// asserts the count matches N.
+func TestRecordsRepository_CountAwardsByBadgeURI(t *testing.T) {
+	repo := setupRecordsTest(t)
+	ctx := context.Background()
+
+	const (
+		defURIWanted = "at://did:plc:issuer1/app.certified.badge.definition/endorse"
+		defURIOther  = "at://did:plc:issuer1/app.certified.badge.definition/verify"
+	)
+
+	// Insert 3 awards pointing at the wanted definition.
+	for i, rkey := range []string{"a1", "a2", "a3"} {
+		insertTestRecord(t, repo,
+			fmt.Sprintf("at://did:plc:awarder/app.certified.badge.award/%s", rkey),
+			fmt.Sprintf("bafyreiaward%d", i),
+			"did:plc:awarder",
+			"app.certified.badge.award",
+			fmt.Sprintf(`{"badge":{"uri":%q,"cid":"bafyreiwanted"},"subject":{"$type":"app.certified.defs#did","did":"did:plc:subject"},"createdAt":"2026-05-18T00:00:00Z"}`, defURIWanted),
+		)
+	}
+	// Insert 2 awards pointing at the other definition (should NOT count).
+	for i, rkey := range []string{"b1", "b2"} {
+		insertTestRecord(t, repo,
+			fmt.Sprintf("at://did:plc:awarder/app.certified.badge.award/%s", rkey),
+			fmt.Sprintf("bafyreiother%d", i),
+			"did:plc:awarder",
+			"app.certified.badge.award",
+			fmt.Sprintf(`{"badge":{"uri":%q,"cid":"bafyreiother"},"subject":{"$type":"app.certified.defs#did","did":"did:plc:subject"},"createdAt":"2026-05-18T00:00:00Z"}`, defURIOther),
+		)
+	}
+	// Insert one non-award record with a matching JSON shape (should NOT
+	// count — the partial-index collection filter excludes it).
+	insertTestRecord(t, repo,
+		"at://did:plc:other/com.example.thing/x1",
+		"bafyreiother",
+		"did:plc:other",
+		"com.example.thing",
+		fmt.Sprintf(`{"badge":{"uri":%q,"cid":"bafyreidup"}}`, defURIWanted),
+	)
+
+	got, err := repo.CountAwardsByBadgeURI(ctx, defURIWanted)
+	if err != nil {
+		t.Fatalf("CountAwardsByBadgeURI: %v", err)
+	}
+	if got != 3 {
+		t.Errorf("CountAwardsByBadgeURI = %d, want 3", got)
+	}
+}
+
+// E12.2 (#89): Empty URI returns (0, nil) without consulting the DB.
+func TestRecordsRepository_CountAwardsByBadgeURI_EmptyURI(t *testing.T) {
+	repo := setupRecordsTest(t)
+	got, err := repo.CountAwardsByBadgeURI(context.Background(), "")
+	if err != nil {
+		t.Fatalf("CountAwardsByBadgeURI(\"\"): %v", err)
+	}
+	if got != 0 {
+		t.Errorf("CountAwardsByBadgeURI(\"\") = %d, want 0", got)
+	}
+}
+
+// E12.3 (#89): URI with zero matching awards returns (0, nil).
+func TestRecordsRepository_CountAwardsByBadgeURI_NoMatches(t *testing.T) {
+	repo := setupRecordsTest(t)
+	got, err := repo.CountAwardsByBadgeURI(context.Background(),
+		"at://did:plc:nope/app.certified.badge.definition/none")
+	if err != nil {
+		t.Fatalf("CountAwardsByBadgeURI(no-matches): %v", err)
+	}
+	if got != 0 {
+		t.Errorf("CountAwardsByBadgeURI(no-matches) = %d, want 0", got)
+	}
+}

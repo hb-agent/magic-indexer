@@ -41,7 +41,7 @@ func NewBuilder(registry *lexicon.Registry) *Builder {
 	return &Builder{
 		registry:        registry,
 		mapper:          mapper,
-		objectBuilder:   types.NewObjectBuilder(mapper, registry),
+		objectBuilder:   types.NewObjectBuilderWithDerivedFields(mapper, registry, derivedFieldsForObjectBuilder()),
 		recordTypes:     make(map[string]*graphql.Object),
 		connectionTypes: make(map[string]*graphql.Object),
 		whereInputs:     make(map[string]*graphql.InputObject),
