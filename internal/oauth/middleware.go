@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // contextKey is a custom type for context keys to avoid collisions.
@@ -67,12 +66,6 @@ func NewAuthMiddleware(tokens AccessTokenStore, jtis JTIStore, resourceURL strin
 		maxDPoPAge:  DefaultMaxDPoPAge,
 		resourceURL: strings.TrimSuffix(resourceURL, "/"),
 	}
-}
-
-// WithMaxDPoPAge sets the maximum age for DPoP proofs.
-func (m *AuthMiddleware) WithMaxDPoPAge(seconds int64) *AuthMiddleware {
-	m.maxDPoPAge = seconds
-	return m
 }
 
 // AuthResult contains the result of a successful authentication.
@@ -306,35 +299,6 @@ func (m *AuthMiddleware) OptionalAuth(next http.Handler) http.Handler {
 	})
 }
 
-// RequireScope returns middleware that requires specific scopes.
-// Must be used after RequireAuth or OptionalAuth.
-func (m *AuthMiddleware) RequireScope(requiredScopes ...string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			scopes, ok := r.Context().Value(ScopesKey).([]string)
-			if !ok {
-				m.writeError(w, ErrInsufficientScope)
-				return
-			}
-
-			// Check if all required scopes are present
-			scopeSet := make(map[string]bool)
-			for _, s := range scopes {
-				scopeSet[s] = true
-			}
-
-			for _, required := range requiredScopes {
-				if !scopeSet[required] {
-					m.writeError(w, ErrInsufficientScope)
-					return
-				}
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
 // writeError writes an authentication error response.
 func (m *AuthMiddleware) writeError(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/json")
@@ -370,28 +334,6 @@ func UserIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// AccessTokenFromContext extracts the access token from the request context.
-// Returns nil if not authenticated.
-func AccessTokenFromContext(ctx context.Context) *AccessToken {
-	if v := ctx.Value(AccessTokenKey); v != nil {
-		if t, ok := v.(*AccessToken); ok {
-			return t
-		}
-	}
-	return nil
-}
-
-// ScopesFromContext extracts the scopes from the request context.
-// Returns nil if not authenticated.
-func ScopesFromContext(ctx context.Context) []string {
-	if v := ctx.Value(ScopesKey); v != nil {
-		if s, ok := v.([]string); ok {
-			return s
-		}
-	}
-	return nil
-}
-
 // Common authentication errors.
 var (
 	ErrMissingAuth       = &AuthError{Code: "missing_authorization", Description: "Missing Authorization header"}
@@ -407,7 +349,6 @@ var (
 	ErrTokenRevoked      = &AuthError{Code: "invalid_token", Description: "Access token has been revoked"}
 	ErrTokenNoUser       = &AuthError{Code: "invalid_token", Description: "Token has no user"}
 	ErrServerError       = &AuthError{Code: "server_error", Description: "Internal server error"}
-	ErrInsufficientScope = &AuthError{Code: "insufficient_scope", Description: "Insufficient scope for this resource"}
 )
 
 // AuthError represents an authentication/authorization error.
@@ -426,30 +367,9 @@ func (e *AuthError) Error() string {
 // HTTPStatus returns the appropriate HTTP status code for this error.
 func (e *AuthError) HTTPStatus() int {
 	switch e.Code {
-	case "insufficient_scope":
-		return http.StatusForbidden
 	case "server_error":
 		return http.StatusInternalServerError
 	default:
 		return http.StatusUnauthorized
 	}
-}
-
-// UseJTI atomically records a JTI and reports whether this was a
-// new entry. A false return means the JTI already existed and the
-// caller should treat it as a replay.
-func UseJTI(ctx context.Context, store JTIStore, jti string, iat int64) (bool, error) {
-	return store.InsertIfNew(ctx, &DPoPJTI{
-		JTI:       jti,
-		CreatedAt: iat,
-	})
-}
-
-// CleanupExpiredJTIs is a helper to clean up old JTI records.
-// Call this periodically to prevent the JTI table from growing indefinitely.
-func CleanupExpiredJTIs(ctx context.Context, store interface {
-	DeleteOlderThan(ctx context.Context, beforeTimestamp int64) error
-}, maxAge time.Duration) error {
-	cutoff := time.Now().Add(-maxAge).Unix()
-	return store.DeleteOlderThan(ctx, cutoff)
 }

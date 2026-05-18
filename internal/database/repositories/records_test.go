@@ -200,6 +200,50 @@ func TestRecordsRepository_BatchInsert(t *testing.T) {
 	}
 }
 
+// TestRecordsRepository_BatchInsert_PartialFailureRollsBack pins
+// the transactional atomicity contract: BatchInsert wraps every
+// chunk in a single tx, and a failure on ANY record rolls back
+// the entire batch. The earlier shape (per-batch insert without
+// atomicity guarantees) could have left the corpus in a
+// half-applied state on a constraint or invalid-JSON error; this
+// test prevents a future refactor from reintroducing that.
+//
+// Failure mode: insert two valid records and one with malformed
+// JSON in the same batch. The DB rejects the whole INSERT and the
+// transaction rolls back. None of the three URIs should be
+// retrievable afterwards.
+//
+// Refs: overnight finding T-3.
+func TestRecordsRepository_BatchInsert_PartialFailureRollsBack(t *testing.T) {
+	repo := setupRecordsTest(t)
+	ctx := context.Background()
+
+	const (
+		goodURI1 = "at://did:plc:test1/app.bsky.feed.post/atomic-good-1"
+		goodURI2 = "at://did:plc:test1/app.bsky.feed.post/atomic-good-2"
+		badURI   = "at://did:plc:test1/app.bsky.feed.post/atomic-bad"
+	)
+
+	records := []*repositories.Record{
+		{URI: goodURI1, CID: "cidg1", DID: "did:plc:test1", Collection: "app.bsky.feed.post", JSON: `{"text":"valid"}`},
+		{URI: badURI, CID: "cidbad", DID: "did:plc:test1", Collection: "app.bsky.feed.post", JSON: `{not-valid-json`},
+		{URI: goodURI2, CID: "cidg2", DID: "did:plc:test1", Collection: "app.bsky.feed.post", JSON: `{"text":"also valid"}`},
+	}
+
+	err := repo.BatchInsert(ctx, records)
+	if err == nil {
+		t.Fatal("expected error from invalid JSON in batch; got nil — batch atomicity contract may be broken")
+	}
+
+	// None of the three should be retrievable.
+	for _, uri := range []string{goodURI1, badURI, goodURI2} {
+		_, err := repo.GetByURI(ctx, uri)
+		if err == nil {
+			t.Errorf("record %q should not exist after a failed atomic batch", uri)
+		}
+	}
+}
+
 func TestRecordsRepository_GetByURI(t *testing.T) {
 	tests := []struct {
 		name    string

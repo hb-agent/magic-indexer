@@ -28,7 +28,7 @@ type derivedFieldDescriptor struct {
 // awardCountDescription is pinned verbatim so consumers see the
 // policy at schema introspection. Drift is pinned by
 // TestDerivedFieldRegistry_BadgeDefinitionAwardCount.
-const awardCountDescription = `Number of app.certified.badge.award records whose badge strongRef points at this definition. Independent of the award subject (returns the total count of awards strong-ref'ing this definition across all subjects + DIDs). For the certified-app's Lists section: this collapses the master-view aggregate (definitions + per-list count) to a single indexer query. The count uses a partial expression index on (json->'badge'->>'uri') filtered by collection, so per-row cost is sub-millisecond. Filtered counts (e.g. by issuer or by award properties) are not yet exposed.`
+const awardCountDescription = `Number of app.certified.badge.award records whose badge strongRef points at this definition. Independent of the award subject (returns the total count of awards strong-ref'ing this definition across all subjects + DIDs). For the certified-app's Lists section: this collapses the master-view aggregate (definitions + per-list count) to a single indexer query. The count uses an indexed lookup against a partial expression index on (json->'badge'->>'uri') filtered by collection; per-row cost scales with the matching set size — a definition with thousands of awards pays an index-range scan, not a constant-time probe. Filtered counts (e.g. by issuer or by award properties) are not yet exposed.`
 
 // derivedFieldRegistry maps lexiconID → fieldName → descriptor for
 // every synthetic record-level field that needs a custom Resolve.

@@ -226,73 +226,102 @@ func TestBackfillState_Reset(t *testing.T) {
 // ActivityCleanupWorker tests
 // ---------------------------------------------------------------------------
 
-func TestActivityCleanupWorker_StartStop(t *testing.T) {
-	// Use a nil activity repo — Start will call cleanup which will call
-	// CleanupOldActivity on the repo. We need a real repo backed by a real
-	// DB to avoid a nil-pointer panic during the initial cleanup() call.
-	// Import testutil from an external test package would create a cycle
-	// (workers -> testutil -> migrations -> database -> ... ), so instead
-	// we exercise only the goroutine lifecycle by cancelling the context
-	// before Start can do meaningful work.
+// fakeActivityCleaner records the number of times each method is
+// called by the production Start() goroutine. The whole point of
+// this test is to exercise production Start() (not re-implement the
+// loop), so the fake must NOT do any work — just count.
+type fakeActivityCleaner struct {
+	mu         sync.Mutex
+	cleanupN   int
+	orphanN    int
+	cleanupErr error
+	orphanErr  error
+}
 
-	// We cannot easily construct a JetstreamActivityRepository without
-	// a database.Executor, so we test the goroutine lifecycle by using
-	// a context that is immediately cancelled, preventing cleanup from
-	// executing against a nil repo.
-	//
-	// For a full integration test with a real DB, see
-	// internal/integration or use testutil from an _test package.
+func (f *fakeActivityCleaner) CleanupOldActivity(_ context.Context, _ int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cleanupN++
+	return f.cleanupErr
+}
 
-	// Verify Stop doesn't hang using a timeout channel.
+func (f *fakeActivityCleaner) OrphanPendingActivity(_ context.Context, _ int) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.orphanN++
+	return 0, f.orphanErr
+}
+
+func (f *fakeActivityCleaner) cleanupCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cleanupN
+}
+
+// TestActivityCleanupWorker_TicksPeriodically pins overnight finding
+// C-1 + T-1: the production Start() goroutine must call cleanup() at
+// the initial boot AND on every subsequent tick. The previous shape
+// stopped the ticker before the goroutine even read from it, so only
+// the boot cleanup ran. This test would have caught that bug — the
+// prior test was a tautology that re-implemented a CORRECT version
+// of the loop inline rather than exercising production.
+func TestActivityCleanupWorker_TicksPeriodically(t *testing.T) {
+	fake := &fakeActivityCleaner{}
+
+	// Hand-build the worker so we can use a short tick interval.
+	w := &ActivityCleanupWorker{
+		activity:     fake,
+		interval:     20 * time.Millisecond,
+		retentionHrs: 168,
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	w.Start(ctx)
+
+	// Wait until at least three cleanup() calls have happened (the
+	// boot call plus two ticks at the 20ms interval). If the
+	// ticker.Stop() defer is moved outside the goroutine again, only
+	// the boot call fires and this loop times out.
+	deadline := time.After(2 * time.Second)
+	for fake.cleanupCount() < 3 {
+		select {
+		case <-deadline:
+			t.Fatalf("expected >=3 cleanup() calls within 2s, got %d — ticker is not firing", fake.cleanupCount())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	w.Stop()
+}
+
+// TestActivityCleanupWorker_StopDrains pins that Stop() blocks until
+// the goroutine has exited cleanly.
+func TestActivityCleanupWorker_StopDrains(t *testing.T) {
+	fake := &fakeActivityCleaner{}
+	w := &ActivityCleanupWorker{
+		activity:     fake,
+		interval:     time.Hour, // long interval so we don't tick during the test
+		retentionHrs: 168,
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
+	}
+	w.Start(context.Background())
+
 	done := make(chan struct{})
-
 	go func() {
 		defer close(done)
-
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel() // cancel immediately so cleanup is skipped or errors harmlessly
-
-		// Create worker with nil repo — cleanup will error-log but not panic
-		// because the context is already cancelled and slog.Error is safe.
-		// Actually, CleanupOldActivity dereferences the repo. Instead, let's
-		// just test that the goroutine lifecycle (start/stop via context) works
-		// by relying on context cancellation in the select loop.
-
-		w := &ActivityCleanupWorker{
-			activity:     nil,
-			interval:     time.Hour,
-			retentionHrs: 168,
-			stop:         make(chan struct{}),
-			done:         make(chan struct{}),
-		}
-
-		// Start the worker goroutine manually (skip the initial cleanup
-		// call which would dereference nil repo).
-		go func() {
-			defer close(w.done)
-
-			ticker := time.NewTicker(w.interval)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-w.stop:
-					return
-				case <-ticker.C:
-					// would call cleanup, skipped for test
-				}
-			}
-		}()
-
 		w.Stop()
 	}()
 
 	select {
 	case <-done:
-		// success — Stop returned without hanging
-	case <-time.After(5 * time.Second):
-		t.Fatal("ActivityCleanupWorker.Stop() hung for more than 5 seconds")
+		// success
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop() hung for more than 2 seconds")
 	}
 }

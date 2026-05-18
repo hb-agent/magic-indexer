@@ -381,6 +381,59 @@ func TestConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		// ADMIN_DIDS validation — every entry must pass did.IsValid
+		// per SECURITY.md. Empty is allowed (admin auth then uses
+		// ADMIN_API_KEY exclusively).
+		{
+			name: "AdminDIDs empty is allowed",
+			config: validBudgets(Config{
+				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                     8080,
+				OAuthLegacyDPoPJKTCutoff: 1744416000,
+				AdminDIDs:                "",
+			}),
+			wantErr: false,
+		},
+		{
+			name: "AdminDIDs single valid did:plc",
+			config: validBudgets(Config{
+				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                     8080,
+				OAuthLegacyDPoPJKTCutoff: 1744416000,
+				AdminDIDs:                "did:plc:bnqkww7bjxaacatzwjt7lveh",
+			}),
+			wantErr: false,
+		},
+		{
+			name: "AdminDIDs multiple valid",
+			config: validBudgets(Config{
+				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                     8080,
+				OAuthLegacyDPoPJKTCutoff: 1744416000,
+				AdminDIDs:                "did:plc:bnqkww7bjxaacatzwjt7lveh, did:web:example.com",
+			}),
+			wantErr: false,
+		},
+		{
+			name: "AdminDIDs contains malformed entry",
+			config: validBudgets(Config{
+				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                     8080,
+				OAuthLegacyDPoPJKTCutoff: 1744416000,
+				AdminDIDs:                "did:plc:bnqkww7bjxaacatzwjt7lveh,not-a-did",
+			}),
+			wantErr: true,
+		},
+		{
+			name: "AdminDIDs contains injection attempt",
+			config: validBudgets(Config{
+				SecretKeyBase:            "this_is_a_very_long_secret_key_that_is_definitely_more_than_64_characters_long_for_testing",
+				Port:                     8080,
+				OAuthLegacyDPoPJKTCutoff: 1744416000,
+				AdminDIDs:                "did:plc:abc'; DROP TABLE config;--",
+			}),
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
