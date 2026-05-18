@@ -1757,3 +1757,64 @@ func TestValidateCollectionName(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildFilterGroupClause_DepthCap_DefenseInDepth pins the
+// repo-side depth-cap as a defense-in-depth check, independent
+// of the schema-side extractor's depth cap. The extractor caps
+// at MaxFilterDepth=3 first, so this code path is normally
+// unreachable from a real GraphQL request — but a future
+// repo-direct caller (admin tooling, future internal job) could
+// hand-build a deeper FilterGroup and the SQL builder must
+// reject it cleanly rather than emit unbounded EXISTS-in-EXISTS
+// SQL.
+//
+// Refs: overnight finding T-4.
+func TestBuildFilterGroupClause_DepthCap_DefenseInDepth(t *testing.T) {
+	// Build a FilterGroup nested 5 levels deep via Children, well
+	// past MaxFilterDepth=3.
+	innermost := FilterGroup{
+		Operator: GroupAND,
+		Filters: []FieldFilter{
+			{FieldName: "did", Operator: OpEq, Value: "x"},
+		},
+	}
+	level4 := FilterGroup{Operator: GroupAND, Children: []FilterGroup{innermost}}
+	level3 := FilterGroup{Operator: GroupAND, Children: []FilterGroup{level4}}
+	level2 := FilterGroup{Operator: GroupAND, Children: []FilterGroup{level3}}
+	level1 := FilterGroup{Operator: GroupAND, Children: []FilterGroup{level2}}
+	root := FilterGroup{Operator: GroupAND, Children: []FilterGroup{level1}}
+
+	_, _, err := BuildFilterGroupClause(root, 1)
+	if err == nil {
+		t.Fatal("expected depth-cap error from BuildFilterGroupClause on 5-level nesting; got nil — repo-side defense-in-depth is broken")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum depth") {
+		t.Errorf("error message should contain literal \"exceeds maximum depth\"; got: %v", err)
+	}
+}
+
+// TestBuildFilterGroupClause_DepthCap_BoundaryAtCap pins the
+// inclusive vs exclusive semantic of the depth check: the cap
+// is "> MaxFilterDepth" (line 343), so a tree nested exactly
+// at MaxFilterDepth must succeed and one level deeper must fail.
+func TestBuildFilterGroupClause_DepthCap_BoundaryAtCap(t *testing.T) {
+	// Build nesting at exactly MaxFilterDepth (3 levels of Children).
+	innermost := FilterGroup{
+		Operator: GroupAND,
+		Filters:  []FieldFilter{{FieldName: "did", Operator: OpEq, Value: "x"}},
+	}
+	at3 := FilterGroup{Operator: GroupAND, Children: []FilterGroup{
+		{Operator: GroupAND, Children: []FilterGroup{
+			{Operator: GroupAND, Children: []FilterGroup{innermost}},
+		}},
+	}}
+	if _, _, err := BuildFilterGroupClause(at3, 1); err != nil {
+		t.Errorf("nesting AT the cap should succeed; got: %v", err)
+	}
+
+	// One level deeper must fail.
+	at4 := FilterGroup{Operator: GroupAND, Children: []FilterGroup{at3}}
+	if _, _, err := BuildFilterGroupClause(at4, 1); err == nil {
+		t.Errorf("nesting ONE PAST the cap should fail; got nil")
+	}
+}
