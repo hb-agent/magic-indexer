@@ -11,8 +11,6 @@ import (
 	"strings"
 
 	"github.com/joho/godotenv"
-
-	didpkg "github.com/GainForest/hypergoat/internal/atproto/did"
 )
 
 // Config holds all application configuration.
@@ -335,23 +333,6 @@ func (c *Config) Validate() error {
 			"GRAPHQL_PUBLIC_QUERY_TIMEOUT_MS (%d) must be strictly less than the chi router outer timeout (%d ms) — otherwise chi fires first and the per-request budget value advertised to clients is a lie",
 			c.GraphQLPublicQueryTimeoutMs, HTTPRouterTimeoutMs,
 		)
-	}
-
-	// ADMIN_DIDS — every entry must pass the canonical strict
-	// DID predicate (per SECURITY.md). The env-var → config table
-	// bootstrap in main.go writes the comma-separated string
-	// directly; validating here means a typo'd or attacker-tampered
-	// env-var fails the deploy at startup rather than silently
-	// allowing requests with a malformed admin DID later. Empty
-	// string means "no admin DIDs configured" and is allowed —
-	// admin auth then requires ADMIN_API_KEY exclusively.
-	for _, did := range SplitCSV(c.AdminDIDs) {
-		if !didpkg.IsValid(did) {
-			return fmt.Errorf(
-				"ADMIN_DIDS contains an invalid DID %q (must match did.IsValid; use did:plc:... or did:web:...)",
-				did,
-			)
-		}
 	}
 
 	return nil

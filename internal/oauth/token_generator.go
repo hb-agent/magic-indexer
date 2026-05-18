@@ -26,6 +26,38 @@ func GenerateAuthorizationCode() (string, error) {
 	return generateRandomToken(32)
 }
 
+// GenerateClientID generates a cryptographically secure client ID.
+// Returns a prefixed string like "client_XXXX" (22-character random part).
+func GenerateClientID() (string, error) {
+	token, err := generateRandomToken(16)
+	if err != nil {
+		return "", err
+	}
+	return "client_" + token, nil
+}
+
+// GenerateClientSecret generates a cryptographically secure client secret.
+// Returns a 43-character URL-safe base64 string (32 random bytes encoded).
+func GenerateClientSecret() (string, error) {
+	return generateRandomToken(32)
+}
+
+// GeneratePARRequestURI generates a Pushed Authorization Request URI.
+// Returns a URN like "urn:ietf:params:oauth:request_uri:XXXX".
+func GeneratePARRequestURI() (string, error) {
+	token, err := generateRandomToken(16)
+	if err != nil {
+		return "", err
+	}
+	return "urn:ietf:params:oauth:request_uri:" + token, nil
+}
+
+// GenerateDPoPNonce generates a DPoP nonce for replay protection.
+// Returns a 22-character URL-safe base64 string (16 random bytes encoded).
+func GenerateDPoPNonce() (string, error) {
+	return generateRandomToken(16)
+}
+
 // GenerateSessionID generates a unique session identifier.
 // Returns a 22-character URL-safe base64 string (16 random bytes encoded).
 func GenerateSessionID() (string, error) {
@@ -60,4 +92,9 @@ func ExpirationTimestamp(lifetimeSeconds int64) int64 {
 // IsExpired checks if a timestamp has expired.
 func IsExpired(expiresAt int64) bool {
 	return CurrentTimestamp() >= expiresAt
+}
+
+// IsExpiredWithSkew checks if a timestamp has expired, allowing for clock skew.
+func IsExpiredWithSkew(expiresAt, skewSeconds int64) bool {
+	return CurrentTimestamp() >= expiresAt+skewSeconds
 }

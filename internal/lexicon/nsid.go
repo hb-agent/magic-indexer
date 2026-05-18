@@ -73,6 +73,31 @@ func ToDomainParts(nsid string) []string {
 	return parts[:len(parts)-1]
 }
 
+// IsValidNSID checks if a string is a valid NSID format.
+// Valid NSIDs have at least 3 segments and only contain lowercase letters, numbers, and hyphens.
+func IsValidNSID(nsid string) bool {
+	parts := strings.Split(nsid, ".")
+	if len(parts) < 3 {
+		return false
+	}
+
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if !unicode.IsLower(r) && !unicode.IsDigit(r) && r != '-' {
+				return false
+			}
+		}
+		// Cannot start or end with hyphen
+		if strings.HasPrefix(part, "-") || strings.HasSuffix(part, "-") {
+			return false
+		}
+	}
+	return true
+}
+
 // ParseRef parses a lexicon ref into the lexicon ID and definition name.
 //
 // Examples:

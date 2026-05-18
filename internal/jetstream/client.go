@@ -134,15 +134,6 @@ func (c *Client) buildURL() (*url.URL, error) {
 }
 
 // Run starts receiving events. Blocks until stopped or error.
-//
-// Run owns the events channel: when Run returns, it closes
-// c.events via the deferred close below. Stop only fires the
-// stop signal + closes the websocket conn; it never touches
-// c.events. This single-writer pattern prevents the
-// send-on-closed-channel panic that the prior shape allowed —
-// Stop could fire close(c.events) while Run was blocked at
-// `c.events <- event:` from a different goroutine. See
-// overnight finding C-3.
 func (c *Client) Run(ctx context.Context) error {
 	c.mu.Lock()
 	conn := c.conn
@@ -151,8 +142,6 @@ func (c *Client) Run(ctx context.Context) error {
 	if conn == nil {
 		return fmt.Errorf("not connected")
 	}
-
-	defer close(c.events)
 
 	// Set up ping/pong
 	conn.SetPongHandler(func(string) error {
@@ -197,17 +186,11 @@ func (c *Client) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Send to event channel (blocking with context or stop signal).
-		// The c.done case is essential — without it, a Stop() call
-		// while we're blocked here would never wake us, and the
-		// websocket close-then-read sequence would have to time out
-		// for the panic-free path to work.
+		// Send to event channel (blocking with context)
 		select {
 		case c.events <- event:
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-c.done:
-			return nil
 		}
 	}
 }
@@ -268,11 +251,6 @@ func (c *Client) pingLoop(ctx context.Context) {
 }
 
 // Stop closes the connection and stops receiving events.
-//
-// Stop fires c.done and closes the websocket conn so the Run
-// goroutine wakes up and returns. Run's deferred close(c.events)
-// then runs exactly once. Stop deliberately does NOT touch
-// c.events — that ownership lives entirely with Run.
 func (c *Client) Stop() {
 	c.stopOnce.Do(func() {
 		close(c.done)
@@ -288,6 +266,8 @@ func (c *Client) Stop() {
 			_ = conn.Close()
 		}
 		c.mu.Unlock()
+
+		close(c.events)
 	})
 }
 

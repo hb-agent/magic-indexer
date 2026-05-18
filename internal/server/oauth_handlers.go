@@ -17,7 +17,6 @@ import (
 	didpkg "github.com/GainForest/hypergoat/internal/atproto/did"
 	"github.com/GainForest/hypergoat/internal/database"
 	"github.com/GainForest/hypergoat/internal/database/repositories"
-	"github.com/GainForest/hypergoat/internal/logsafe"
 	"github.com/GainForest/hypergoat/internal/metrics"
 	"github.com/GainForest/hypergoat/internal/oauth"
 )
@@ -280,7 +279,7 @@ func (h *OAuthHandlers) HandleAuthorize(w http.ResponseWriter, r *http.Request) 
 	if !didpkg.IsValid(loginHint) {
 		resolvedDID, err := h.didResolver.ResolveHandleToDID(loginHint)
 		if err != nil {
-			slog.Warn("handle resolution failed", "handle", logsafe.String(loginHint), "error", err)
+			slog.Warn("handle resolution failed", "handle", loginHint, "error", err)
 			h.redirectWithError(w, redirectURI, "invalid_request", "Failed to resolve handle", state)
 			return
 		}
@@ -292,7 +291,7 @@ func (h *OAuthHandlers) HandleAuthorize(w http.ResponseWriter, r *http.Request) 
 	// failure shouldn't expose infrastructure to the browser.
 	authServer, _, err := h.bridge.ResolveAuthServer(ctx, did)
 	if err != nil {
-		slog.Warn("auth server resolution failed", "did", logsafe.DID(did), "error", err)
+		slog.Warn("auth server resolution failed", "did", did, "error", err)
 		h.redirectWithError(w, redirectURI, "server_error", "Failed to resolve authorization server", state)
 		return
 	}

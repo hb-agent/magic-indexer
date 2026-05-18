@@ -161,14 +161,6 @@ func (c *Consumer) Start(ctx context.Context) error {
 }
 
 // startInternal does the actual connection and event processing.
-//
-// A per-generation context is derived from the parent ctx so the
-// cursor flusher goroutine has a lifetime tied to THIS connection
-// generation, not the outer consumer lifetime. Without this each
-// reconnect would spawn a fresh cursor.Flusher.Run that only
-// exited on the outer ctx — flushers piled up across reconnects.
-// See overnight finding C-2; the labeler consumer uses the same
-// genDone pattern (different mechanism, identical intent).
 func (c *Consumer) startInternal(ctx context.Context) error {
 	// Clean up old client if exists (for reconnection scenarios)
 	c.clientMu.Lock()
@@ -201,22 +193,15 @@ func (c *Consumer) startInternal(ctx context.Context) error {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
-	// Derive a per-generation context that gets cancelled when this
-	// connection ends (Run returns). The cursor flusher reads from
-	// it via its Run ctx and exits accordingly.
-	genCtx, genCancel := context.WithCancel(ctx)
-	defer genCancel()
-
 	// Start cursor flusher
 	if !c.config.DisableCursor {
-		go c.cursorFlusher.Run(genCtx)
+		go c.cursorFlusher.Run(ctx)
 	}
 
 	// Start event processor
-	go c.processEvents(genCtx, c.client)
+	go c.processEvents(ctx, c.client)
 
-	// Run client (blocking). When this returns, the deferred
-	// genCancel fires and the goroutines started above wind down.
+	// Run client (blocking)
 	return c.client.Run(ctx)
 }
 

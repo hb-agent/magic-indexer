@@ -759,16 +759,9 @@ func (b *Builder) resolveRecordConnection(
 		},
 	}
 
-	// totalCount: only compute if requested (check AST). Apply the
-	// SAME filter the SELECT used so the value reflects the
-	// matching set, not the unfiltered collection size — the prior
-	// shape called GetCollectionCount(collection) regardless of the
-	// request's where/authors/labels/search/excludePds, returning a
-	// number that paginated UIs would happily display as "X of N"
-	// even when N had nothing to do with the visible result set
-	// (overnight finding P-1).
+	// totalCount: only compute if requested (check AST).
 	if isTotalCountRequested(p) {
-		count, err := repos.Records.CountByCollectionFiltered(p.Context, collection, filter, &filterGroup)
+		count, err := repos.Records.GetCollectionCount(p.Context, collection)
 		if err != nil {
 			slog.Warn("Failed to compute totalCount", "collection", collection, "error", err)
 			// Return nil (nullable) rather than failing the whole query.
