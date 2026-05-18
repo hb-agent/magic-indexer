@@ -90,40 +90,6 @@ func TestDIDDocument_GetHandle(t *testing.T) {
 	}
 }
 
-func TestIsDIDPLC(t *testing.T) {
-	tests := []struct {
-		did  string
-		want bool
-	}{
-		{"did:plc:example123", true},
-		{"did:web:example.com", false},
-		{"invalid", false},
-	}
-
-	for _, tt := range tests {
-		if got := IsDIDPLC(tt.did); got != tt.want {
-			t.Errorf("IsDIDPLC(%q) = %v, want %v", tt.did, got, tt.want)
-		}
-	}
-}
-
-func TestIsDIDWeb(t *testing.T) {
-	tests := []struct {
-		did  string
-		want bool
-	}{
-		{"did:plc:example123", false},
-		{"did:web:example.com", true},
-		{"invalid", false},
-	}
-
-	for _, tt := range tests {
-		if got := IsDIDWeb(tt.did); got != tt.want {
-			t.Errorf("IsDIDWeb(%q) = %v, want %v", tt.did, got, tt.want)
-		}
-	}
-}
-
 func TestDIDResolver_ResolvePLCDID(t *testing.T) {
 	// Create mock PLC directory server
 	plcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

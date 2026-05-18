@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -47,17 +48,30 @@ func TestPurgeTokenSigner_RoundTrip(t *testing.T) {
 func TestPurgeTokenSigner_RejectsTamperedSignature(t *testing.T) {
 	s, _ := newSigner(t)
 	token, _, _ := s.Sign(ScopeActorPurge, "did:plc:a", "did:plc:t", 1)
-	// Pick a different last byte than what's there. Previous version
-	// just appended "_" which is a no-op ~1/64 of runs (when the
-	// signature already ended in "_"), making the test flaky.
-	last := token[len(token)-1]
-	repl := byte('_')
-	if last == repl {
-		repl = 'A'
+	// Decode the signature, flip a bit in the first byte, re-encode,
+	// reassemble. Mutating a base64 character at the END of the
+	// signature is flaky: a 32-byte HMAC-SHA256 encoded in
+	// RawURLEncoding produces 43 chars where the last char only
+	// encodes 4 data bits + 2 don't-care bits, so swapping `_` ↔ `A`
+	// in the last position may not change the decoded bytes — and
+	// the signature then verifies as before. The fix is to mutate
+	// the decoded BYTES rather than the encoded chars, then re-
+	// encode; that guarantees the sig is semantically different.
+	parts := strings.SplitN(token, ".", 2)
+	if len(parts) != 2 {
+		t.Fatalf("token does not contain a `.` separator: %q", token)
 	}
-	tampered := token[:len(token)-1] + string(repl)
+	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode sig: %v", err)
+	}
+	if len(sigBytes) == 0 {
+		t.Fatal("empty sig")
+	}
+	sigBytes[0] ^= 0x01 // flip one bit so the bytes definitely differ
+	tampered := parts[0] + "." + base64.RawURLEncoding.EncodeToString(sigBytes)
 	if err := s.Verify(tampered, ScopeActorPurge, "did:plc:a", "did:plc:t", 1); !errors.Is(err, ErrPurgeTokenInvalid) {
-		t.Errorf("Verify(tampered sig, last %q → %q) = %v, want ErrPurgeTokenInvalid", last, repl, err)
+		t.Errorf("Verify(tampered sig, first sig byte XOR 0x01) = %v, want ErrPurgeTokenInvalid", err)
 	}
 }
 

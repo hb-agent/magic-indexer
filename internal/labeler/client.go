@@ -126,6 +126,13 @@ func (c *Client) buildURL() (*url.URL, error) {
 }
 
 // Run reads frames until the connection closes or ctx is cancelled.
+//
+// Run owns the events channel: when Run returns, it closes
+// c.events via the deferred close below. Stop only fires the
+// stop signal + closes the websocket conn; it never touches
+// c.events. This single-writer pattern prevents the
+// send-on-closed-channel panic that the prior shape allowed —
+// see overnight finding C-3.
 func (c *Client) Run(ctx context.Context) error {
 	c.mu.Lock()
 	conn := c.conn
@@ -134,6 +141,8 @@ func (c *Client) Run(ctx context.Context) error {
 	if conn == nil {
 		return fmt.Errorf("not connected")
 	}
+
+	defer close(c.events)
 
 	conn.SetPongHandler(func(string) error {
 		return conn.SetReadDeadline(time.Now().Add(defaultPongWait))
@@ -200,6 +209,11 @@ func (c *Client) Run(ctx context.Context) error {
 			case c.events <- &LabelMessage{Seq: lb.Seq, Labels: lb.Labels}:
 			case <-ctx.Done():
 				return ctx.Err()
+			case <-c.done:
+				// Stop() was called; exit cleanly without panicking
+				// on send-to-closed-channel. The deferred close
+				// above will close c.events as the single writer.
+				return nil
 			}
 		case hdr.Op == 1 && hdr.T == "#info":
 			ib, decodeErr := decodeInfoBody(body)
@@ -268,7 +282,11 @@ func (c *Client) pingLoop(ctx context.Context) {
 	}
 }
 
-// Stop closes the connection and the events channel.
+// Stop closes the connection. Stop fires c.done and closes
+// the websocket conn; Run sees one of these and returns. Run's
+// deferred close(c.events) then runs exactly once. Stop
+// deliberately does NOT touch c.events — that ownership lives
+// entirely with Run.
 func (c *Client) Stop() {
 	c.stopOnce.Do(func() {
 		close(c.done)
@@ -284,8 +302,6 @@ func (c *Client) Stop() {
 			_ = conn.Close()
 		}
 		c.mu.Unlock()
-
-		close(c.events)
 	})
 }
 
