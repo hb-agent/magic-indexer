@@ -119,9 +119,7 @@ func TestAuthMiddleware_RequireAuth_BearerToken_Valid(t *testing.T) {
 	var capturedScopes []string
 	handler := middleware.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedUserID = UserIDFromContext(r.Context())
-		if v, ok := r.Context().Value(ScopesKey).([]string); ok {
-			capturedScopes = v
-		}
+		capturedScopes = ScopesFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -595,6 +593,84 @@ func TestAuthMiddleware_OptionalAuth_InvalidToken(t *testing.T) {
 	}
 }
 
+func TestAuthMiddleware_RequireScope(t *testing.T) {
+	userID := "did:plc:test123"
+	scope := "atproto transition:generic read:profile"
+	tokens := &mockTokenStore{
+		tokens: map[string]*AccessToken{
+			"valid-token": {
+				Token:     "valid-token",
+				TokenType: TokenBearer,
+				UserID:    &userID,
+				Scope:     &scope,
+				ExpiresAt: time.Now().Add(time.Hour).Unix(),
+				Revoked:   false,
+				DPoPJKT:   nil,
+			},
+		},
+	}
+
+	middleware := NewAuthMiddleware(tokens, &mockJTIStore{}, "https://example.com")
+
+	t.Run("has required scope", func(t *testing.T) {
+		var called bool
+		handler := middleware.RequireAuth(
+			middleware.RequireScope("atproto")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			})),
+		)
+
+		req := httptest.NewRequest("GET", "/scoped", nil)
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if !called {
+			t.Error("handler should be called")
+		}
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected status 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("missing required scope", func(t *testing.T) {
+		handler := middleware.RequireAuth(
+			middleware.RequireScope("admin:write")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("handler should not be called")
+			})),
+		)
+
+		req := httptest.NewRequest("GET", "/scoped", nil)
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected status 403, got %d", rec.Code)
+		}
+	})
+
+	t.Run("multiple required scopes - all present", func(t *testing.T) {
+		var called bool
+		handler := middleware.RequireAuth(
+			middleware.RequireScope("atproto", "transition:generic")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			})),
+		)
+
+		req := httptest.NewRequest("GET", "/scoped", nil)
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if !called {
+			t.Error("handler should be called")
+		}
+	})
+}
+
 func TestAuthMiddleware_ServerError(t *testing.T) {
 	tokens := &mockTokenStore{
 		err: errors.New("database error"),
@@ -617,19 +693,39 @@ func TestAuthMiddleware_ServerError(t *testing.T) {
 	}
 }
 
-func TestUserIDFromContext(t *testing.T) {
+func TestContextHelpers(t *testing.T) {
 	t.Run("empty context", func(t *testing.T) {
 		ctx := context.Background()
+
 		if UserIDFromContext(ctx) != "" {
 			t.Error("expected empty user ID")
+		}
+		if AccessTokenFromContext(ctx) != nil {
+			t.Error("expected nil access token")
+		}
+		if ScopesFromContext(ctx) != nil {
+			t.Error("expected nil scopes")
 		}
 	})
 
 	t.Run("populated context", func(t *testing.T) {
 		userID := "did:plc:test123"
-		ctx := context.WithValue(context.Background(), UserIDKey, userID)
+		token := &AccessToken{Token: "test-token"}
+		scopes := []string{"atproto", "read:profile"}
+
+		ctx := context.Background()
+		ctx = context.WithValue(ctx, UserIDKey, userID)
+		ctx = context.WithValue(ctx, AccessTokenKey, token)
+		ctx = context.WithValue(ctx, ScopesKey, scopes)
+
 		if UserIDFromContext(ctx) != userID {
 			t.Errorf("expected user ID %q, got %q", userID, UserIDFromContext(ctx))
+		}
+		if AccessTokenFromContext(ctx) != token {
+			t.Error("expected access token")
+		}
+		if len(ScopesFromContext(ctx)) != 2 {
+			t.Errorf("expected 2 scopes, got %d", len(ScopesFromContext(ctx)))
 		}
 	})
 }
@@ -642,6 +738,7 @@ func TestAuthError_HTTPStatus(t *testing.T) {
 		{ErrMissingAuth, http.StatusUnauthorized},
 		{ErrInvalidToken, http.StatusUnauthorized},
 		{ErrTokenExpired, http.StatusUnauthorized},
+		{ErrInsufficientScope, http.StatusForbidden},
 		{ErrServerError, http.StatusInternalServerError},
 	}
 
@@ -652,4 +749,36 @@ func TestAuthError_HTTPStatus(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUseJTI(t *testing.T) {
+	t.Run("new JTI", func(t *testing.T) {
+		store := &mockJTIStore{jtis: make(map[string]bool)}
+		ok, err := UseJTI(context.Background(), store, "new-jti", time.Now().Unix())
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if !ok {
+			t.Error("expected ok=true for new JTI")
+		}
+	})
+
+	t.Run("existing JTI", func(t *testing.T) {
+		store := &mockJTIStore{jtis: map[string]bool{"existing-jti": true}}
+		ok, err := UseJTI(context.Background(), store, "existing-jti", time.Now().Unix())
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if ok {
+			t.Error("expected ok=false for existing JTI")
+		}
+	})
+
+	t.Run("store error", func(t *testing.T) {
+		store := &mockJTIStore{err: errors.New("database error")}
+		_, err := UseJTI(context.Background(), store, "any-jti", time.Now().Unix())
+		if err == nil {
+			t.Error("expected error")
+		}
+	})
 }

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -769,231 +768,13 @@ func (r *RecordsRepository) GetCount(ctx context.Context) (int64, error) {
 	return count, err
 }
 
-// GetCollectionCount returns the total number of records in a collection,
-// ignoring any caller-supplied filters. Used by paths that genuinely want
-// the unfiltered total (admin diagnostics, collection-stats). The GraphQL
-// resolver layer uses CountByCollectionFiltered instead — see
-// overnight finding P-1.
+// GetCollectionCount returns the total number of records in a collection.
 func (r *RecordsRepository) GetCollectionCount(ctx context.Context, collection string) (int64, error) {
 	var count int64
 	err := r.db.QueryRow(ctx,
 		"SELECT COUNT(*) FROM record WHERE collection = $1",
 		[]database.Value{database.Text(collection)}, &count)
 	return count, err
-}
-
-// CountByCollectionFiltered returns the count of records in a collection
-// matching the supplied RecordFilter + FilterGroup. Used by the GraphQL
-// connection resolver to compute `totalCount` for filtered queries —
-// without it, totalCount returned the unfiltered collection size
-// regardless of the request's where/authors/labels/search/excludePds
-// args (P-1, a correctness defect).
-//
-// The query reuses the same WHERE-clause builder as
-// GetByCollectionFiltered (extracted into buildFilteredWhereForCount)
-// so the two stay in lockstep — any future filter axis added to the
-// SELECT path automatically participates in the COUNT.
-//
-// The keyset cursor (afterSortValue/afterURI) is NOT applied: callers
-// want the total over the matching SET, not the count past a cursor
-// position. Sort options are also irrelevant for COUNT.
-func (r *RecordsRepository) CountByCollectionFiltered(
-	ctx context.Context,
-	collection string,
-	filter RecordFilter,
-	filterGroup *FilterGroup,
-) (int64, error) {
-	// No collection-name validation needed: the SQL emitted by this
-	// method binds collection as $1 (never interpolated into the
-	// query string), so an untrusted value can't escape parameter
-	// binding. The DDL paths (CreateFieldIndex / DropFieldIndex)
-	// run validateCollectionName because Postgres does not
-	// parameterise object identifiers — those paths build raw DDL
-	// strings and have a real injection surface. The generic
-	// `records(collection: String!)` resolver passes user-supplied
-	// collection through to this method; parameter binding is what
-	// keeps that safe, not upstream validation.
-
-	// Authors slice empty-but-non-nil → match nothing (same load-
-	// bearing semantic as GetByCollectionFiltered's short-circuit).
-	if filter.Authors != nil && len(filter.Authors) == 0 {
-		return 0, nil
-	}
-	if len(filter.Authors) > MaxAuthorsFilterSize {
-		return 0, ErrAuthorsFilterTooLarge
-	}
-	if len(filter.PDSExclude) > MaxPDSExcludeSize {
-		return 0, ErrPDSExcludeTooLarge
-	}
-
-	// Fast path: no filters at all → use the cheap collection-only COUNT.
-	hasFieldFilters := filterGroup != nil && !filterGroup.IsEmpty()
-	if filter.Labels.IsEmpty() && len(filter.Authors) == 0 && filter.Search == "" && len(filter.PDSExclude) == 0 && !hasFieldFilters {
-		return r.GetCollectionCount(ctx, collection)
-	}
-
-	authors := filter.Authors
-	if len(authors) > 1 {
-		authors = slices.Clone(authors)
-		sort.Strings(authors)
-		authors = slices.Compact(authors)
-	}
-
-	whereClauses, args, err := r.buildFilteredWhereForCount(collection, authors, filter, filterGroup)
-	if err != nil {
-		return 0, err
-	}
-
-	sqlStr := fmt.Sprintf(
-		"SELECT COUNT(*) FROM %s WHERE %s",
-		r.recordTable(),
-		strings.Join(whereClauses, " AND "),
-	)
-
-	var count int64
-	row := r.db.DB().QueryRowContext(ctx, sqlStr, args...)
-	if err := row.Scan(&count); err != nil {
-		return 0, fmt.Errorf("count filtered records: %w", err)
-	}
-	return count, nil
-}
-
-// buildFilteredWhereForCount builds the WHERE-clause fragments common
-// to filtered SELECTs and COUNTs. The cursor + ORDER BY apply only to
-// SELECTs and are added by the caller (GetByCollectionFiltered);
-// CountByCollectionFiltered omits them entirely.
-//
-// `authors` must already be deduped, sorted, and below the cap — the
-// caller is responsible for the load-bearing nil-vs-empty
-// short-circuit and the size validation; this helper just emits SQL.
-func (r *RecordsRepository) buildFilteredWhereForCount(
-	collection string,
-	authors []string,
-	filter RecordFilter,
-	filterGroup *FilterGroup,
-) ([]string, []any, error) {
-	var (
-		whereClauses []string
-		args         []any
-	)
-	paramIdx := 1
-	ph := func() string {
-		s := fmt.Sprintf("$%d", paramIdx)
-		paramIdx++
-		return s
-	}
-	negFalse, negTrue := "false", "true"
-	nowLit := "NOW()"
-
-	// collection = ?
-	whereClauses = append(whereClauses, fmt.Sprintf("r.collection = %s", ph()))
-	args = append(args, collection)
-
-	// authors: r.did IN (?, ?, ...)
-	if len(authors) > 0 {
-		didPhs := make([]string, len(authors))
-		for i, did := range authors {
-			didPhs[i] = ph()
-			args = append(args, did)
-		}
-		whereClauses = append(whereClauses,
-			fmt.Sprintf("r.did IN (%s)", strings.Join(didPhs, ", ")))
-	}
-
-	// Full-text search. Metric emission is deliberately omitted
-	// here: this helper is called from the COUNT path
-	// (CountByCollectionFiltered) which runs ALONGSIDE the SELECT
-	// path on every filtered+totalCount request. If both emitted
-	// the metric we'd double-count the search-applied counter.
-	// The SELECT path's own copy still emits;
-	// CountByCollectionFiltered is a derived value and shouldn't
-	// double-fire.
-	if filter.Search != "" {
-		search := filter.Search
-		if len(search) > MaxSearchLength {
-			search = search[:MaxSearchLength]
-		}
-		whereClauses = append(whereClauses,
-			fmt.Sprintf("r.search_vector @@ plainto_tsquery('english', %s)", ph()))
-		args = append(args, search)
-	}
-
-	// Field filters from `where` argument.
-	if filterGroup != nil && !filterGroup.IsEmpty() {
-		fieldClause, fieldParams, err := BuildFilterGroupClause(*filterGroup, paramIdx)
-		if err != nil {
-			return nil, nil, fmt.Errorf("field filter error: %w", err)
-		}
-		if fieldClause != "" {
-			whereClauses = append(whereClauses, "("+fieldClause+")")
-			args = append(args, fieldParams...)
-			paramIdx += len(fieldParams)
-		}
-	}
-
-	// PDS exclusion.
-	if len(filter.PDSExclude) > 0 {
-		pdsList := filter.PDSExclude
-		if len(pdsList) > 1 {
-			pdsList = slices.Clone(pdsList)
-			sort.Strings(pdsList)
-			pdsList = slices.Compact(pdsList)
-		}
-		pdsPhs := make([]string, len(pdsList))
-		for i, pds := range pdsList {
-			pdsPhs[i] = ph()
-			args = append(args, pds)
-		}
-		whereClauses = append(whereClauses,
-			fmt.Sprintf("(a.pds IS NULL OR a.pds NOT IN (%s))", strings.Join(pdsPhs, ", ")))
-	}
-
-	// labelFilterSub builds an EXISTS / NOT EXISTS subquery for the
-	// Include or Exclude set; same shape as in GetByCollectionFiltered.
-	labelFilterSub := func(vals []string, exists bool) string {
-		valPhs := make([]string, len(vals))
-		for i, v := range vals {
-			valPhs[i] = ph()
-			args = append(args, v)
-		}
-		srcClause := ""
-		if len(filter.Labels.LabelerSrcs) > 0 {
-			srcPhs := make([]string, len(filter.Labels.LabelerSrcs))
-			for i, s := range filter.Labels.LabelerSrcs {
-				srcPhs[i] = ph()
-				args = append(args, s)
-			}
-			srcClause = " AND l.src IN (" + strings.Join(srcPhs, ", ") + ")"
-		}
-		verb := "EXISTS"
-		if !exists {
-			verb = "NOT EXISTS"
-		}
-		return fmt.Sprintf(`%s (
-			SELECT 1 FROM label l
-			WHERE l.uri = r.uri
-			  AND l.neg = %s
-			  AND (l.exp IS NULL OR l.exp > %s)
-			  AND l.val IN (%s)%s
-			  AND NOT EXISTS (
-			    SELECT 1 FROM label neg
-			    WHERE neg.uri = l.uri
-			      AND neg.src = l.src
-			      AND neg.val = l.val
-			      AND neg.neg = %s
-			      AND neg.cts >= l.cts
-			  )
-		)`, verb, negFalse, nowLit, strings.Join(valPhs, ", "), srcClause, negTrue)
-	}
-
-	if len(filter.Labels.Include) > 0 {
-		whereClauses = append(whereClauses, labelFilterSub(filter.Labels.Include, true))
-	}
-	if len(filter.Labels.Exclude) > 0 {
-		whereClauses = append(whereClauses, labelFilterSub(filter.Labels.Exclude, false))
-	}
-
-	return whereClauses, args, nil
 }
 
 // CountAwardsByBadgeURI returns the number of
@@ -1033,51 +814,9 @@ func fieldIndexName(collection, field string) string {
 	return fmt.Sprintf("idx_record_%s_%s", col, field)
 }
 
-// collectionNameRegex is the strict shape an NSID-style collection
-// name must match before it can be interpolated into a DDL string.
-// Per the AT Protocol NSID spec: dot-separated segments, each
-// matching [a-z][a-z0-9-]* (no leading digit, no consecutive dots,
-// no uppercase, no special characters). The total-length cap of 256
-// is much larger than any real NSID; it's a defence against
-// pathological inputs, not a spec ceiling.
-//
-// This is the only validator standing between an admin-supplied
-// `collection` string and a CREATE/DROP INDEX DDL — Postgres does
-// not parameterise object identifiers, so the value is interpolated
-// raw into the SQL. The regex must NEVER be loosened without a
-// review of the call sites in CreateFieldIndex / DropFieldIndex.
-var collectionNameRegex = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z][a-zA-Z0-9-]*){2,}$`)
-
-// validateCollectionName returns an error if the given string is not
-// safe to interpolate into a DDL identifier or literal. Used by
-// CreateFieldIndex and DropFieldIndex; should be the FIRST line of
-// every admin path that consumes a collection name into raw SQL.
-func validateCollectionName(collection string) error {
-	if collection == "" {
-		return errors.New("collection name is required")
-	}
-	if len(collection) > 256 {
-		return fmt.Errorf("collection name exceeds 256-character cap (got %d)", len(collection))
-	}
-	if !collectionNameRegex.MatchString(collection) {
-		return fmt.Errorf("invalid collection name %q: must match NSID format [a-z][a-z0-9]*(.[a-z][a-zA-Z0-9-]*){2,}", collection)
-	}
-	return nil
-}
-
 // CreateFieldIndex creates a partial expression index on a JSON field for a
 // specific collection. Runs outside a transaction (CONCURRENTLY requirement).
-//
-// SECURITY: `collection` is interpolated raw into the DDL — Postgres
-// does not parameterise object identifiers or partial-index
-// predicates. validateCollectionName is the only gate that ensures
-// the value cannot break out of the single-quote wrapping or
-// otherwise inject SQL. Treat any change to that validator as a
-// security diff.
 func (r *RecordsRepository) CreateFieldIndex(ctx context.Context, collection, field string) (string, error) {
-	if err := validateCollectionName(collection); err != nil {
-		return "", err
-	}
 	if err := ValidateFieldName(field); err != nil {
 		return "", fmt.Errorf("invalid field name: %w", err)
 	}
@@ -1095,11 +834,7 @@ func (r *RecordsRepository) CreateFieldIndex(ctx context.Context, collection, fi
 }
 
 // DropFieldIndex drops a previously created field expression index.
-// See CreateFieldIndex for the security note on the collection arg.
 func (r *RecordsRepository) DropFieldIndex(ctx context.Context, collection, field string) error {
-	if err := validateCollectionName(collection); err != nil {
-		return err
-	}
 	if err := ValidateFieldName(field); err != nil {
 		return fmt.Errorf("invalid field name: %w", err)
 	}

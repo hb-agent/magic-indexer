@@ -600,27 +600,6 @@ This generates `CREATE INDEX CONCURRENTLY ON record ((json->>'field')) WHERE col
 
 Nested JSON paths are supported at the SQL layer via the `__` separator (e.g., `metadata__source` → `json->'metadata'->>'source'`), but auto-generating nested WhereInput fields from lexicons is deferred (#40).
 
-### Recovering from an INVALID `CONCURRENTLY` index
-
-Several migrations (026, 029, 030, plus any `createFieldIndex` mutation) use `CREATE INDEX CONCURRENTLY IF NOT EXISTS`. The `IF NOT EXISTS` guard normally protects against double-runs, but it has a foot-gun: if the initial `CONCURRENTLY` build fails partway through (lock acquisition timeout, signal, replica lag), Postgres leaves a `INVALID` index entry in `pg_index`. The next `CREATE INDEX CONCURRENTLY IF NOT EXISTS` then SEES the INVALID entry, treats it as "already exists," and skips creation. The migration completes successfully, the planner refuses to use the INVALID index, and queries silently degrade to sequential scans.
-
-Detection: connect via `railway connect Postgres` and run
-```sql
-SELECT i.relname, ix.indisvalid
-FROM pg_class i
-JOIN pg_index ix ON i.oid = ix.indexrelid
-WHERE i.relname LIKE 'idx_record_%' AND NOT ix.indisvalid;
-```
-Any rows returned are stuck INVALID indexes.
-
-Recovery (one-shot, online — safe to run against production):
-```sql
-DROP INDEX CONCURRENTLY <name>;   -- e.g. idx_record_award_badge_uri
-```
-Then re-run the migration via `make db-migrate` (which is a no-op for migrations already at the latest version — for an admin-mutation index, re-issue the `createFieldIndex` call).
-
-Both DROP and CREATE must be `CONCURRENTLY` to avoid taking an exclusive lock on the `record` table; both must also run outside a transaction (`-- no-transaction` directive on the migration file, or via a direct connection).
-
 ---
 
 ## Notifications

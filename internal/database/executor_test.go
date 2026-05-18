@@ -54,6 +54,11 @@ func TestErrorConstructors(t *testing.T) {
 			wantType: "query",
 		},
 		{
+			name:     "DecodeError",
+			err:      DecodeError("decode failed", cause),
+			wantType: "decode",
+		},
+		{
 			name:     "ConstraintError",
 			err:      ConstraintError("constraint violated", cause),
 			wantType: "constraint",

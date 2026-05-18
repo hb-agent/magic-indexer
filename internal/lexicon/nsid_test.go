@@ -85,6 +85,32 @@ func TestToDomainParts(t *testing.T) {
 	}
 }
 
+func TestIsValidNSID(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		{"app.bsky.feed.post", true},
+		{"com.atproto.label.defs", true},
+		{"xyz.statusphere.status", true},
+		{"app.bsky", false},       // Too few segments
+		{"simple", false},         // Too few segments
+		{"App.Bsky.Feed", false},  // Uppercase
+		{"app..bsky.feed", false}, // Empty segment
+		{"app.bsky.-feed", false}, // Starts with hyphen
+		{"app.bsky.feed-", false}, // Ends with hyphen
+		{"app.bsky.feed-post", true},
+		{"app.bsky.feed123", true},
+	}
+
+	for _, tt := range tests {
+		result := IsValidNSID(tt.input)
+		if result != tt.expected {
+			t.Errorf("IsValidNSID(%q) = %v, want %v", tt.input, result, tt.expected)
+		}
+	}
+}
+
 func TestParseRef(t *testing.T) {
 	tests := []struct {
 		input         string

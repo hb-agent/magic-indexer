@@ -367,3 +367,13 @@ func rejectPrivateHost(host string) error {
 	}
 	return nil
 }
+
+// IsDIDPLC checks if a DID uses the plc method.
+func IsDIDPLC(did string) bool {
+	return strings.HasPrefix(did, "did:plc:")
+}
+
+// IsDIDWeb checks if a DID uses the web method.
+func IsDIDWeb(did string) bool {
+	return strings.HasPrefix(did, "did:web:")
+}

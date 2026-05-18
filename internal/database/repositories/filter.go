@@ -367,7 +367,7 @@ func buildFilterGroupRecursive(group FilterGroup, paramIdx, depth int, alias str
 		}
 
 		// Run value-level validation here so the recursive path
-		// matches BuildFilterGroupClause's contract. Without this
+		// matches `BuildFieldFilterClause`'s contract. Without this
 		// pass, filters reaching the recursive builder skip checks
 		// like the `in`/`ini` non-empty / size guards and the
 		// `eqi`/`ini` IsJSON guard, which are only enforced when
@@ -591,6 +591,51 @@ func validateInListShape(value interface{}, opName string) error {
 		return fmt.Errorf("%s operator requires a list value", opName)
 	}
 	return nil
+}
+
+// BuildFieldFilterClause builds the WHERE clause fragment for a set of field filters.
+// Returns the clause (without WHERE keyword), the parameter values, and any error.
+// paramOffset is the starting parameter number (e.g., 3 means first param is $3).
+//
+// Legacy non-recursive path. Used by callers that don't compose
+// _and/_or. Always emits against the outer record alias "r"; the
+// joined-where path goes through buildFilterGroupClauseWithAlias.
+func BuildFieldFilterClause(filters []FieldFilter, paramOffset int) (string, []interface{}, error) {
+	if len(filters) > MaxFilterConditions {
+		return "", nil, fmt.Errorf("too many filter conditions (%d), maximum is %d", len(filters), MaxFilterConditions)
+	}
+
+	var clauses []string
+	var params []interface{}
+	paramIdx := paramOffset
+	const alias = "r"
+
+	for _, f := range filters {
+		if err := f.Validate(); err != nil {
+			return "", nil, fmt.Errorf("invalid filter on field %q: %w", f.FieldName, err)
+		}
+
+		// Handle isNull separately.
+		if f.IsNull != nil {
+			expr := jsonExtract(alias, f.FieldName, f.IsJSON)
+			if *f.IsNull {
+				clauses = append(clauses, expr+" IS NULL")
+			} else {
+				clauses = append(clauses, expr+" IS NOT NULL")
+			}
+			continue
+		}
+
+		clause, newParams, nextIdx, err := buildSingleFilter(f, paramIdx, alias)
+		if err != nil {
+			return "", nil, err
+		}
+		clauses = append(clauses, clause)
+		params = append(params, newParams...)
+		paramIdx = nextIdx
+	}
+
+	return strings.Join(clauses, " AND "), params, nil
 }
 
 // buildSingleFilter dispatches a single FieldFilter to its SQL

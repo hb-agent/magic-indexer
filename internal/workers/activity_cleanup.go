@@ -9,21 +9,9 @@ import (
 	"github.com/GainForest/hypergoat/internal/database/repositories"
 )
 
-// activityCleaner is the minimal surface ActivityCleanupWorker needs
-// from the activity repository. Extracted so the worker can be tested
-// against a fake without depending on a real Postgres instance — the
-// previous test was a tautology that re-implemented the production
-// goroutine inline instead of exercising it, which is how the bug
-// where the ticker was Stop'd outside the goroutine reached
-// production (overnight finding C-1 + T-1).
-type activityCleaner interface {
-	CleanupOldActivity(ctx context.Context, retentionHrs int) error
-	OrphanPendingActivity(ctx context.Context, olderThanMinutes int) (int64, error)
-}
-
 // ActivityCleanupWorker periodically cleans up old activity entries.
 type ActivityCleanupWorker struct {
-	activity     activityCleaner
+	activity     *repositories.JetstreamActivityRepository
 	interval     time.Duration
 	retentionHrs int
 	stop         chan struct{}
@@ -42,29 +30,19 @@ func NewActivityCleanupWorker(activity *repositories.JetstreamActivityRepository
 }
 
 // Start begins the cleanup worker.
-//
-// The ticker is created INSIDE the goroutine — the previous shape
-// created it in Start() and registered `defer ticker.Stop()` in
-// Start()'s scope. That defer fired the moment Start() returned,
-// stopping the ticker before the goroutine ever read from its
-// channel. The cleanup() call only ever ran once, at boot, and the
-// 7-day retention + 10-minute orphan janitor were silently dead in
-// production for the lifetime of this worker. See overnight finding
-// C-1 + T-1.
 func (w *ActivityCleanupWorker) Start(ctx context.Context) {
 	slog.Info("Starting activity cleanup worker",
 		"interval", w.interval,
 		"retention_hours", w.retentionHrs)
 
-	// Run immediately on start, before the periodic loop, so the first
-	// cleanup happens at boot rather than waiting for the first tick.
+	// Run immediately on start
 	w.cleanup(ctx)
+
+	ticker := time.NewTicker(w.interval)
+	defer ticker.Stop()
 
 	go func() {
 		defer close(w.done)
-
-		ticker := time.NewTicker(w.interval)
-		defer ticker.Stop()
 
 		for {
 			select {
